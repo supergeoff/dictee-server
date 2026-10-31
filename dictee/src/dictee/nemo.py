@@ -1,11 +1,13 @@
 """Client de NeMo-Speech.cpp : transcription en continu, diarisation, synthèse et liste des voix.
 
 Rien n'est journalisé ici : ni le texte transcrit, ni le texte à dire, ni l'audio. Les messages des exceptions ne
-reprennent que ce que NeMo dit de son propre fonctionnement.
+reprennent que ce que NeMo dit de son propre fonctionnement. La bibliothèque `websockets` journalise elle aussi, mais
+elle est réduite au silence en DEBUG (voir `_WEBSOCKETS_LOGGER`).
 """
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator, Buffer
 
 import httpx
@@ -34,6 +36,12 @@ MODELS_TIMEOUT = 10.0
 
 _COMPLETED = "conversation.item.input_audio_transcription.completed"
 _COMMITTED = "input_audio_buffer.committed"
+
+# À son niveau DEBUG, `websockets` écrit chaque en-tête de la poignée de main (dont la clé d'API) et un extrait de
+# chaque trame (dont la session, qui porte le glossaire et la consigne). Il lit ce niveau à la création de la
+# connexion : un logger dédié, au niveau INFO fixé, reste muet en DEBUG quel que soit le réglage du logger racine.
+_WEBSOCKETS_LOGGER = logging.getLogger("dictee.nemo.websockets")
+_WEBSOCKETS_LOGGER.setLevel(logging.INFO)
 
 
 class NemoUnavailable(Exception):
@@ -125,6 +133,7 @@ class NemoClient:
                 ping_interval=None,
                 open_timeout=OPEN_TIMEOUT,
                 close_timeout=CLOSE_TIMEOUT,
+                logger=_WEBSOCKETS_LOGGER,
             )
         except InvalidStatus as exc:
             status = exc.response.status_code

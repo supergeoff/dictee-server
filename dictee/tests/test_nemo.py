@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import logging
 import socket
 import struct
 import wave
@@ -10,6 +11,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
@@ -118,7 +120,10 @@ class FakeNemoRealtime:
 @pytest.fixture
 async def fake_ws():
     fake = FakeNemoRealtime()
-    server = await serve(fake.handle, "127.0.0.1", 0, process_request=fake.process_request)
+    # Le faux serveur ne journalise rien en DEBUG : le test des journaux ne lit que ce que le client écrit.
+    quiet = logging.getLogger("tests.fake_nemo")
+    quiet.setLevel(logging.INFO)
+    server = await serve(fake.handle, "127.0.0.1", 0, process_request=fake.process_request, logger=quiet)
     fake.port = server.sockets[0].getsockname()[1]
     yield fake
     server.close()
@@ -343,6 +348,22 @@ async def test_connection_options_fit_nemo(fake_ws, nemo, monkeypatch):
     assert seen["ping_interval"] is None
     assert seen["max_size"] is None
     assert seen["close_timeout"] == nemo_module.CLOSE_TIMEOUT < 10
+
+
+async def test_logs_never_carry_the_api_key_nor_the_session_content(fake_ws, nemo, caplog):
+    # À son niveau DEBUG, `websockets` écrit les en-têtes de la poignée de main et un extrait de chaque trame.
+    caplog.set_level(logging.DEBUG)
+    caplog.set_level(logging.DEBUG, logger="websockets")
+    # Témoin : une connexion qui garde le journal par défaut de `websockets` laisse bien la clé dans le journal.
+    async with connect(f"ws://127.0.0.1:{fake_ws.port}", additional_headers={"Authorization": "Bearer control-key"}):
+        pass
+    assert "Bearer control-key" in caplog.text
+    caplog.clear()
+
+    await transcribe(nemo, phrases=["Sortformer"], prompt="Nemotron")
+    assert fake_ws.authorization == "Bearer test-nemo-key"  # la session a bien eu lieu, clé comprise
+    for secret in ("test-nemo-key", "Sortformer", "Nemotron", "speech_contexts"):
+        assert secret not in caplog.text
 
 
 # --- Routes HTTP ---
