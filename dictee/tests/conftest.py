@@ -2,6 +2,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from dictee.app import create_app
+from dictee.db import Database
 from dictee.settings import Settings
 
 REQUIRED_ENV = {
@@ -18,8 +19,24 @@ REQUIRED_ENV = {
 
 
 @pytest.fixture
-def settings(tmp_path):
-    return Settings.from_env({**REQUIRED_ENV, "DB_PATH": str(tmp_path / "dictee.db")})
+def db_path(tmp_path):
+    return str(tmp_path / "dictee.db")
+
+
+@pytest.fixture
+def settings(db_path):
+    return Settings.from_env({**REQUIRED_ENV, "DB_PATH": db_path})
+
+
+@pytest.fixture
+def db(db_path):
+    # Même fichier que celui de l'app : la base ouvre une connexion par opération.
+    return Database(db_path)
+
+
+@pytest.fixture
+def service_headers(settings):
+    return {"Authorization": f"Bearer {settings.openwebui_service_key}"}
 
 
 @pytest.fixture

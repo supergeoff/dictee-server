@@ -10,6 +10,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from dictee.auth import require_caller
+from dictee.db import Database
 from dictee.errors import ApiError, handle_api_error, handle_http_exception
 from dictee.settings import Settings
 
@@ -21,6 +23,7 @@ async def health(request: Request) -> JSONResponse:
 
 
 async def list_models(request: Request) -> JSONResponse:
+    require_caller(request)
     data = [{"id": model_id, "object": "model", "created": 0, "owned_by": "dictee"} for model_id in MODEL_IDS]
     return JSONResponse({"object": "list", "data": data})
 
@@ -28,9 +31,12 @@ async def list_models(request: Request) -> JSONResponse:
 def create_app(settings: Settings, *, nemo=None, http: httpx.AsyncClient | None = None) -> Starlette:
     """Construit l'application.
 
-    `settings`, `nemo` et `http` sont rangés dans `app.state`. Sans `http`, l'app crée
+    `settings`, `nemo`, `http` et la base de données sont rangés dans `app.state`. La base
+    s'ouvre à `settings.db_path`, dossier parent créé au besoin. Sans `http`, l'app crée
     son client à son démarrage et le ferme à son arrêt ; un client fourni reste à la
     charge de l'appelant. Le client de NeMo n'existe pas encore : `nemo` reste à `None`.
+
+    Chaque route `/v1` appelle `require_caller` en premier ; `/health` reste ouverte.
     """
 
     @contextlib.asynccontextmanager
@@ -59,6 +65,7 @@ def create_app(settings: Settings, *, nemo=None, http: httpx.AsyncClient | None 
         lifespan=lifespan,
     )
     app.state.settings = settings
+    app.state.db = Database(settings.db_path)
     app.state.nemo = nemo
     app.state.http = http
     return app
