@@ -2,9 +2,11 @@ import asyncio
 import io
 import math
 import struct
+import subprocess
 import wave
 from collections.abc import AsyncIterator
 from contextlib import aclosing
+from pathlib import Path
 
 import pytest
 from conftest import make_audio
@@ -95,6 +97,70 @@ async def test_input_without_any_sample_raises(tmp_path):
         w.setframerate(16000)
     with pytest.raises(AudioDecodeError):
         await to_wav16k(empty)
+
+
+def decoded_without_restrictions(src: Path) -> int:
+    """Octets de PCM 16 kHz mono que ffmpeg tire du fichier sans aucune liste blanche.
+
+    Quand `to_wav16k` refuse un fichier, ce nombre prouve que la liste blanche est seule en cause : le fichier de test
+    est bien formé et ffmpeg le décoderait.
+    """
+    command = ["ffmpeg", "-nostdin", "-loglevel", "error", "-i", str(src)]
+    result = subprocess.run([*command, "-ac", "1", "-ar", "16000", "-f", "s16le", "pipe:1"], capture_output=True)
+    return len(result.stdout)
+
+
+@pytest.mark.parametrize("segment", ["segment.aac", "segment.mp3"])
+async def test_refuses_an_hls_playlist_that_points_to_a_local_file(tmp_path, segment):
+    # Le démuxeur HLS de ffmpeg refuse de lui-même un segment WAV, qui ne prouverait donc rien : les segments sont
+    # en aac ou en mp3, qu'il lit.
+    make_audio(tmp_path, segment, seconds=1.0)
+    playlist = tmp_path / "list.m3u8"
+    header = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n"
+    playlist.write_text(f"{header}#EXTINF:1.0,\n{segment}\n#EXT-X-ENDLIST\n")
+    assert decoded_without_restrictions(playlist) > 30000
+    with pytest.raises(AudioDecodeError, match="not on whitelist"):
+        await to_wav16k(playlist)
+
+
+async def test_refuses_a_concat_list_that_points_to_a_local_file(tmp_path):
+    make_audio(tmp_path, "segment.wav", seconds=1.0)
+    listing = tmp_path / "upload"  # le démuxeur concat se reconnaît à son contenu, pas à l'extension
+    listing.write_text("ffconcat version 1.0\nfile segment.wav\n")
+    assert decoded_without_restrictions(listing) > 30000
+    with pytest.raises(AudioDecodeError, match="not on whitelist"):
+        await to_wav16k(listing)
+
+
+@pytest.mark.parametrize(
+    "name,codec",
+    [
+        ("tone.mp3", None),
+        ("tone.m4a", None),
+        ("tone.mp4", None),
+        ("tone.3gp", "aac"),
+        ("tone.ogg", "libopus"),
+        ("tone.webm", "libopus"),
+        ("tone.flac", None),
+        ("tone.aac", None),
+        ("tone.aiff", None),
+        ("tone.caf", None),
+        ("tone.w64", None),
+        ("tone.wav", None),
+    ],
+)
+async def test_decodes_every_container_the_service_accepts(tmp_path, name, codec):
+    wav = await to_wav16k(make_audio(tmp_path, name, seconds=1.0, codec=codec))
+    assert abs(wav_duration(wav) - 1.0) < 0.15
+
+
+async def test_decodes_an_amr_file(tmp_path):
+    # Le conteneur AMR n'a pas d'encodeur dans l'image : le fichier est écrit à la main, une seconde de trames
+    # à 4,75 kbit/s (cinquante trames de vingt millisecondes, un octet d'en-tête et douze octets de données).
+    amr = tmp_path / "voice.amr"
+    amr.write_bytes(b"#!AMR\n" + (b"\x04" + bytes(12)) * 50)
+    wav = await to_wav16k(amr)
+    assert abs(wav_duration(wav) - 1.0) < 0.15
 
 
 def test_atempo_chain():

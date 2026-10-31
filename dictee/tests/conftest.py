@@ -27,8 +27,13 @@ def anyio_backend():
     return "asyncio"
 
 
-def make_audio(directory: Path, name: str, *, seconds: float = 1.0, rate: int = 16000, channels: int = 1) -> Path:
-    """Fabrique un fichier audio d'un sinus avec ffmpeg ; le format suit l'extension de `name`."""
+def make_audio(
+    directory: Path, name: str, *, seconds: float = 1.0, rate: int = 16000, channels: int = 1, codec: str | None = None
+) -> Path:
+    """Fabrique un fichier audio d'un sinus avec ffmpeg ; le format suit l'extension de `name`.
+
+    Sans `codec`, ffmpeg prend celui que le format de sortie choisit par défaut.
+    """
     path = directory / name
     subprocess.run(
         [
@@ -42,6 +47,7 @@ def make_audio(directory: Path, name: str, *, seconds: float = 1.0, rate: int = 
             f"sine=frequency=440:duration={seconds}:sample_rate={rate}",
             "-ac",
             str(channels),
+            *(["-c:a", codec] if codec else []),
             "-y",
             str(path),
         ],

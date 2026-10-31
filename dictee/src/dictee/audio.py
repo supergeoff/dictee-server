@@ -13,7 +13,7 @@ SPEECH_RATE = 24000
 # Taille des lectures sur la sortie de ffmpeg : de petits blocs, pour que le client reçoive le son au fil de l'eau.
 READ_SIZE = 4096
 # Fin de la sortie d'erreur de ffmpeg conservée pour les messages.
-STDERR_TAIL = 300
+STDERR_TAIL = 500
 
 # atempo accepte un facteur entre 0,5 et 2 par étage ; la chaîne en enchaîne deux pour couvrir [0,25 ; 4].
 MIN_SPEED = 0.25
@@ -27,6 +27,12 @@ OUTPUT_FORMATS: dict[str, str] = {
     "wav": "audio/wav",
     "pcm": "audio/pcm",
 }
+
+# Démuxeurs acceptés pour un envoi, sous leur nom dans `ffmpeg -demuxers` : `mov` couvre mp4, m4a et 3gp, `matroska`
+# couvre webm. L'envoi vient d'un client et ffmpeg devine le format d'après le contenu : tout démuxeur absent de cette
+# liste est refusé, en particulier ceux qui lisent d'autres fichiers ou d'autres adresses que le fichier envoyé
+# (playlists HLS, listes concat).
+INPUT_DEMUXERS = ("mp3", "mov", "ogg", "wav", "w64", "flac", "matroska", "aac", "aiff", "caf", "amr")
 
 # Codec et conteneur de chaque format, en options de sortie de ffmpeg.
 _ENCODERS: dict[str, tuple[str, ...]] = {
@@ -57,6 +63,7 @@ async def to_wav16k(src: Path) -> bytes:
 
     ffmpeg lit le chemin et non un tube : un m4a d'Android range souvent son index en fin de fichier, que ffmpeg
     ne peut atteindre qu'en se déplaçant dans le fichier. Il rend du PCM brut, et l'en-tête WAV vient du module `wave`.
+    Un fichier dont le format n'est pas dans `INPUT_DEMUXERS` lève `AudioDecodeError`, comme un fichier illisible.
     """
     process = await asyncio.create_subprocess_exec(
         "ffmpeg",
@@ -64,6 +71,11 @@ async def to_wav16k(src: Path) -> bytes:
         "-hide_banner",
         "-loglevel",
         "error",
+        # Options d'entrée, avant `-i` : seul le protocole `file` et seuls les démuxeurs de `INPUT_DEMUXERS`.
+        "-protocol_whitelist",
+        "file",
+        "-format_whitelist",
+        ",".join(INPUT_DEMUXERS),
         "-i",
         str(src),
         "-ac",
