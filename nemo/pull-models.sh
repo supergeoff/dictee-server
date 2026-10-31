@@ -27,6 +27,12 @@ ASR_REVISION=ea30d66debe3740a08b573244286791d423d6b3e
 MAGPIE_REPO=nvidia/magpie_tts_multilingual_357m
 MAGPIE_FILE=magpie_tts_multilingual_357m.v2607.q8_0.gguf
 MAGPIE_REVISION=446bff55e1fe3d3aa29c771574e7d2b0fa322990
+# La diarisation et le codec gardent la révision de l'index de NeMo ; le script ne vérifie
+# que leur dépôt et leur nom de fichier.
+DIAR_REPO=nvidia/Nemotron-3-Diarization
+DIAR_FILE=Nemotron-3-Diarization.q8_0.gguf
+CODEC_REPO=nvidia/nemo-nano-codec-22khz-1.89kbps-21.5fps
+CODEC_FILE=nemo_nano_codec_22khz_1.89kbps_21.5fps.decoder.f16.gguf
 
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
@@ -48,6 +54,20 @@ pin_artifact() {
         .revision = $rev
         | .artifacts |= map(if .role == $role then .filename = $file | .size = $size | .sha256 = $sha else . end)
       else . end)' "$1" > "$2"
+  # Le filtre ne change rien, sans erreur, si le dépôt ou le rôle n'existe plus dans l'index
+  # (schéma modifié par une version ultérieure de NeMo) : on relit donc l'index produit.
+  if ! jq -e --arg repo "$3" --arg rev "$4" --arg role "$5" --arg file "$6" \
+       --argjson size "$size" --arg sha "$sha" '
+    [.models[] | select(.repo == $repo)] as $m
+    | ($m | length) == 1
+      and $m[0].revision == $rev
+      and ([$m[0].artifacts[] | select(.role == $role)] | length) == 1
+      and ([$m[0].artifacts[] | select(.role == $role and .filename == $file
+                                       and .size == $size and .sha256 == $sha)] | length) == 1' \
+       "$2" > /dev/null; then
+    echo "l'épinglage de $3 ($4, rôle $5) n'a pas pris effet : le dépôt ou le rôle a changé dans l'index de NeMo" >&2
+    exit 1
+  fi
 }
 
 pin_artifact "$INDEX" "$WORK_DIR/index-asr.json" "$ASR_REPO" "$ASR_REVISION" asr "$ASR_FILE"
@@ -79,6 +99,38 @@ diar_path="$(role_path "$diar_out" diarization)"
 tts_path="$(role_path "$tts_out" tts)"
 codec_path="$(role_path "$codec_out" codec)"
 tokenizer_path="$(role_path "$tts_out" tokenizer)"
+
+# Le dossier du modèle est <dépôt>/<révision>/<fichier> : on compare ces trois niveaux à ce
+# que serve.sh doit charger, pour ne jamais lier un autre fichier (f16 de Magpie, GGUF de
+# Nemotron sans tokenizer) si l'épinglage échoue sans bruit.
+index_revision() {
+  rev="$(jq -r --arg repo "$1" '[.models[] | select(.repo == $repo)] | if length == 1 then .[0].revision else empty end' "$INDEX")"
+  if [ -z "$rev" ]; then
+    echo "$1 est absent de l'index de NeMo (ou y figure plusieurs fois)" >&2
+    exit 1
+  fi
+  printf '%s\n' "$rev"
+}
+
+# check_path CHEMIN DÉPÔT RÉVISION NOM
+check_path() {
+  got_name="$(basename "$1")"
+  got_rev="$(basename "$(dirname "$1")")"
+  got_repo="$(basename "$(dirname "$(dirname "$1")")")"
+  if [ "$got_name" != "$4" ] || [ "$got_rev" != "$3" ] || [ "$got_repo" != "${2#*/}" ]; then
+    echo "modèle inattendu : $1" >&2
+    echo "  attendu : $2 / $3 / $4" >&2
+    exit 1
+  fi
+}
+
+diar_revision="$(index_revision "$DIAR_REPO")"
+codec_revision="$(index_revision "$CODEC_REPO")"
+check_path "$asr_path" "$ASR_REPO" "$ASR_REVISION" "$ASR_FILE"
+check_path "$diar_path" "$DIAR_REPO" "$diar_revision" "$DIAR_FILE"
+check_path "$tts_path" "$MAGPIE_REPO" "$MAGPIE_REVISION" "$MAGPIE_FILE"
+check_path "$codec_path" "$CODEC_REPO" "$codec_revision" "$CODEC_FILE"
+check_path "$tokenizer_path" "$MAGPIE_REPO" "$MAGPIE_REVISION" tokenizer
 
 mkdir -p "$MODEL_DIR/current"
 link_model asr.gguf "$asr_path"
