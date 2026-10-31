@@ -1,13 +1,18 @@
 """Conversion audio par ffmpeg : décodage des envois et encodage de la synthèse."""
 
 import asyncio
-import io
-import wave
-from collections.abc import AsyncIterator
+import struct
+from collections.abc import AsyncIterator, Buffer
 from pathlib import Path
 
 # NeMo transcrit du PCM16 mono à 16 kHz.
 TRANSCRIPTION_RATE = 16000
+SAMPLE_WIDTH = 2  # octets par échantillon
+# En-tête d'un WAV PCM : RIFF, format et début du chunk de données.
+WAV_HEADER_SIZE = 44
+_WAV_HEADER = struct.Struct("<4sI4s4sIHHIIHH4sI")
+# Taille des lectures pendant un décodage : le plafond de durée est dépassé de cette taille au plus avant l'arrêt.
+DECODE_READ_SIZE = 65536
 # Fréquence du format `pcm` d'OpenAI : tous les formats de sortie partent de ce rééchantillonnage.
 SPEECH_RATE = 24000
 # Taille des lectures sur la sortie de ffmpeg : de petits blocs, pour que le client reçoive le son au fil de l'eau.
@@ -46,7 +51,11 @@ _ENCODERS: dict[str, tuple[str, ...]] = {
 
 
 class AudioDecodeError(Exception):
-    """Le fichier n'est pas un audio que ffmpeg sait lire, ou il ne contient aucun échantillon."""
+    """Fichier que ffmpeg ne sait pas lire, sans aucun échantillon, ou dont le décodage dure trop longtemps."""
+
+
+class AudioTooLong(AudioDecodeError):
+    """L'audio décodé dépasse la durée maximale."""
 
 
 def _kill(process: asyncio.subprocess.Process) -> None:
@@ -54,71 +63,147 @@ def _kill(process: asyncio.subprocess.Process) -> None:
         process.kill()
 
 
-def _tail(stderr: bytes) -> str:
-    return stderr.decode(errors="replace").strip()[-STDERR_TAIL:]
+def _tail(stderr: bytes, hide: tuple[str, ...] = ()) -> str:
+    """Fin de la sortie d'erreur de ffmpeg, où les chemins de `hide` sont remplacés : un message ne les révèle pas."""
+    text = stderr.decode(errors="replace").strip()
+    for path in hide:
+        text = text.replace(path, "<path>")
+    return text[-STDERR_TAIL:]
 
 
-async def to_wav16k(src: Path) -> bytes:
-    """Décode n'importe quel audio en WAV PCM16 mono 16 kHz.
+async def _reap(process: asyncio.subprocess.Process, *tasks: asyncio.Task) -> None:
+    """Tue ffmpeg s'il tourne encore, arrête les tâches qui le servent et attend la fin du processus et de ses tubes."""
+    # Tout ce qui ne demande pas d'attendre passe en premier : une annulation peut interrompre les attentes.
+    _kill(process)
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    # Quand le lecteur a cessé de lire, asyncio a mis la lecture du tube en pause : il ne voit la fin du tube, ni ne
+    # le ferme, tant que personne ne lit. Le processus est mort : il ne reste à lire que ce que les tubes retiennent.
+    while await process.stdout.read(READ_SIZE):
+        pass
+    await process.wait()
+
+
+async def to_wav16k(src: Path, *, max_seconds: float = 7200.0, timeout_s: float = 600.0) -> bytearray:
+    """Décode n'importe quel audio en WAV PCM16 mono 16 kHz, dans un seul tampon.
 
     ffmpeg lit le chemin et non un tube : un m4a d'Android range souvent son index en fin de fichier, que ffmpeg
-    ne peut atteindre qu'en se déplaçant dans le fichier. Il rend du PCM brut, et l'en-tête WAV vient du module `wave`.
-    Un fichier dont le format n'est pas dans `INPUT_DEMUXERS` lève `AudioDecodeError`, comme un fichier illisible.
+    ne peut atteindre qu'en se déplaçant dans le fichier. Il rend du PCM brut, qui s'ajoute au fur et à mesure à un
+    `bytearray` dont les 44 premiers octets sont réservés à l'en-tête WAV, écrit en place à la fin : ni copie, ni
+    second tampon. Le poids du décodé n'a pas de rapport avec celui de l'envoi (une heure de silence en FLAC pèse
+    quelques centaines de Ko et décode en 115 Mo), donc la taille décodée est bornée ici et nulle part ailleurs :
+    au-delà de `max_seconds` d'audio, ffmpeg est tué et `AudioTooLong` est levée, après avoir lu au plus
+    `DECODE_READ_SIZE` octets de plus que le plafond ; après `timeout_s` secondes, ffmpeg est tué et
+    `AudioDecodeError` est levée.
+
+    Un fichier dont le format n'est pas dans `INPUT_DEMUXERS` lève `AudioDecodeError`, comme un fichier illisible. Les
+    messages ne contiennent ni le contenu du fichier ni son chemin.
     """
-    process = await asyncio.create_subprocess_exec(
-        "ffmpeg",
-        "-nostdin",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        # Options d'entrée, avant `-i` : seul le protocole `file` et seuls les démuxeurs de `INPUT_DEMUXERS`.
-        "-protocol_whitelist",
-        "file",
-        "-format_whitelist",
-        ",".join(INPUT_DEMUXERS),
-        "-i",
-        str(src),
-        "-ac",
-        "1",
-        "-ar",
-        str(TRANSCRIPTION_RATE),
-        "-f",
-        "s16le",
-        "pipe:1",
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    max_pcm = int(max_seconds * TRANSCRIPTION_RATE * SAMPLE_WIDTH)
+    wav = bytearray(WAV_HEADER_SIZE)
+    process = None
+    stderr_tail = None
     try:
-        pcm, stderr = await process.communicate()
-    except BaseException:
-        # Annulation de l'appelant : ffmpeg ne doit pas finir de décoder pour personne.
-        _kill(process)
-        await process.wait()
-        raise
-    if process.returncode != 0:
-        raise AudioDecodeError(f"ffmpeg could not decode the file (exit {process.returncode}): {_tail(stderr)}")
-    if not pcm:
+        async with asyncio.timeout(timeout_s):
+            process = await asyncio.create_subprocess_exec(
+                "ffmpeg",
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                # Options d'entrée, avant `-i` : seul le protocole `file` et seuls les démuxeurs de `INPUT_DEMUXERS`.
+                "-protocol_whitelist",
+                "file",
+                "-format_whitelist",
+                ",".join(INPUT_DEMUXERS),
+                "-i",
+                str(src),
+                "-ac",
+                "1",
+                "-ar",
+                str(TRANSCRIPTION_RATE),
+                "-f",
+                "s16le",
+                "pipe:1",
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stderr_tail = asyncio.create_task(_drain(process.stderr))
+            while chunk := await process.stdout.read(DECODE_READ_SIZE):
+                wav += chunk
+                if len(wav) - WAV_HEADER_SIZE > max_pcm:
+                    raise AudioTooLong(f"the audio is longer than {max_seconds:g} seconds")
+            returncode = await process.wait()
+            stderr = await stderr_tail
+    except TimeoutError:
+        raise AudioDecodeError(f"decoding took longer than {timeout_s:g} seconds") from None
+    finally:
+        if process is not None:
+            await _reap(process, *([stderr_tail] if stderr_tail else []))
+    if returncode != 0:
+        hidden = (str(src), str(src.parent))
+        raise AudioDecodeError(f"ffmpeg could not decode the file (exit {returncode}): {_tail(stderr, hidden)}")
+    pcm_size = len(wav) - WAV_HEADER_SIZE
+    if pcm_size == 0:
         raise AudioDecodeError("the file contains no audio samples")
-    buffer = io.BytesIO()
-    with wave.open(buffer, "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(TRANSCRIPTION_RATE)
-        wav.writeframes(pcm)
-    return buffer.getvalue()
+    _WAV_HEADER.pack_into(
+        wav,
+        0,
+        b"RIFF",
+        WAV_HEADER_SIZE - 8 + pcm_size,
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,  # PCM entier
+        1,  # mono
+        TRANSCRIPTION_RATE,
+        TRANSCRIPTION_RATE * SAMPLE_WIDTH,
+        SAMPLE_WIDTH,
+        SAMPLE_WIDTH * 8,
+        b"data",
+        pcm_size,
+    )
+    return wav
 
 
-def wav_duration(wav: bytes) -> float:
-    """Durée en secondes d'un WAV."""
-    with wave.open(io.BytesIO(wav)) as reader:
-        return reader.getnframes() / reader.getframerate()
+def _parse_wav(wav: Buffer) -> tuple[int, int, memoryview]:
+    """Cadence, taille d'une trame et données d'un WAV PCM, sans copier ses échantillons.
+
+    Les chunks sont parcourus un à un : un enregistreur peut en placer d'autres (LIST, par exemple) avant les données.
+    Une taille de données qui dépasse la fin du tampon, comme en écrit un WAV diffusé en continu, est ramenée à
+    cette fin.
+    """
+    view = memoryview(wav)
+    if len(view) < 12 or view[:4] != b"RIFF" or view[8:12] != b"WAVE":
+        raise ValueError("not a WAV file")
+    frame = None
+    position = 12
+    while position + 8 <= len(view):
+        chunk_id = bytes(view[position : position + 4])
+        (size,) = struct.unpack_from("<I", view, position + 4)
+        body = position + 8
+        if chunk_id == b"fmt ":
+            _, channels, rate, _, _, bits = struct.unpack_from("<HHIIHH", view, body)
+            frame = (rate, channels * bits // 8)
+        elif chunk_id == b"data":
+            if frame is None:
+                raise ValueError("WAV data before its format")
+            return frame[0], frame[1], view[body : body + size]
+        position = body + size + size % 2
+    raise ValueError("WAV without data")
 
 
-def wav_pcm(wav: bytes) -> bytes:
-    """Les échantillons d'un WAV, sans l'en-tête."""
-    with wave.open(io.BytesIO(wav)) as reader:
-        return reader.readframes(reader.getnframes())
+def wav_duration(wav: Buffer) -> float:
+    """Durée en secondes d'un WAV, lue dans son en-tête."""
+    rate, frame_size, data = _parse_wav(wav)
+    return len(data) / frame_size / rate
+
+
+def wav_pcm(wav: Buffer) -> memoryview:
+    """Les échantillons d'un WAV, sans l'en-tête : une vue sur le tampon, sans copie."""
+    return _parse_wav(wav)[2]
 
 
 def atempo_chain(speed: float) -> str:
@@ -216,14 +301,4 @@ async def encode_stream(
             raise RuntimeError(f"ffmpeg failed to encode (exit {returncode}): {_tail(await stderr_tail)}")
         await feeder  # ffmpeg ne termine qu'après la fin de l'entrée ; relève l'erreur de l'itérateur, s'il en a eu une
     finally:
-        # Tout ce qui ne demande pas d'attendre passe en premier : une annulation peut interrompre les attentes.
-        _kill(process)
-        feeder.cancel()
-        stderr_tail.cancel()
-        await asyncio.gather(feeder, stderr_tail, return_exceptions=True)
-        # Quand le consommateur a cessé de lire, asyncio a mis la lecture du tube en pause : il ne voit la fin du
-        # tube, ni ne le ferme, tant que personne ne lit. Le processus est mort : il ne reste à lire que ce que
-        # les tubes retiennent.
-        while await process.stdout.read(READ_SIZE):
-            pass
-        await process.wait()
+        await _reap(process, feeder, stderr_tail)

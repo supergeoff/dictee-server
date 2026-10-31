@@ -1,8 +1,10 @@
 import asyncio
 import io
 import math
+import os
 import struct
 import subprocess
+import tracemalloc
 import wave
 from collections.abc import AsyncIterator
 from contextlib import aclosing
@@ -14,6 +16,7 @@ from conftest import make_audio
 from dictee.audio import (
     OUTPUT_FORMATS,
     AudioDecodeError,
+    AudioTooLong,
     atempo_chain,
     encode_stream,
     to_wav16k,
@@ -85,8 +88,12 @@ async def test_wav_pcm_returns_the_samples_without_the_header(tmp_path):
 @pytest.mark.parametrize("content", [b"", b"not audio at all"])
 async def test_unreadable_input_raises(tmp_path, content):
     (tmp_path / "bad").write_bytes(content)
-    with pytest.raises(AudioDecodeError):
+    with pytest.raises(AudioDecodeError) as error:
         await to_wav16k(tmp_path / "bad")
+    message = str(error.value)
+    assert str(tmp_path) not in message
+    if content:
+        assert content.decode() not in message
 
 
 async def test_input_without_any_sample_raises(tmp_path):
@@ -97,6 +104,81 @@ async def test_input_without_any_sample_raises(tmp_path):
         w.setframerate(16000)
     with pytest.raises(AudioDecodeError):
         await to_wav16k(empty)
+
+
+async def test_wav_header_is_the_one_the_wave_module_writes(tmp_path):
+    wav = await to_wav16k(make_audio(tmp_path, "tone.wav", seconds=0.5))
+    expected = io.BytesIO()
+    with wave.open(expected, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(bytes(wav[44:]))
+    assert bytes(wav) == expected.getvalue()
+
+
+def wav_with_chunk(pcm: bytes, chunk_id: bytes, chunk_data: bytes) -> bytes:
+    """WAV 16 kHz mono dont un chunk supplémentaire précède les données, comme en écrivent certains enregistreurs."""
+    fmt = struct.pack("<HHIIHH", 1, 1, 16000, 32000, 2, 16)
+    extra = chunk_id + struct.pack("<I", len(chunk_data)) + chunk_data + b"\0" * (len(chunk_data) % 2)
+    body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt + extra + b"data" + struct.pack("<I", len(pcm)) + pcm
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
+@pytest.mark.parametrize("container", [bytes, bytearray])
+def test_wav_helpers_read_a_wav_with_an_extra_chunk_without_copying_it(container):
+    pcm = sine_pcm(16000, 0.5)
+    wav = container(wav_with_chunk(pcm, b"LIST", b"abc"))  # taille impaire : le chunk est suivi d'un octet de bourrage
+    assert wav_duration(wav) == pytest.approx(0.5)
+    samples = wav_pcm(wav)
+    assert bytes(samples) == pcm
+    assert samples.obj is wav
+
+
+async def test_audio_at_the_limit_is_accepted_and_just_over_it_is_refused(tmp_path):
+    src = make_audio(tmp_path, "two_seconds.wav", seconds=2.0)
+    assert abs(wav_duration(await to_wav16k(src, max_seconds=2.0)) - 2.0) < 0.01
+    with pytest.raises(AudioTooLong):
+        await to_wav16k(src, max_seconds=1.9)
+
+
+async def test_audio_over_the_limit_is_refused_without_being_buffered(tmp_path, spawned):
+    # Deux minutes de son, soit 3,84 Mo de PCM une fois décodé, contre un plafond de cinq secondes (160 Ko).
+    src = make_audio(tmp_path, "long.flac", seconds=120.0)
+    tracemalloc.start()
+    try:
+        with pytest.raises(AudioTooLong) as error:
+            await to_wav16k(src, max_seconds=5.0)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert issubclass(AudioTooLong, AudioDecodeError)
+    assert peak < 1_000_000
+    assert [process.returncode is not None for process in spawned] == [True]
+    assert str(tmp_path) not in str(error.value)
+
+
+async def test_decoding_that_never_ends_times_out(tmp_path, spawned):
+    stuck = tmp_path / "stuck"
+    os.mkfifo(stuck)  # ffmpeg attend indéfiniment qu'un écrivain ouvre le tube
+    async with asyncio.timeout(30):
+        with pytest.raises(AudioDecodeError, match="longer than") as error:
+            await to_wav16k(stuck, timeout_s=0.5)
+    assert [process.returncode is not None for process in spawned] == [True]
+    assert str(tmp_path) not in str(error.value)
+
+
+async def test_cancelling_the_decoding_kills_ffmpeg(tmp_path, spawned):
+    stuck = tmp_path / "stuck"
+    os.mkfifo(stuck)
+    decoding = asyncio.create_task(to_wav16k(stuck))
+    async with asyncio.timeout(30):
+        while not spawned:
+            await asyncio.sleep(0.01)
+        decoding.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await decoding
+    assert [process.returncode is not None for process in spawned] == [True]
 
 
 def decoded_without_restrictions(src: Path) -> int:
