@@ -1,0 +1,16 @@
+# Surcharge locale de compose.yaml : construit depuis le dépôt au lieu de GitHub
+# et publie les ports sur 127.0.0.1 pour les vérifications.
+services:
+  models:
+    build:
+      context: ./nemo
+  nemo:
+    build:
+      context: ./nemo
+    ports:
+      - "127.0.0.1:18001:8000"
+  dictee:
+    build:
+      context: ./dictee
+    ports:
+      - "127.0.0.1:18000:8000"

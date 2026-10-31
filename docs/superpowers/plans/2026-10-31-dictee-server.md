@@ -221,6 +221,44 @@ git add compose.yaml compose.integration.yaml Makefile .gitignore nemo integrati
 git commit  # « Ajoute l'image NeMo, le service models et les vérifications de NeMo »
 ```
 
+#### Résultats (relevés le 2026-10-31)
+
+Les sept contrôles passent dans un même lancement de `check_nemo.py`, sur NeMo-Speech.cpp 0.3.0 (archive `linux-aarch64-cpu`, empreinte SHA-256 vérifiée au build) avec Docker sous Colima (machine virtuelle de 15,6 Gio et 6 CPU, donc sans plafond qui fausserait le contrôle f). Le volume `nemo-models` pèse 1,2 Gio et le montage `:ro` de `nemo` fonctionne sans retouche.
+
+| Contrôle | Ligne affichée |
+|---|---|
+| a | `OK a. Temps réel : 1 final(s), 24 mots horodatés, événement final input_audio_buffer.committed, socket laissé ouvert par NeMo` |
+| b | `OK b. Contexte de 1,12 s : [asr] mode=streaming head=rnnt left=56 center=1 right=13 attention=70 encoder-frames step=1120ms` |
+| c | `OK c. Renforcement : session.updated sans error, écho {"language": "fr-FR", "sample_rate": 16000, "speech_contexts": [{"boost": 3, "phrases": ["Nemotron", "Sortformer"]}], "word_timestamps": true}` |
+| d | `OK d. Locuteurs : 2 segments, locuteurs [1, 2], 0.4 s` |
+| e | `OK e. Concurrence : la courte finit à 11.8 s, la longue à 197.6 s (la courte a duré 6.8 s, la longue 197.6 s)` |
+| f | `OK f. Mémoire : pic 1.92 Gio sur 167 relevés (limite 3 Gio), 5.6 min, 676 segments, locuteurs [1, 2], HTTP 200, OOMKilled=false` |
+| g | `OK g. Voix et fréquence : voix ['Aria', 'Jason', 'John', 'Leo', 'Sofia'], synthèse sans sample_rate à 22050 Hz (5.0 s d'audio en 10.4 s)` |
+
+**Protocole temps réel (tâches 6 et 10).**
+
+- Une session se déroule ainsi : `session.created`, `session.updated`, des `conversation.item.input_audio_transcription.delta` (un par 1,12 s d'audio environ, avec `delta` et `audio_processed`, parfois coupés au milieu d'un mot), un seul `…completed` (l'endpointing est coupé par défaut, donc un seul final même avec un silence d'une seconde), puis `input_audio_buffer.committed`.
+- Le signal de fin est `input_audio_buffer.committed`. NeMo n'envoie aucune trame de fermeture et laisse le socket ouvert : le client doit s'arrêter à cet événement et fermer lui-même.
+- Un mot de `completed.words` a exactement la forme `{"confidence": 1, "end": 0.48, "start": 0.24, "word": "Bonjour,"}` : secondes en flottants, ponctuation collée au mot, `confidence` entier. L'événement porte aussi `transcript` et `audio_processed`.
+- NeMo lit les trames au rythme de son traitement et ne répond à un ping qu'après l'audio envoyé avant lui (pong au bout de 113 s sur 10 minutes d'audio). Le ping de maintien par défaut de `websockets` (20 s) coupe donc une session longue en 1011 : le client doit le désactiver (`ping_interval=None`). Pour la même raison, `send` ne rend la main qu'à la vitesse de NeMo (84 s pour envoyer 10 minutes d'audio).
+
+**Points qui s'écartent de la spec ou du plan.**
+
+- **Le renforcement des mots ne s'applique pas.** NeMo accepte `speech_contexts` et le renvoie dans `session.updated`, mais il journalise `RNNT word boosting requested but no phrases could be tokenized (no embedded SentencePiece tokenizer in the GGUF?); boosting disabled.` La ligne est la même en temps réel et en ligne de commande (`transcribe --speech-context`), pour `fr-FR`, `en-US` et `auto`, et pour les quatre mots essayés (`Nemotron`, `Sortformer`, `bonjour`, `hello`). NeMo soupçonne que le GGUF Q8_0 de Nemotron 3.5 que `pull` apporte n'embarque pas le tokenizer que le renforcement exige (le point d'interrogation est dans son message, et les métadonnées du GGUF déclarent pourtant `tokenizer.type` et `tokenizer.vocab`) : la cause exacte n'est pas établie. La documentation de 0.3.0 ne propose que de reconvertir le GGUF avec `convert_model.py`. La tâche 14 mesurera une force sans effet tant que ce point n'est pas réglé : à voir avec Geoff avant d'écrire le code du glossaire.
+- **La ligne de journal du contrôle b n'est pas `attention-right=13`.** Sur la route temps réel, 0.3.0 écrit `right=13 … step=1120ms` (voir la ligne b ci-dessus). Le script accepte `right=13` et `attention-right=13`. La forme `attention-right=3` n'apparaît que sur la passe hors ligne. La porte de la tâche 17 cherche `attention-right=13` et doit chercher `right=13`. NeMo n'écrit cette ligne que pour la première session temps réel de chaque démarrage du conteneur (vérifié sur trois sessions de suite : une seule ligne), pas à chaque session.
+- **Le fichier f16 de Magpie est évité.** La révision que l'index de 0.3.0 épingle (`19806879…`) ne porte que le GGUF f16 : le Q8_0 y répond 404. Il est apparu au commit `446bff55e1fe…` (15 octobre), dont le `.nemo` est identique, donc le tokenizer aussi. `pull-models.sh` fabrique avec `jq` un index dérivé de celui de NeMo (variable `NEMO_SPEECH_MODEL_INDEX`) où Magpie pointe vers ce commit et vers le Q8_0 (taille et SHA-256 lus dans l'API de Hugging Face), puis lance `nemo-speech pull magpie`, qui télécharge et vérifie lui-même le Q8_0 et le tokenizer. Le f16 n'est jamais téléchargé, et le Q8_0 se charge et synthétise sous 0.3.0 (contrôle g).
+- **Durée maximale d'un audio : environ une heure.** NeMo répond 400 (`audio exceeds configured limit`) à un fichier de 3606 s et accepte 3598 s. La diarisation d'un audio plus long doit être découpée côté dictee.
+- **Identifiant du modèle de transcription :** `.nemotron-3.5-asr-streaming-0.6b.q8_0.gguf`, avec un point au début (il vient du GGUF, voir `models.json` et `session.created`).
+
+**Mesures.**
+
+- Mémoire de `nemo` : 1,0 à 1,1 Gio au repos (quatre modèles chargés). La diarisation d'une heure monte à 1,92 Gio en régime établi, avec un pic bref à l'arrivée du fichier : 2,34 Gio dans un premier lancement (relevé `docker stats` toutes les 2 s) et 2,31 Gio de pic `memory.peak` du cgroupe sur tout le lancement final (limite lue : 3 Gio). La marge au pire moment est d'environ 0,7 Gio.
+- Durées sur cette machine : transcription temps réel de 9,6 s d'audio en 4 s ; diarisation de 9,6 s en 0,4 s ; diarisation d'une heure en 5,6 min (6,5 min dans un premier lancement) ; transcription temps réel de 10 minutes d'audio en 56 s, 198 s et 207 s selon la charge de la machine, pendant que la courte, lancée 5 s plus tard, finit en 7 s.
+- La synthèse prend environ deux fois la durée de l'audio produit (5,0 s d'audio en 10,4 s, quatre threads, CFG actif). La fréquence native est 22050 Hz, et `sample_rate=16000` est honoré.
+- Diarisation : les identifiants de locuteurs commencent à 1 ; sur le dialogue, un lancement a rendu 3 segments (le second locuteur coupé en deux) et les autres 2.
+
+**Écarts de l'environnement.** `docker compose` n'est pas enregistré sur ce Mac (le binaire `docker-compose` 5.6.1 l'est) et Docker n'a pas buildx : le `Makefile` et `check_nemo.py` choisissent l'un ou l'autre, et le `Dockerfile` lit l'architecture avec `dpkg` quand BuildKit ne pose pas `TARGETARCH`. `nemo-speech --version` affiche `nemo-speech 0.3.0` (la ligne `NeMo-Speech.cpp 0.3.0` est celle de `--help`). Aucune bibliothèque ne manque selon `ldd`, donc l'image n'ajoute que `ca-certificates`, `curl` et `jq`. La base est `debian:trixie-20261020-slim` (publiée le 21 octobre, la plus récente de plus de sept jours).
+
 ---
 
 ### Tâche 2 : squelette du service dictee

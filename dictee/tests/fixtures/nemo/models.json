@@ -1,0 +1,50 @@
+{
+  "data": [
+    {
+      "capability": "transcription",
+      "device": "auto",
+      "id": ".nemotron-3.5-asr-streaming-0.6b.q8_0.gguf",
+      "object": "model",
+      "owned_by": "local",
+      "speaker_diarization": true,
+      "streaming": true,
+      "word_timestamps": true
+    },
+    {
+      "capability": "diarization",
+      "device": "auto",
+      "id": "diarization",
+      "object": "model",
+      "owned_by": "local"
+    },
+    {
+      "capability": "speech",
+      "device": "auto",
+      "id": "magpietts",
+      "languages": [
+        "en-US",
+        "es-ES",
+        "de-DE",
+        "fr-FR",
+        "it-IT",
+        "vi-VN",
+        "hi-IN",
+        "ar-AE",
+        "ar-SA",
+        "ar-MSA",
+        "ko-KR",
+        "pt-BR"
+      ],
+      "object": "model",
+      "owned_by": "local",
+      "voices": [
+        "Aria",
+        "Jason",
+        "John",
+        "Leo",
+        "Sofia"
+      ]
+    }
+  ],
+  "object": "list"
+}
