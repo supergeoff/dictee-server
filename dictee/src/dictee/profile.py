@@ -12,11 +12,9 @@ from dictee.settings import Settings
 # Le fichier voyage avec le paquet : c'est le texte de l'ancien proxy, neutre et sans rien de personnel.
 DEFAULT_INSTRUCTIONS = files("dictee").joinpath("defaults/instructions.txt").read_text(encoding="utf-8").strip()
 
-# « Terme (souvent entendu : a, b) » (forme de la page) ou « Terme (often heard as: a, b) » (forme de l'ancien proxy).
-_HINTED_LINE = re.compile(
-    r"(?P<term>.+?)\s*\(\s*(?:souvent entendu|often heard as)\s*:\s*(?P<hints>.*?)\s*\)",
-    re.IGNORECASE,
-)
+# Début des déformations d'une ligne : « (souvent entendu : » (forme de la page) ou « (often heard as: » (forme de
+# l'ancien proxy). Chaque `\s*` est suivi d'un caractère qui n'est pas une espace, donc sans retour en arrière coûteux.
+_HINTS_OPENING = re.compile(r"\(\s*(?:souvent entendu|often heard as)\s*:\s*", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -36,6 +34,24 @@ class Profile:
     voice: str
 
 
+def _split_hints(line: str) -> tuple[str, str] | None:
+    """Sépare `Terme (souvent entendu : a, b)` en terme et déformations ; `None` si la ligne n'a pas cette forme.
+
+    La ligne doit être épurée et finir par `)`. Le terme s'arrête à la première parenthèse suivie du marqueur.
+    Les parenthèses se parcourent une à une : une seule expression régulière, avec ses espaces ambigus de part et
+    d'autre des déformations, reviendrait en arrière de façon cubique sur une longue suite d'espaces.
+    """
+    if not line.endswith(")"):
+        return None
+    opening = line.find("(", 1)
+    while opening != -1:
+        marker = _HINTS_OPENING.match(line, opening)
+        if marker:
+            return line[:opening].rstrip(), line[marker.end() : -1]
+        opening = line.find("(", opening + 1)
+    return None
+
+
 def parse_glossary(text: str) -> list[GlossaryEntry]:
     """Lit un glossaire, un terme par ligne.
 
@@ -47,12 +63,13 @@ def parse_glossary(text: str) -> list[GlossaryEntry]:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        match = _HINTED_LINE.fullmatch(line)
-        if match is None:
+        split = _split_hints(line)
+        if split is None:
             entries.append(GlossaryEntry(line))
             continue
-        hints = tuple(hint for hint in (part.strip() for part in match["hints"].split(",")) if hint)
-        entries.append(GlossaryEntry(match["term"], hints))
+        term, hints_text = split
+        hints = tuple(hint for hint in (part.strip() for part in hints_text.split(",")) if hint)
+        entries.append(GlossaryEntry(term, hints))
     return entries
 
 

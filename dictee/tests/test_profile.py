@@ -1,4 +1,5 @@
 import dataclasses
+import time
 
 import pytest
 
@@ -46,6 +47,33 @@ def test_other_parentheses_stay_in_the_term():
 def test_empty_text_has_no_entries():
     assert parse_glossary("") == []
     assert parse_glossary(" \n\t\n") == []
+
+
+SPACES = " " * 100_000
+
+
+# Le glossaire d'un compte est lu à chaque requête, sur la boucle d'événements partagée : une ligne mal formée
+# faite d'une longue suite d'espaces ne doit pas la bloquer.
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        pytest.param(
+            f"a (souvent entendu :{SPACES}x", GlossaryEntry(f"a (souvent entendu :{SPACES}x"), id="unclosed-parenthesis"
+        ),
+        pytest.param(
+            f"a (souvent entendu{SPACES}x)", GlossaryEntry(f"a (souvent entendu{SPACES}x)"), id="missing-colon"
+        ),
+        pytest.param(f"a ({SPACES}x)", GlossaryEntry(f"a ({SPACES}x)"), id="no-marker"),
+        pytest.param("a" + "(" * 100_000 + ")", GlossaryEntry("a" + "(" * 100_000 + ")"), id="many-parentheses"),
+        pytest.param(f"a (souvent entendu :{SPACES}x)", GlossaryEntry("a", ("x",)), id="well-formed"),
+    ],
+)
+def test_long_runs_of_spaces_parse_quickly(line, expected):
+    start = time.perf_counter()
+    entries = parse_glossary(line)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 1, f"parsing took {elapsed:.1f} s"
+    assert entries == [expected]
 
 
 def test_prompt_lists_terms_with_their_hints():
