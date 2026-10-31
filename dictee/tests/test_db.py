@@ -89,8 +89,8 @@ def test_same_sub_updates_the_email(db):
 
 
 def test_email_lookup_ignores_case(db):
-    uid = db.upsert_user("s", "Geoff@Example.org", "G")
-    assert db.user_by_email("geoff@example.ORG") == uid
+    uid = db.upsert_user("s", "Ada@Example.org", "Ada")
+    assert db.user_by_email("ada@example.ORG") == uid
 
 
 def test_unknown_email_has_no_user(db):
