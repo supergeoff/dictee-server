@@ -1,7 +1,10 @@
 import subprocess
 from pathlib import Path
 
+import anyio
 import pytest
+from fakes import FINALS, TURNS, FakeLlm, FakeNemo
+from openai import OpenAI
 from starlette.testclient import TestClient
 
 from dictee.app import create_app
@@ -82,3 +85,40 @@ def client(settings):
     # Le bloc `with` déclenche le démarrage et l'arrêt de l'app (lifespan).
     with TestClient(create_app(settings), base_url="https://testserver") as test_client:
         yield test_client
+
+
+@pytest.fixture
+def fake_nemo():
+    return FakeNemo(finals=FINALS, turns=TURNS)
+
+
+@pytest.fixture
+def fake_llm():
+    llm = FakeLlm()
+    yield llm
+    anyio.run(llm.http.aclose)
+
+
+@pytest.fixture
+def transcriptions_client(settings, fake_nemo, fake_llm):
+    """Client HTTP d'une app qui parle au faux NeMo et au faux LiteLLM."""
+    app = create_app(settings, nemo=fake_nemo, http=fake_llm.http)
+    with TestClient(app, base_url="https://testserver") as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def openai_client(settings, transcriptions_client):
+    """Le SDK d'OpenAI face à l'app, avec la clé de service d'Open WebUI ; sans reprise, pour voir chaque erreur."""
+    return OpenAI(
+        api_key=settings.openwebui_service_key,
+        base_url="https://testserver/v1",
+        http_client=transcriptions_client,
+        max_retries=0,
+    )
+
+
+@pytest.fixture(scope="session")
+def tone_mp3(tmp_path_factory):
+    """Trois secondes de sinus en MP3."""
+    return make_audio(tmp_path_factory.mktemp("tone"), "tone.mp3", seconds=3.0).read_bytes()

@@ -1,8 +1,12 @@
 """Erreurs de l'API, rendues dans l'enveloppe d'erreur d'OpenAI."""
 
+import logging
+
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+
+logger = logging.getLogger("dictee")
 
 
 class ApiError(Exception):
@@ -34,6 +38,20 @@ def envelope(
 async def handle_api_error(request: Request, exc: ApiError) -> JSONResponse:
     body = envelope(exc.message, type=exc.type, param=exc.param, code=exc.code)
     return JSONResponse(body, status_code=exc.status)
+
+
+def unexpected_error(exc: Exception) -> ApiError:
+    """Erreur 500 générique d'une exception imprévue.
+
+    Seul le nom de la classe est journalisé, jamais son message : il pourrait reprendre du texte transcrit.
+    """
+    logger.error("unexpected error class=%s", type(exc).__name__)
+    return ApiError(500, "The server failed to process the request.", type="server_error")
+
+
+async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+    """Rend toute exception non prévue comme une erreur 500 d'OpenAI, sans rien révéler de sa cause."""
+    return await handle_api_error(request, unexpected_error(exc))
 
 
 async def handle_http_exception(request: Request, exc: HTTPException) -> JSONResponse:

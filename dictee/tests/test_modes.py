@@ -1,6 +1,5 @@
 import pytest
 
-from dictee.app import MODEL_IDS
 from dictee.errors import ApiError
 from dictee.modes import MODELS, RESPONSE_FORMATS, Mode, resolve_mode, to_iso_language, to_nemo_language
 
@@ -48,10 +47,6 @@ def test_format_names_are_case_sensitive():
 def test_models_and_formats_are_the_documented_ones():
     assert MODELS == ("dictee", "dictee-clean", "dictee-diarize")
     assert RESPONSE_FORMATS == ("json", "text", "srt", "vtt", "verbose_json", "diarized_json")
-
-
-def test_models_match_the_models_route():
-    assert MODELS == MODEL_IDS
 
 
 @pytest.mark.parametrize(

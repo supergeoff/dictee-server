@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import anyio
@@ -7,6 +8,8 @@ from starlette.testclient import TestClient
 from dictee.app import create_app
 from dictee.db import Database
 from dictee.errors import ApiError
+from dictee.modes import MODELS
+from dictee.transcribe import LongAudioGate
 
 
 def test_health(client):
@@ -114,6 +117,60 @@ def test_app_keeps_settings_and_creates_its_own_http_client(settings):
         assert isinstance(http, httpx.AsyncClient)
         assert not http.is_closed
     assert http.is_closed
+
+
+def test_models_route_lists_the_models_of_the_modes_module(client, service_headers):
+    body = client.get("/v1/models", headers=service_headers).json()
+    assert tuple(model["id"] for model in body["data"]) == MODELS
+
+
+def test_app_builds_the_nemo_client_at_startup_over_its_own_http_client(settings, monkeypatch):
+    built = []
+    monkeypatch.setattr("dictee.app.NemoClient", lambda *args: built.append(args) or "nemo client")
+    app = create_app(settings)
+    assert app.state.nemo is None
+    with TestClient(app):
+        assert app.state.nemo == "nemo client"
+        assert built == [(settings.nemo_url, settings.nemo_api_key, app.state.http)]
+
+
+def test_app_builds_the_nemo_client_over_an_injected_http_client(settings, monkeypatch):
+    built = []
+    monkeypatch.setattr("dictee.app.NemoClient", lambda *args: built.append(args) or "nemo client")
+    http = httpx.AsyncClient()
+    with TestClient(create_app(settings, http=http)):
+        assert built == [(settings.nemo_url, settings.nemo_api_key, http)]
+    anyio.run(http.aclose)
+
+
+def test_app_has_one_long_audio_gate_set_from_the_settings(settings):
+    app = create_app(settings)
+    assert isinstance(app.state.gate, LongAudioGate)
+    assert app.state.gate.threshold_s == settings.long_audio_seconds
+
+
+async def _fail(request):
+    raise RuntimeError("secret transcript text")
+
+
+def test_unexpected_error_is_a_generic_500_in_the_openai_envelope(settings, caplog):
+    app = create_app(settings)
+    app.add_route("/boom", _fail)
+    caplog.set_level(logging.INFO)
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        r = test_client.get("/boom")
+    assert r.status_code == 500
+    assert r.json() == {
+        "error": {
+            "message": "The server failed to process the request.",
+            "type": "server_error",
+            "param": None,
+            "code": None,
+        }
+    }
+    assert "RuntimeError" in caplog.text
+    assert "secret transcript text" not in caplog.text
+    assert "secret transcript text" not in r.text
 
 
 def test_app_opens_the_database_at_the_configured_path(settings):
