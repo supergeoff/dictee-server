@@ -2,7 +2,7 @@
 COMPOSE ?= $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
 COMPOSE_FILES = -f compose.yaml -f compose.integration.yaml
 
-.PHONY: nemo-up down network
+.PHONY: nemo-up down network test
 
 .env:
 	sh integration/make-env.sh > .env
@@ -16,3 +16,8 @@ nemo-up: .env network
 
 down:
 	$(COMPOSE) $(COMPOSE_FILES) down
+
+# Lance pytest dans l'image Docker : ffmpeg n'est pas installé sur le Mac et la CI utilise les mêmes commandes.
+test:
+	docker build --target test -t dictee-test dictee
+	docker run --rm dictee-test

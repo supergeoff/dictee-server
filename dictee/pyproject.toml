@@ -1,0 +1,29 @@
+[project]
+name = "dictee"
+version = "0.1.0"
+description = "Point d'entrée audio compatible avec l'API OpenAI, au-dessus de NeMo-Speech.cpp"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "authlib",
+    "httpx",
+    "itsdangerous",
+    "jinja2",
+    "python-multipart",
+    "starlette",
+    "uvicorn",
+    "websockets",
+]
+
+[dependency-groups]
+dev = [
+    "anyio",
+    "openai",
+    "pytest",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

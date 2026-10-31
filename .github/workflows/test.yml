@@ -1,0 +1,19 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Construire l'image de test
+        run: docker build --target test -t dictee-test dictee
+      - name: Lancer pytest
+        run: docker run --rm dictee-test
