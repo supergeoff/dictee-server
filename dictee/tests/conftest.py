@@ -1,3 +1,6 @@
+import subprocess
+from pathlib import Path
+
 import pytest
 from starlette.testclient import TestClient
 
@@ -16,6 +19,35 @@ REQUIRED_ENV = {
     "PUBLIC_URL": "https://dictee.test",
     "SESSION_SECRET": "test-session-secret",
 }
+
+
+@pytest.fixture
+def anyio_backend():
+    # Les tests asynchrones tournent sur asyncio seulement : trio n'est pas installé.
+    return "asyncio"
+
+
+def make_audio(directory: Path, name: str, *, seconds: float = 1.0, rate: int = 16000, channels: int = 1) -> Path:
+    """Fabrique un fichier audio d'un sinus avec ffmpeg ; le format suit l'extension de `name`."""
+    path = directory / name
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=440:duration={seconds}:sample_rate={rate}",
+            "-ac",
+            str(channels),
+            "-y",
+            str(path),
+        ],
+        check=True,
+    )
+    return path
 
 
 @pytest.fixture
