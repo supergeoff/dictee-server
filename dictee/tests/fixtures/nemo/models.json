@@ -3,7 +3,7 @@
     {
       "capability": "transcription",
       "device": "auto",
-      "id": ".nemotron-3.5-asr-streaming-0.6b.q8_0.gguf",
+      "id": "nemotron-3.5-asr-streaming-0.6b.q8_0",
       "object": "model",
       "owned_by": "local",
       "speaker_diarization": true,

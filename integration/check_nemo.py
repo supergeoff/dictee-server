@@ -165,11 +165,16 @@ def check_realtime(dialogue: bytes) -> None:
 
     updated = [e for e in events if e.get("type") == "session.updated"]
     errors = [e for e in events if e.get("type") == "error"]
-    ok_c = bool(updated) and not errors
+    disabled = [line for line in nemo_logs().splitlines() if "boosting disabled" in line]
+    # Sans tokenizer SentencePiece dans le GGUF, NeMo accepte `speech_contexts` mais ne renforce rien.
+    ok_c = bool(updated) and not errors and not disabled
     echo = json.dumps(updated[0].get("session", {}), ensure_ascii=False, sort_keys=True) if updated else "aucun session.updated"
-    report("c", "Renforcement", ok_c, f"session.updated sans error, écho {echo}" if ok_c else f"{echo} ; erreurs : {errors}")
-    if any("boosting disabled" in line for line in nemo_logs().splitlines()):
-        note("ATTENTION : NeMo journalise que le renforcement des mots est désactivé (voir les résultats)")
+    if disabled:
+        report("c", "Renforcement", False, f"NeMo journalise que le renforcement est désactivé : {disabled[0].strip()}")
+    else:
+        report("c", "Renforcement", ok_c, f"session.updated sans error, écho {echo}" if ok_c else f"{echo} ; erreurs : {errors}")
+    transcript = timed[0].get("transcript", "") if timed else ""
+    note(f"mots renforcés reconnus : {[w for w in BOOST_PHRASES if w.lower() in transcript.lower()]}")
 
 
 def check_speakers(dialogue: bytes) -> None:
