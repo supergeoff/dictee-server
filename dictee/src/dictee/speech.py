@@ -14,8 +14,9 @@ import contextlib
 import json
 import logging
 import re
-from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass
+import time
+from collections.abc import AsyncIterator, Iterator, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from starlette.background import BackgroundTask
@@ -26,7 +27,7 @@ from starlette.responses import Response, StreamingResponse
 from dictee.audio import MAX_SPEED, MIN_SPEED, OUTPUT_FORMATS, encode_stream
 from dictee.auth import require_caller
 from dictee.errors import NEMO_ERRORS, ApiError, nemo_failure, unexpected_error
-from dictee.lifecycle import CLIENT_CLOSED, cancel_once, loggable, run_unless_disconnected, spawn
+from dictee.lifecycle import CLIENT_CLOSED, cancel_once, elapsed_ms, loggable, run_unless_disconnected, spawn
 from dictee.nemo import TTS_SAMPLE_RATE
 from dictee.profile import load_profile
 
@@ -122,17 +123,32 @@ def split_sentences(text: str, max_chars: int = MAX_SENTENCE_CHARS) -> list[str]
     return _attach_silent(sentences)
 
 
-def resolve_voice(requested: str | None, profile_voice: str, available: Sequence[str]) -> str:
-    """Voix de la synthèse : celle demandée si NeMo la propose (sans tenir compte de la casse), sinon celle du profil.
+def _nemo_name(voice: str | None, available: Sequence[str]) -> str | None:
+    """Nom de `voice` tel que NeMo l'écrit, sans tenir compte de la casse ; `None` si NeMo ne la propose pas."""
+    if voice:
+        wanted = voice.casefold()
+        for name in available:
+            if name.casefold() == wanted:
+                return name
+    return None
 
-    Le nom rendu est écrit comme NeMo l'écrit (`leo` donne `Leo`). Les voix d'OpenAI (`alloy`, `nova`), que les
-    clients envoient par défaut, ne sont pas des voix de NeMo : elles donnent la voix du profil.
+
+def resolve_voice(requested: str | None, profile_voice: str, available: Sequence[str]) -> str:
+    """Voix de la synthèse : celle demandée si NeMo la propose, sinon celle du profil, sans tenir compte de la casse.
+
+    Le nom rendu est écrit comme NeMo l'écrit (`leo` donne `Leo`), pour la voix du profil comme pour celle de la requête
+    (la voix par défaut du service, que `DEFAULT_VOICE` fixe, passe par là). Les voix d'OpenAI (`alloy`, `nova`), que
+    les clients envoient par défaut, ne sont pas des voix de NeMo : elles donnent la voix du profil. Une voix du profil
+    que NeMo ne propose pas part telle quelle, NeMo restant seul juge, et laisse un avertissement au journal : elle
+    vient d'un réglage et non de la requête, donc le même nom reviendra à chaque appel. Sans voix de repli (chaîne
+    vide), la fonction rend une chaîne vide pour un nom inconnu, sans rien dire.
     """
-    if requested:
-        wanted = requested.casefold()
-        for voice in available:
-            if voice.casefold() == wanted:
-                return voice
+    for voice in (requested, profile_voice):
+        name = _nemo_name(voice, available)
+        if name is not None:
+            return name
+    if profile_voice:
+        logger.warning("voice unknown to nemo name=%s", loggable(profile_voice))
     return profile_voice
 
 
@@ -140,29 +156,56 @@ def resolve_voice(requested: str | None, profile_voice: str, available: Sequence
 class _Trace:
     """Ce que la ligne de journal d'une requête dit d'elle ; un champ resté inconnu s'écrit `-`.
 
-    Le statut d'une requête qui s'arrête sur une erreur imprévue reste 500. `log` n'écrit la ligne qu'une fois : la
-    première qui l'appelle la fixe.
+    `model` est le modèle que la requête nomme, rendu sûr par `loggable`. `first_ms` est le délai entre l'arrivée de la
+    requête et le premier PCM rendu par NeMo : il compte la lecture des voix (la première fois), le profil et la
+    synthèse de la première phrase. `nemo_ms` est le temps cumulé des appels à NeMo (lecture des voix et synthèse de
+    chaque phrase), même ceux qui échouent ou qu'on abandonne. Le statut d'une requête qui s'arrête sur une erreur
+    imprévue reste 500. `log` n'écrit la ligne qu'une fois : la première qui l'appelle la fixe.
     """
 
     user: str = "-"
+    model: str = "-"
     chars: int | None = None
     sentences: int | None = None
     voice: str = "-"
     format: str = "-"
+    first_ms: int | None = None
+    nemo_ms: int | None = None
     status: int = 500
     logged: bool = False
+    started: float = field(default_factory=time.monotonic)
+
+    @contextlib.contextmanager
+    def nemo_call(self) -> Iterator[None]:
+        """Compte dans `nemo_ms` le temps d'un appel à NeMo, qu'il réussisse, échoue ou soit annulé."""
+        called = time.monotonic()
+        try:
+            yield
+        finally:
+            self.nemo_ms = (self.nemo_ms or 0) + elapsed_ms(called)
+
+    async def speak(self, nemo: Any, sentence: str, voice: str) -> bytes:
+        """Fait synthétiser `sentence` par NeMo ; le premier PCM reçu fixe `first_ms`."""
+        with self.nemo_call():
+            pcm = await nemo.speak(sentence, voice=voice, language=LANGUAGE)
+        if self.first_ms is None:
+            self.first_ms = elapsed_ms(self.started)
+        return pcm
 
     def log(self) -> None:
         if self.logged:
             return
         self.logged = True
         logger.info(
-            "user=%s route=speech chars=%s sentences=%s voice=%s format=%s status=%d",
+            "user=%s route=speech model=%s chars=%s sentences=%s voice=%s format=%s first_ms=%s nemo_ms=%s status=%d",
             self.user,
+            self.model,
             "-" if self.chars is None else self.chars,
             "-" if self.sentences is None else self.sentences,
             self.voice,
             self.format,
+            "-" if self.first_ms is None else self.first_ms,
+            "-" if self.nemo_ms is None else self.nemo_ms,
             self.status,
         )
 
@@ -201,8 +244,10 @@ def _parse_params(body: dict[str, Any], trace: _Trace) -> _Params:
     """Valide les champs, dans l'ordre : `input`, `response_format`, `speed` ; la première erreur est un 400.
 
     `voice` absent ou non textuel est ignoré (la voix du profil s'applique). `model`, `instructions`,
-    `stream_format` et tout autre champ sont acceptés et ignorés.
+    `stream_format` et tout autre champ sont acceptés et ignorés ; `model` n'entre que dans la ligne de journal.
     """
+    model = body.get("model")
+    trace.model = loggable(model if isinstance(model, str) else None)
     text = body.get("input")
     if text is None:
         raise ApiError(400, "Missing required parameter: 'input'.", param="input", code="missing_required_parameter")
@@ -252,9 +297,11 @@ async def list_voices(state: State) -> tuple[str, ...]:
 
 async def _open(state: State, params: _Params, profile_voice: str, sentence: str, trace: _Trace) -> tuple[str, bytes]:
     """Choisit la voix et fait synthétiser la première phrase ; rend la voix et le PCM de cette phrase."""
-    voice = resolve_voice(params.voice, profile_voice, await list_voices(state))
+    with trace.nemo_call():
+        available = await list_voices(state)
+    voice = resolve_voice(params.voice, profile_voice, available)
     trace.voice = loggable(voice)
-    return voice, await state.nemo.speak(sentence, voice=voice, language=LANGUAGE)
+    return voice, await trace.speak(state.nemo, sentence, voice)
 
 
 class _End:
@@ -293,7 +340,7 @@ class _Synthesis:
         """Le PCM de chaque phrase : la première est déjà synthétisée, les autres le sont l'une après l'autre."""
         yield self.first
         for sentence in self.rest:
-            yield await self.nemo.speak(sentence, voice=self.voice, language=LANGUAGE)
+            yield await self.trace.speak(self.nemo, sentence, self.voice)
 
     async def _encode(self, chunks: asyncio.Queue[bytes | _End]) -> None:
         """Encode le PCM des phrases et pose les blocs dans `chunks`.

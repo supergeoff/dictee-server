@@ -186,8 +186,8 @@ La route suit `POST /v1/audio/speech` d'OpenAI.
 | Champ | Usage |
 |---|---|
 | `input` | Le texte à dire |
-| `voice` | Une voix Magpie (John, Sofia, Aria, Jason, Leo), sans distinction de casse. Tout autre nom, dont les voix OpenAI (alloy, nova…), prend la voix de l'utilisateur. |
-| `model` | Accepté et ignoré, car dictee n'a qu'un moteur de synthèse |
+| `voice` | Une voix Magpie (John, Sofia, Aria, Jason, Leo), sans distinction de casse. Tout autre nom, dont les voix OpenAI (alloy, nova…), prend la voix de l'utilisateur. La voix de l'utilisateur et `DEFAULT_VOICE` se comparent de même à la liste de NeMo, sans distinction de casse, et partent écrites comme NeMo les écrit. Si NeMo ne propose pas la voix de l'utilisateur, elle part telle quelle (NeMo répond alors) et le journal garde un avertissement avec son nom. |
+| `model` | Accepté et sans effet sur la synthèse, car dictee n'a qu'un moteur ; il figure dans la ligne de journal |
 | `response_format` | `mp3` (défaut, comme chez OpenAI), `opus`, `aac`, `flac`, `wav`, `pcm` |
 | `speed` | De 0,25 à 4, appliquée par ffmpeg |
 | `instructions`, `stream_format` | Acceptés et ignorés : la réponse est toujours un flux audio |
@@ -252,6 +252,8 @@ Avec `stream=true`, dictee envoie un `transcript.text.delta` à chaque morceau d
 ### 6.6 Journaux
 
 dictee écrit une ligne par requête. Elle donne l'identifiant de l'utilisateur, la route, le modèle, la durée de l'audio, les temps de NeMo et du LLM, la décision de reformulation, le nombre de passages d'une réponse en continu dont le texte final ne prolonge pas les morceaux déjà envoyés (un nombre, sans le texte) et le code de réponse. Les journaux ne contiennent jamais le texte ni l'audio, et dictee ne stocke ni l'un ni l'autre.
+
+La ligne de la synthèse donne `user`, `route=speech`, `model` (celui de la requête, rendu sûr pour une ligne de journal), `chars`, `sentences`, `voice`, `format`, `first_ms`, `nemo_ms` et `status`. `first_ms` est le délai entre l'arrivée de la requête et le premier PCM de NeMo : il compte la lecture des voix (à la première requête du processus), le profil et la synthèse de la première phrase. `nemo_ms` est le temps cumulé des appels à NeMo pour cette requête, lecture des voix et synthèse de chaque phrase, y compris un appel qui échoue ou qu'un client qui raccroche fait abandonner. Un champ inconnu s'écrit `-` : `first_ms` quand NeMo n'a rendu aucun PCM, `nemo_ms` quand aucun appel n'a eu lieu.
 
 ## 7. Espace utilisateur et page de configuration
 

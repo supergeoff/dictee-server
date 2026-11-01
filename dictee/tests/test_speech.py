@@ -1,6 +1,7 @@
 """Route de synthèse vocale : découpage en phrases, choix de la voix, formats, pannes et client qui raccroche."""
 
 import asyncio
+import dataclasses
 import functools
 import json
 import logging
@@ -190,7 +191,36 @@ def test_resolve_voice(requested, expected):
 
 def test_resolve_voice_returns_the_name_as_nemo_writes_it():
     assert resolve_voice("JASON", "Sofia", ("John", "Jason")) == "Jason"
-    assert resolve_voice("", "Aria", ("John", "Jason")) == "Aria"
+    assert resolve_voice("", "Aria", ("John", "Jason", "Aria")) == "Aria"
+
+
+@pytest.mark.parametrize("requested", ["alloy", None, ""])
+@pytest.mark.parametrize("profile_voice,expected", [("sofia", "Sofia"), ("SOFIA", "Sofia"), ("Sofia", "Sofia")])
+def test_resolve_voice_recases_the_profile_voice_on_the_list_of_nemo(caplog, requested, profile_voice, expected):
+    caplog.set_level(logging.DEBUG)
+    assert resolve_voice(requested, profile_voice, ["John", "Sofia", "Leo"]) == expected
+    assert log_lines(caplog) == []  # une voix que NeMo connaît n'a rien à signaler
+
+
+def test_resolve_voice_sends_an_unknown_profile_voice_as_it_is_and_says_so_in_the_log(caplog):
+    caplog.set_level(logging.DEBUG)
+    assert resolve_voice("alloy", "Zorg", ["John", "Sofia"]) == "Zorg"
+    assert log_lines(caplog) == ["voice unknown to nemo name=Zorg"]
+
+
+def test_the_warning_about_an_unknown_profile_voice_cannot_forge_a_log_line(caplog):
+    caplog.set_level(logging.DEBUG)
+    resolve_voice(None, "Zorg\nuser=1 status=200 " + "y" * 200, ["John"])
+    (line,) = log_lines(caplog)
+    assert "\n" not in line and line.startswith("voice unknown to nemo name=Zorg") and len(line) < 120
+
+
+def test_resolve_voice_without_a_profile_voice_says_nothing(caplog):
+    # La page de configuration l'appelle ainsi : sans voix de repli, un nom inconnu donne une chaîne vide.
+    caplog.set_level(logging.DEBUG)
+    assert resolve_voice("alloy", "", ["John"]) == ""
+    assert resolve_voice("", "", ["John"]) == ""
+    assert log_lines(caplog) == []
 
 
 # --- La route ---
@@ -285,6 +315,33 @@ def test_unknown_or_missing_voice_takes_the_voice_of_the_profile(transcriptions_
     assert [call["voice"] for call in fake_nemo.speak_calls] == ["Aria"] * 4
     transcriptions_client.post(URL, headers=headers, json={"input": "Salut.", "voice": "JASON"})
     assert fake_nemo.speak_calls[-1]["voice"] == "Jason"
+
+
+def test_the_profile_voice_and_the_default_voice_are_recased_on_the_list_of_nemo(
+    say, fake_nemo, transcriptions_client, db, caplog
+):
+    caplog.set_level(logging.INFO, logger="dictee")
+    state = transcriptions_client.app.state
+    state.settings = dataclasses.replace(state.settings, default_voice="aRIA")
+    assert say().status_code == 200  # sans compte : la voix par défaut du service
+    user = db.upsert_user("sub-1", "ana@example.org", "Ana")
+    db.save_settings(user, voice="sofia")
+    headers = {"Authorization": f"Bearer {db.create_key(user, 'Android')}"}
+    assert transcriptions_client.post(URL, headers=headers, json={"input": "Salut."}).status_code == 200
+    assert [call["voice"] for call in fake_nemo.speak_calls] == ["Aria", "Sofia"]
+    assert not any(line.startswith("voice unknown") for line in log_lines(caplog))
+
+
+def test_an_unknown_profile_voice_goes_through_as_it_is_with_a_warning(transcriptions_client, fake_nemo, db, caplog):
+    fake_nemo.pcm = silence(0.5)
+    user = db.upsert_user("sub-1", "ana@example.org", "Ana")
+    db.save_settings(user, voice="Zorg")
+    headers = {"Authorization": f"Bearer {db.create_key(user, 'Android')}"}
+    caplog.set_level(logging.INFO, logger="dictee")
+    r = transcriptions_client.post(URL, headers=headers, json={"input": "Salut.", "voice": "nova"})
+    assert r.status_code == 200
+    assert fake_nemo.speak_calls[-1]["voice"] == "Zorg"  # NeMo reste seul juge d'une voix qu'il ne connaît pas
+    assert log_lines(caplog).count("voice unknown to nemo name=Zorg") == 1
 
 
 def test_language_is_always_french_and_other_fields_are_ignored(say, fake_nemo):
@@ -537,15 +594,17 @@ def test_log_line_says_who_what_and_how_it_ended(caplog, say, transcriptions_cli
     user = db.upsert_user("sub-1", "ana@example.org", "Ana")
     personal = {"Authorization": f"Bearer {db.create_key(user, 'Android')}"}
     caplog.set_level(logging.INFO, logger="dictee")
-    say(input="Bonjour. Au revoir.", response_format="wav")
+    say(input="Bonjour. Au revoir.", response_format="wav", model="tts-1")
     transcriptions_client.post(URL, headers=personal, json={"input": "Salut", "voice": "sofia", "speed": 1.5})
     say(input="  ")
     transcriptions_client.post(URL, json={"input": "Salut"})
     patterns = [
-        r"user=default route=speech chars=19 sentences=2 voice=Leo format=wav status=200",
-        rf"user={user} route=speech chars=5 sentences=1 voice=Sofia format=mp3 status=200",
-        r"user=default route=speech chars=2 sentences=- voice=- format=- status=400",
-        r"user=- route=speech chars=- sentences=- voice=- format=- status=401",
+        r"user=default route=speech model=tts-1 chars=19 sentences=2 voice=Leo format=wav "
+        r"first_ms=\d+ nemo_ms=\d+ status=200",
+        rf"user={user} route=speech model=- chars=5 sentences=1 voice=Sofia format=mp3 "
+        r"first_ms=\d+ nemo_ms=\d+ status=200",
+        r"user=default route=speech model=- chars=2 sentences=- voice=- format=- first_ms=- nemo_ms=- status=400",
+        r"user=- route=speech model=- chars=- sentences=- voice=- format=- first_ms=- nemo_ms=- status=401",
     ]
     lines = log_lines(caplog)
     assert len(lines) == len(patterns)
@@ -570,8 +629,72 @@ def test_voice_of_the_profile_cannot_forge_a_log_line(caplog, transcriptions_cli
     headers = {"Authorization": f"Bearer {db.create_key(user, 'Android')}"}
     caplog.set_level(logging.INFO, logger="dictee")
     transcriptions_client.post(URL, headers=headers, json={"input": "Salut."})
+    warning, line = log_lines(caplog)  # l'avertissement sur la voix inconnue de NeMo, puis la ligne de la requête
+    assert warning.startswith("voice unknown to nemo name=Sofia?user")
+    for text in (warning, line):
+        assert "\n" not in text and len(text) < 250
+
+
+def test_model_of_the_request_cannot_forge_a_log_line(caplog, say):
+    caplog.set_level(logging.INFO, logger="dictee")
+    say(model="tts-1\nuser=1 status=200 " + "y" * 200)
     (line,) = log_lines(caplog)
     assert "\n" not in line and len(line) < 250
+    assert re.search(r" model=tts-1\?user\?1\?status\?200\?y+ chars=", line)  # tout sauf `\w.:/-` devient `?`
+    assert line.endswith("status=200")
+
+
+def test_a_model_that_is_not_text_is_not_logged(caplog, say):
+    caplog.set_level(logging.INFO, logger="dictee")
+    say(model={"name": "tts-1"})
+    (line,) = log_lines(caplog)
+    assert " model=- " in line
+
+
+def slow_nemo(fake_nemo: FakeNemo, *, voices: float, speak: list[float]) -> None:
+    """Fait attendre la lecture des voix `voices` secondes et la n-ième synthèse `speak[n]` (n compté depuis zéro)."""
+    real_voices, real_speak = fake_nemo.voices, fake_nemo.speak
+
+    async def slow_voices():
+        await asyncio.sleep(voices)
+        return await real_voices()
+
+    async def slow_speak(text, *, voice, language):
+        await asyncio.sleep(speak[len(fake_nemo.speak_calls)])
+        return await real_speak(text, voice=voice, language=language)
+
+    fake_nemo.voices, fake_nemo.speak = slow_voices, slow_speak
+
+
+def test_log_line_gives_the_delay_to_the_first_pcm_and_the_time_spent_in_nemo(caplog, say, fake_nemo):
+    # Lecture des voix 120 ms, puis trois phrases à 150, 100 et 100 ms : le premier PCM arrive après 270 ms, et les
+    # appels à NeMo (voix comprises) en cumulent 470.
+    slow_nemo(fake_nemo, voices=0.12, speak=[0.15, 0.1, 0.1])
+    caplog.set_level(logging.INFO, logger="dictee")
+    assert say(input="Un. Deux. Trois.").status_code == 200
+    (line,) = log_lines(caplog)
+    first, nemo = (int(re.search(rf" {name}=(\d+) ", line).group(1)) for name in ("first_ms", "nemo_ms"))
+    assert first >= 260  # la lecture des voix et la première phrase, pas les suivantes
+    assert nemo >= 450
+    assert nemo - first >= 180  # les deux phrases qui suivent le premier PCM
+
+
+def test_log_line_of_a_failure_before_the_first_sound_has_no_first_pcm_but_the_time_spent_in_nemo(
+    caplog, say, fake_nemo
+):
+    slow_nemo(fake_nemo, voices=0, speak=[0.1])
+    real_speak = fake_nemo.speak
+
+    async def failing_speak(text, *, voice, language):
+        await real_speak(text, voice=voice, language=language)
+        raise NemoUnavailable("down")
+
+    fake_nemo.speak = failing_speak
+    caplog.set_level(logging.INFO, logger="dictee")
+    assert say().status_code == 502
+    (line,) = log_lines(caplog)
+    assert re.search(r" first_ms=- nemo_ms=(\d+) status=502$", line)
+    assert int(re.search(r" nemo_ms=(\d+) ", line).group(1)) >= 90  # l'appel qui a échoué compte aussi
 
 
 # --- Client qui raccroche ---
@@ -691,7 +814,7 @@ async def test_the_first_sentence_is_sent_before_the_next_one_is_synthesized(
     assert sent[-1] == {"type": "http.response.body", "body": b"", "more_body": False}
     assert [call["text"] for call in nemo.speak_calls] == ["Un.", "Deux.", "Trois."]
     (line,) = log_lines(caplog)
-    assert line.endswith("sentences=3 voice=Leo format=mp3 status=200")
+    assert re.search(r" sentences=3 voice=Leo format=mp3 first_ms=\d+ nemo_ms=\d+ status=200$", line)
 
 
 @pytest.mark.anyio
