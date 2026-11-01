@@ -5,7 +5,7 @@ set -eu
 
 cat <<EOF
 CLEANUP_MODEL=simple-low
-DEFAULT_VOICE=Sofia
+DEFAULT_VOICE=Leo
 LITELLM_API_KEY=sk-test-not-a-real-key
 LITELLM_URL=http://127.0.0.1:9
 NEMO_API_KEY=$(openssl rand -hex 32)

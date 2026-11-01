@@ -377,20 +377,20 @@ def test_page_shows_the_four_blocks_and_the_default_instructions(logged_in):
 
 
 def test_page_shows_the_saved_settings_and_the_chosen_voice(logged_in):
-    assert re.search(r'value="Sofia" checked', logged_in.client.get("/").text)  # la voix par défaut avant tout choix
+    assert re.search(r'value="Leo" checked', logged_in.client.get("/").text)  # la voix par défaut avant tout choix
     logged_in.post(
         "/settings",
         {
             "glossary": "Nemotron (souvent entendu : némo tronc)",
             "instructions": "Corrige la ponctuation.",
-            "voice": "Leo",
+            "voice": "Sofia",
         },
     )
     page = html.unescape(logged_in.client.get("/").text)
     assert "Nemotron (souvent entendu : némo tronc)" in page and "Corrige la ponctuation." in page
     assert DEFAULT_INSTRUCTIONS not in page
-    assert re.search(r'value="Leo" checked', page) and not re.search(r'value="Sofia" checked', page)
-    assert '/voice/preview?voice=Leo"' in page
+    assert re.search(r'value="Sofia" checked', page) and not re.search(r'value="Leo" checked', page)
+    assert '/voice/preview?voice=Sofia"' in page
 
 
 def test_page_tells_when_a_change_was_saved(logged_in):

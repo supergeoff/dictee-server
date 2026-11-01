@@ -45,8 +45,8 @@ class Settings:
     session_secret: str
     nemo_url: str = "http://nemo:8000"
     cleanup_model: str = "simple-low"
-    default_voice: str = "Sofia"
-    glossary_boost: float = 3.0
+    default_voice: str = "Leo"
+    glossary_boost: float = 2.0
     long_audio_seconds: float = 600.0
     max_upload_mb: int = 300
     db_path: str = "/data/dictee.db"

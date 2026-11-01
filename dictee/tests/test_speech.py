@@ -240,8 +240,8 @@ def test_speech_through_the_sdk(openai_client, fake_nemo):
     audio = openai_client.audio.speech.create(model="tts-1", voice="alloy", input="Bonjour. Au revoir.")
     assert audio.content.startswith(MP3_MAGIC)
     assert [(c["text"], c["voice"], c["language"]) for c in fake_nemo.speak_calls] == [
-        ("Bonjour.", "Sofia", "fr-FR"),
-        ("Au revoir.", "Sofia", "fr-FR"),
+        ("Bonjour.", "Leo", "fr-FR"),
+        ("Au revoir.", "Leo", "fr-FR"),
     ]
 
 
@@ -537,12 +537,12 @@ def test_log_line_says_who_what_and_how_it_ended(caplog, say, transcriptions_cli
     personal = {"Authorization": f"Bearer {db.create_key(user, 'Android')}"}
     caplog.set_level(logging.INFO, logger="dictee")
     say(input="Bonjour. Au revoir.", response_format="wav")
-    transcriptions_client.post(URL, headers=personal, json={"input": "Salut", "voice": "leo", "speed": 1.5})
+    transcriptions_client.post(URL, headers=personal, json={"input": "Salut", "voice": "sofia", "speed": 1.5})
     say(input="  ")
     transcriptions_client.post(URL, json={"input": "Salut"})
     patterns = [
-        r"user=default route=speech chars=19 sentences=2 voice=Sofia format=wav status=200",
-        rf"user={user} route=speech chars=5 sentences=1 voice=Leo format=mp3 status=200",
+        r"user=default route=speech chars=19 sentences=2 voice=Leo format=wav status=200",
+        rf"user={user} route=speech chars=5 sentences=1 voice=Sofia format=mp3 status=200",
         r"user=default route=speech chars=2 sentences=- voice=- format=- status=400",
         r"user=- route=speech chars=- sentences=- voice=- format=- status=401",
     ]
@@ -690,7 +690,7 @@ async def test_the_first_sentence_is_sent_before_the_next_one_is_synthesized(
     assert sent[-1] == {"type": "http.response.body", "body": b"", "more_body": False}
     assert [call["text"] for call in nemo.speak_calls] == ["Un.", "Deux.", "Trois."]
     (line,) = log_lines(caplog)
-    assert line.endswith("sentences=3 voice=Sofia format=mp3 status=200")
+    assert line.endswith("sentences=3 voice=Leo format=mp3 status=200")
 
 
 @pytest.mark.anyio

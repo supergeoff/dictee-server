@@ -76,7 +76,7 @@ def test_json_with_any_model_name(openai_client, fake_nemo, tone_mp3):
     r = openai_client.audio.transcriptions.create(model="whisper-1", file=("a.mp3", tone_mp3))
     assert r.text == "Bonjour à tous. Salut."
     call = fake_nemo.calls[0]
-    assert (call["language"], call["boost"], call["wav_rate"]) == ("fr-FR", 3.0, 16000)
+    assert (call["language"], call["boost"], call["wav_rate"]) == ("fr-FR", 2.0, 16000)
     assert (call["phrases"], call["prompt"]) == ([], None)
     assert fake_nemo.diarize_calls == []
 
