@@ -1,7 +1,7 @@
 # Tâches de transcription, découpage et dictée en direct : design
 
 - **Date** : 1er novembre 2026
-- **Statut** : brouillon, en attente de la validation de Geoff
+- **Statut** : validé par Geoff le 1er novembre 2026
 - **Dépôt** : `supergeoff/dictee-server`, branche `feat/taches-transcription`
 - **Point de départ** : `2026-10-31-dictee-server-design.md`, déployé le 1er novembre 2026
 
@@ -70,13 +70,13 @@ Geoff a retenu la première approche le 1er novembre 2026.
 | Sujet | Décision | Origine |
 |---|---|---|
 | Moteur par défaut | Fichier entier de NeMo, par morceaux d'environ 30 s, pour `dictee` et `dictee-clean` sans `stream` | Geoff |
-| Réunions | Route temps réel de NeMo avec `speaker_diarization`, en une session, jusqu'à 2 heures | Proposition de Claude, à valider |
+| Réunions | Route temps réel de NeMo avec `speaker_diarization`, en une session, jusqu'à 2 heures | Proposition de Claude, validée par Geoff avec le document |
 | Texte progressif | `stream=true` garde la route temps réel, comme aujourd'hui | Geoff |
 | Dictée en direct | WebSocket `/v1/realtime?intent=transcription`, au format OpenAI, texte brut seulement | Geoff |
 | Coupures | Tâches enregistrées ; identifiant en arrière-plan pour l'application ; envoi identique rattaché à sa tâche pour les outils OpenAI | Geoff |
 | Plafond | 2 heures pour tous les modes | Geoff |
 | Glossaire | Prudent : la force retenue est la plus haute qui n'insère aucun mot non dit | Geoff |
-| Champ `prompt` | Accepté et ignoré, plus transmis à NeMo | Proposition de Claude, à valider |
+| Champ `prompt` | Accepté et ignoré, plus transmis à NeMo | Proposition de Claude, validée par Geoff avec le document |
 | Conservation | Le résultat de toute transcription enregistrée, dictées courtes comprises, reste 24 heures après la fin de la tâche ; l'audio est effacé dès la fin | Geoff pour la portée et la durée, Claude pour l'effacement de l'audio |
 | Coupe des morceaux | Dans les silences repérés par ffmpeg, à défaut coupe nette | Choix de Claude |
 | Silero | Non ajouté | Banc du 1er novembre |
