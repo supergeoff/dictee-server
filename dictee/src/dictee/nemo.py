@@ -1,4 +1,4 @@
-"""Client de NeMo-Speech.cpp : transcription en continu, diarisation, synthèse et liste des voix.
+"""Client de NeMo-Speech.cpp : transcription en continu, synthèse et liste des voix.
 
 Rien n'est journalisé ici : ni le texte transcrit, ni le texte à dire, ni l'audio. Les messages des exceptions ne
 reprennent que ce que NeMo dit de son propre fonctionnement. La bibliothèque `websockets` journalise elle aussi, mais
@@ -6,17 +6,18 @@ elle est réduite au silence en DEBUG (voir `_WEBSOCKETS_LOGGER`).
 """
 
 import asyncio
+import contextlib
 import json
 import logging
-import secrets
-from collections.abc import AsyncIterator, Buffer
+from collections.abc import AsyncIterator, Callable, Sequence
+from pathlib import Path
 
 import httpx
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 
-from dictee.audio import SAMPLE_WIDTH, TRANSCRIPTION_RATE, wav_pcm
-from dictee.types import Final, Partial, Turn, Word
+from dictee.audio import SAMPLE_WIDTH, TRANSCRIPTION_RATE, pcm_frames
+from dictee.types import Final, Partial, Word
 
 # Fréquence native de la synthèse de NeMo (mesurée en tâche 1) : `speak` rend du PCM16 mono à cette fréquence.
 TTS_SAMPLE_RATE = 22050
@@ -27,15 +28,17 @@ FRAME_BYTES = TRANSCRIPTION_RATE * SAMPLE_WIDTH
 # Délais en secondes. Le client HTTP partagé de l'app n'a pas de délai de lecture : chaque appel fixe le sien.
 OPEN_TIMEOUT = 10.0  # ouverture d'une connexion, WebSocket ou HTTP
 EVENT_TIMEOUT = 300.0  # silence maximal entre deux événements de NeMo pendant une session temps réel
+# Silence maximal entre deux événements quand la session marque les personnes : une réunion de 2 heures peut rester
+# bien plus longtemps sans événement qu'une dictée. Valeur provisoire, en attendant la mesure sur 2 heures.
+SPEAKERS_EVENT_TIMEOUT = 300.0
+# Clé de la personne dans chaque mot de l'événement final : un entier, numéroté à partir de 1 (relevé de la tâche 1).
+SPEAKER_KEY = "speaker"
 # Attente de la réponse de NeMo à la fermeture d'une session. Une session abandonnée pendant l'envoi de l'audio n'y
 # répond pas : NeMo ne lit la fermeture qu'après l'audio déjà envoyé (10,02 s d'attente avec le délai par défaut
 # de `websockets`, mesuré sur 184 s d'audio), et la place de la transcription longue reste prise pendant ce temps.
 CLOSE_TIMEOUT = 1.0
-DIARIZE_TIMEOUT = 1200.0
 SPEECH_TIMEOUT = 120.0
 MODELS_TIMEOUT = 10.0
-# Taille des morceaux d'un WAV envoyé à la diarisation : la mémoire de l'envoi ne dépend pas de la durée de l'audio.
-UPLOAD_CHUNK_SIZE = 64 * 1024
 
 _DELTA = "conversation.item.input_audio_transcription.delta"
 _COMPLETED = "conversation.item.input_audio_transcription.completed"
@@ -70,13 +73,37 @@ def _event_error(event: dict) -> Exception:
     return NemoError(f"{code}: {message}")
 
 
-async def _next_event(ws: ClientConnection) -> dict:
-    """Prochain événement de NeMo ; un événement `error` lève l'exception qui lui correspond."""
+async def _receive(ws: ClientConnection, sender: asyncio.Task) -> str | bytes:
+    """Prochain message de NeMo, ou l'erreur de `sender` quand l'envoi de l'audio échoue avant.
+
+    Une connexion coupée n'est pas une erreur de l'envoi : la lecture la relève elle-même. Sans cette garde, un envoi
+    qui échoue (fichier illisible, rappel de progression en erreur) laisserait la session attendre un événement qui
+    ne viendra jamais, jusqu'au délai d'attente.
+    """
+    receiving = asyncio.ensure_future(ws.recv())
     try:
-        async with asyncio.timeout(EVENT_TIMEOUT):
-            raw = await ws.recv()
+        await asyncio.wait({receiving, sender}, return_when=asyncio.FIRST_COMPLETED)
+        if sender.done() and not sender.cancelled():
+            error = sender.exception()
+            if error is not None and not isinstance(error, ConnectionClosed):
+                raise error
+        return await receiving
+    finally:
+        if not receiving.cancel() and not receiving.cancelled():
+            receiving.exception()  # lue ici, pour qu'asyncio n'en journalise rien si personne ne la lit
+
+
+async def _next_event(ws: ClientConnection, timeout: float | None = None, sender: asyncio.Task | None = None) -> dict:
+    """Prochain événement de NeMo, attendu `timeout` secondes au plus (`EVENT_TIMEOUT` par défaut).
+
+    Un événement `error` lève l'exception qui lui correspond ; avec `sender`, l'erreur de l'envoi de l'audio aussi.
+    """
+    timeout = EVENT_TIMEOUT if timeout is None else timeout
+    try:
+        async with asyncio.timeout(timeout):
+            raw = await (ws.recv() if sender is None else _receive(ws, sender))
     except TimeoutError:
-        raise NemoError(f"no event from NeMo for {EVENT_TIMEOUT:g} seconds") from None
+        raise NemoError(f"no event from NeMo for {timeout:g} seconds") from None
     event = json.loads(raw)
     if event.get("type") == "error":
         raise _event_error(event)
@@ -89,30 +116,36 @@ async def _expect(ws: ClientConnection, kind: str) -> None:
         raise NemoError(f"expected the event {kind}, NeMo sent {event.get('type')}")
 
 
-async def _send_audio(ws: ClientConnection, pcm: memoryview) -> None:
-    """Envoie le PCM par trames d'une seconde, puis le commit.
+async def _send_audio(ws: ClientConnection, wav: Path, on_progress: Callable[[float], None] | None) -> None:
+    """Envoie le WAV par trames d'une seconde lues dans le fichier, puis le commit.
 
     NeMo lit les trames à la vitesse de son traitement : `send` ne rend la main qu'à ce rythme, d'où une tâche à
-    part qui laisse la lecture des événements avancer pendant l'envoi.
+    part qui laisse la lecture des événements avancer pendant l'envoi. Une seule trame est en mémoire à la fois.
+    `on_progress` reçoit, après chaque trame, les secondes d'audio déjà envoyées.
     """
-    for start in range(0, len(pcm), FRAME_BYTES):
-        await ws.send(pcm[start : start + FRAME_BYTES])
+    sent = 0
+    with contextlib.closing(pcm_frames(wav, FRAME_BYTES)) as frames:
+        for frame in frames:
+            await ws.send(frame)
+            sent += len(frame)
+            if on_progress is not None:
+                on_progress(sent / FRAME_BYTES)
     await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
 
 
-def _final(event: dict) -> Final:
-    words = tuple(
-        Word(text=word["word"], start=float(word["start"]), end=float(word["end"])) for word in event.get("words") or ()
+def _word(word: dict) -> Word:
+    """Un mot de l'événement final ; sa personne est celle de `SPEAKER_KEY` en texte, `None` sans elle."""
+    speaker = word.get(SPEAKER_KEY)
+    return Word(
+        text=word["word"],
+        start=float(word["start"]),
+        end=float(word["end"]),
+        speaker=None if speaker is None else str(speaker),
     )
-    return Final(text=event["transcript"], words=words)
 
 
-async def _blocks(head: bytes, wav: memoryview, tail: bytes) -> AsyncIterator[bytes]:
-    """Le corps d'un envoi : `head`, le WAV par morceaux de `UPLOAD_CHUNK_SIZE` octets, puis `tail`."""
-    yield head
-    for start in range(0, len(wav), UPLOAD_CHUNK_SIZE):
-        yield bytes(wav[start : start + UPLOAD_CHUNK_SIZE])
-    yield tail
+def _final(event: dict) -> Final:
+    return Final(text=event["transcript"], words=tuple(_word(word) for word in event.get("words") or ()))
 
 
 def _error_message(response: httpx.Response) -> str:
@@ -123,7 +156,7 @@ def _error_message(response: httpx.Response) -> str:
 
 
 class NemoClient:
-    """Les quatre appels de dictee à NeMo ; `http` est le client HTTP partagé de l'app."""
+    """Les trois appels de dictee à NeMo ; `http` est le client HTTP partagé de l'app."""
 
     def __init__(self, base_url: str, api_key: str, http: httpx.AsyncClient) -> None:
         self._base_url = base_url.rstrip("/")
@@ -157,15 +190,24 @@ class NemoClient:
 
     async def transcribe(
         self,
-        wav: Buffer,
+        wav: Path,
         *,
         language: str,
-        phrases: list[str],
+        phrases: Sequence[str],
         boost: float,
-        prompt: str | None,
+        speakers: bool = False,
         partials: bool = False,
+        on_progress: Callable[[float], None] | None = None,
     ) -> AsyncIterator[Final | Partial]:
-        """Transcrit un WAV PCM16 mono 16 kHz par une session temps réel et rend un `Final` par phrase finale.
+        """Transcrit le WAV PCM16 mono 16 kHz du fichier `wav` par une session temps réel ; rend un `Final` par phrase.
+
+        Le fichier est lu par trames d'une seconde (voir `_send_audio`) : sa durée ne pèse pas sur la mémoire.
+        `on_progress`, s'il est donné, reçoit les secondes d'audio déjà envoyées après chaque trame.
+
+        Avec `speakers=True`, la session demande à NeMo de marquer les personnes (`speaker_diarization`) : chaque
+        `Word.speaker` du `Final` vaut alors la personne que NeMo donne, en texte, `None` quand il n'en donne pas, et
+        l'attente entre deux événements va jusqu'à `SPEAKERS_EVENT_TIMEOUT` secondes. Le champ `prompt` de NeMo n'est
+        jamais transmis : il renforce une phrase à une force qui insère des mots que personne n'a dits.
 
         Avec `partials=True`, chaque événement `delta` de NeMo non vide rend aussi un `Partial`, dans l'ordre d'arrivée
         et avant le `Final` de son item : NeMo en émet un tous les 1,12 s d'audio traité, puis un seul `completed` au
@@ -177,14 +219,15 @@ class NemoClient:
         (`contextlib.aclosing`) : c'est à ce moment que la session se ferme.
 
         Lève `NemoUnavailable` si NeMo est injoignable ou coupe la connexion, `NemoOverloaded` si sa file est pleine
-        et `NemoError` pour toute autre erreur, y compris plus de `EVENT_TIMEOUT` secondes sans événement.
+        et `NemoError` pour toute autre erreur, y compris plus de `EVENT_TIMEOUT` secondes sans événement
+        (`SPEAKERS_EVENT_TIMEOUT` avec les personnes).
         """
-        pcm = wav_pcm(wav)
         session: dict[str, object] = {"sample_rate": TRANSCRIPTION_RATE, "language": language, "word_timestamps": True}
+        if speakers:
+            session["speaker_diarization"] = True
         if phrases:
-            session["speech_contexts"] = [{"phrases": phrases, "boost": boost}]
-        if prompt:
-            session["prompt"] = prompt
+            session["speech_contexts"] = [{"phrases": list(phrases), "boost": boost}]
+        event_timeout = SPEAKERS_EVENT_TIMEOUT if speakers else EVENT_TIMEOUT
 
         ws = await self._open()
         sender: asyncio.Task | None = None
@@ -192,9 +235,9 @@ class NemoClient:
             await _expect(ws, "session.created")
             await ws.send(json.dumps({"type": "session.update", "session": session}))
             await _expect(ws, "session.updated")
-            sender = asyncio.create_task(_send_audio(ws, pcm))
+            sender = asyncio.create_task(_send_audio(ws, wav, on_progress))
             while True:
-                event = await _next_event(ws)
+                event = await _next_event(ws, event_timeout, sender)
                 kind = event.get("type")
                 if kind == _COMPLETED:
                     yield _final(event)
@@ -211,18 +254,13 @@ class NemoClient:
                 await asyncio.gather(sender, return_exceptions=True)
             await ws.close()
 
-    async def _request(
-        self, method: str, path: str, *, timeout: float, headers: dict[str, str] | None = None, **kwargs
-    ) -> httpx.Response:
-        """Appel d'une route HTTP de NeMo : 429 donne `NemoOverloaded`, un échec de transport `NemoUnavailable`.
-
-        `headers` s'ajoute à l'en-tête d'authentification.
-        """
+    async def _request(self, method: str, path: str, *, timeout: float, **kwargs) -> httpx.Response:
+        """Appel d'une route HTTP de NeMo : 429 donne `NemoOverloaded`, un échec de transport `NemoUnavailable`."""
         try:
             response = await self._http.request(
                 method,
                 self._base_url + path,
-                headers={**self._headers, **(headers or {})},
+                headers=self._headers,
                 timeout=httpx.Timeout(timeout, connect=OPEN_TIMEOUT),
                 **kwargs,
             )
@@ -233,38 +271,6 @@ class NemoClient:
         if response.is_error:
             raise NemoError(f"NeMo answered HTTP {response.status_code}: {_error_message(response)}")
         return response
-
-    async def diarize(self, wav: Buffer) -> list[Turn]:
-        """Tours de parole d'un WAV, en mode `streaming`, adapté aux longs fichiers.
-
-        Le formulaire multipart est écrit ici et non par `httpx` : celui-ci n'accepte pas un `bytearray` (le décodage
-        de `to_wav16k`) et en ferait une copie en `bytes`, soit 110 Mio de plus pour une heure d'audio, pendant que
-        dictee en garde déjà un exemplaire. Le WAV part en morceaux de `UPLOAD_CHUNK_SIZE` octets pris dans une vue
-        du tampon, sans autre copie que celle du morceau en cours. Le corps annonce sa taille exacte
-        (`Content-Length`) au lieu de passer par l'encodage `chunked`.
-        """
-        boundary = secrets.token_hex(16)
-        head = (
-            f'--{boundary}\r\nContent-Disposition: form-data; name="mode"\r\n\r\nstreaming\r\n'
-            f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.wav"\r\n'
-            "Content-Type: audio/wav\r\n\r\n"
-        ).encode()
-        tail = f"\r\n--{boundary}--\r\n".encode()
-        view = memoryview(wav).cast("B")
-        response = await self._request(
-            "POST",
-            "/v1/audio/diarizations",
-            timeout=DIARIZE_TIMEOUT,
-            headers={
-                "Content-Type": f"multipart/form-data; boundary={boundary}",
-                "Content-Length": str(len(head) + len(view) + len(tail)),
-            },
-            content=_blocks(head, view, tail),
-        )
-        return [
-            Turn(start=float(segment["start"]), end=float(segment["end"]), speaker=int(segment["speaker"]))
-            for segment in response.json()["segments"]
-        ]
 
     async def speak(self, text: str, *, voice: str, language: str) -> bytes:
         """Synthèse vocale : du PCM16 mono à `TTS_SAMPLE_RATE`, sans en-tête."""

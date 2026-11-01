@@ -2,59 +2,59 @@
 
 import asyncio
 import json
-import struct
+import wave
+from dataclasses import replace
 
 import httpx
 
-from dictee.types import Final, Partial, Turn, Word
+from dictee.types import Final, Partial, Word
 
-# Deux phrases finales de deux locuteurs : le texte attendu est « Bonjour à tous. Salut. ».
+# Deux phrases finales de deux personnes, que la session temps réel de NeMo numérote « 0 » puis « 1 » : le texte
+# attendu est « Bonjour à tous. Salut. ».
 FINALS = (
-    Final("Bonjour à tous.", (Word("Bonjour", 0.0, 0.4), Word("à", 0.5, 0.6), Word("tous.", 0.6, 1.2))),
-    Final("Salut.", (Word("Salut.", 2.0, 2.5),)),
+    Final(
+        "Bonjour à tous.",
+        (Word("Bonjour", 0.0, 0.4, "0"), Word("à", 0.5, 0.6, "0"), Word("tous.", 0.6, 1.2, "0")),
+    ),
+    Final("Salut.", (Word("Salut.", 2.0, 2.5, "1"),)),
 )
-TURNS = [Turn(0.0, 1.3, 1), Turn(1.8, 2.6, 2)]
 
 # Voix de Magpie, comme la route `/v1/models` de NeMo les liste.
 VOICES = ["John", "Sofia", "Aria", "Jason", "Leo"]
 
-# Cadence d'un WAV canonique (en-tête de 44 octets) : les octets 24 à 27.
-_RATE_OFFSET = 24
 
-
-def _wav_rate(wav) -> int:
-    return struct.unpack_from("<I", wav, _RATE_OFFSET)[0]
+def _wav_info(path) -> tuple[int, float]:
+    """Cadence et durée en secondes du WAV que la route a écrit sur le disque."""
+    with wave.open(str(path)) as wav:
+        return wav.getframerate(), wav.getnframes() / wav.getframerate()
 
 
 class FakeNemo:
-    """Faux `NemoClient` : mêmes quatre méthodes, rien d'autre.
+    """Faux `NemoClient` : mêmes trois méthodes, rien d'autre.
 
     `finals` sont rendus par `transcribe` (avec des `Partial` mêlés aux `Final`, ils ne sortent que si l'appel passe
-    `partials=True`), `turns` par `diarize`, `pcm` par `speak`. `error`, s'il est donné, est levée par chacune des quatre
-    méthodes. `release` (un `anyio.Event`) retient la première transcription : elle n'a de `Final` à rendre qu'une fois
-    l'événement posé, ce qui laisse les transcriptions suivantes passer sans attendre. `after` est le nombre
-    d'éléments (`Partial` demandés ou `Final`) que `transcribe` rend avant de lever `error` ou d'attendre `release` :
-    avec 1, une réponse en continu a déjà son premier delta quand la panne ou l'attente arrive.
+    `partials=True`), `pcm` par `speak`. Les mots de `finals` portent les personnes brutes de la session ; comme
+    NeMo, `transcribe` les retire quand l'appel ne passe pas `speakers=True`. `error`, s'il est donné, est levée par
+    chacune des trois méthodes. `release` (un `anyio.Event`) retient la première transcription : elle n'a de `Final` à
+    rendre qu'une fois l'événement posé, ce qui laisse les transcriptions suivantes passer sans attendre. `after` est
+    le nombre d'éléments (`Partial` demandés ou `Final`) que `transcribe` rend avant de lever `error` ou d'attendre
+    `release` : avec 1, une réponse en continu a déjà son premier delta quand la panne ou l'attente arrive.
 
-    Chaque appel est noté dans `calls`, sous forme de dict : `language`, `phrases`, `boost`, `prompt`, `partials` et
-    `wav_rate` pour `transcribe` ; `diarize` et `wav_rate` pour `diarize` ; `text`, `voice` et `language` pour `speak` ;
-    `voices` pour `voices`. `sessions_closed` compte les sessions de transcription terminées, de quelque façon que ce soit :
-    `NemoClient` ferme son socket dans un `finally` qui attend, et ce nettoyage-ci attend de même.
+    Chaque appel est noté dans `calls`, sous forme de dict : `language`, `phrases`, `boost`, `speakers`, `partials`,
+    `wav_rate` et `seconds` (lus dans le fichier WAV) pour `transcribe` ; `text`, `voice` et `language` pour `speak` ;
+    `voices` pour `voices`. `transcribe` appelle `on_progress(seconds)` avant son premier événement. `sessions_closed`
+    compte les sessions de transcription terminées, de quelque façon que ce soit : `NemoClient` ferme son socket dans
+    un `finally` qui attend, et ce nettoyage-ci attend de même.
     """
 
-    def __init__(self, *, finals=(), turns=(), pcm=b"", error=None, release=None, after: int = 0) -> None:
+    def __init__(self, *, finals=(), pcm=b"", error=None, release=None, after: int = 0) -> None:
         self.finals = tuple(finals)
-        self.turns = list(turns)
         self.pcm = pcm
         self.error = error
         self.release = release
         self.after = after
         self.calls: list[dict] = []
         self.sessions_closed = 0
-
-    @property
-    def diarize_calls(self) -> list[dict]:
-        return [call for call in self.calls if "diarize" in call]
 
     @property
     def speak_calls(self) -> list[dict]:
@@ -64,11 +64,30 @@ class FakeNemo:
     def voices_calls(self) -> list[dict]:
         return [call for call in self.calls if "voices" in call]
 
-    async def transcribe(self, wav, *, language, phrases, boost, prompt, partials=False):
-        call = {"language": language, "phrases": list(phrases), "boost": boost, "prompt": prompt, "partials": partials}
-        self.calls.append({**call, "wav_rate": _wav_rate(wav)})
-        # Comme `NemoClient`, les `Partial` ne sortent que si on les demande.
+    async def transcribe(self, wav, *, language, phrases, boost, speakers=False, partials=False, on_progress=None):
+        rate, seconds = _wav_info(wav)
+        self.calls.append(
+            {
+                "language": language,
+                "phrases": list(phrases),
+                "boost": boost,
+                "speakers": speakers,
+                "partials": partials,
+                "wav_rate": rate,
+                "seconds": seconds,
+            }
+        )
+        if on_progress is not None:
+            on_progress(seconds)
+        # Comme `NemoClient`, les `Partial` ne sortent que si on les demande, les personnes que si on les demande aussi.
         events = [event for event in self.finals if partials or not isinstance(event, Partial)]
+        if not speakers:
+            events = [
+                replace(event, words=tuple(replace(word, speaker=None) for word in event.words))
+                if isinstance(event, Final)
+                else event
+                for event in events
+            ]
         try:
             for event in events[: self.after]:
                 yield event
@@ -82,12 +101,6 @@ class FakeNemo:
         finally:
             await asyncio.sleep(0)
             self.sessions_closed += 1
-
-    async def diarize(self, wav) -> list[Turn]:
-        self.calls.append({"diarize": True, "wav_rate": _wav_rate(wav)})
-        if self.error is not None:
-            raise self.error
-        return list(self.turns)
 
     async def speak(self, text: str, *, voice: str, language: str) -> bytes:
         self.calls.append({"text": text, "voice": voice, "language": language})

@@ -27,15 +27,6 @@ class Partial:
 
 
 @dataclass(frozen=True)
-class Turn:
-    """Tour de parole renvoyé par la séparation des locuteurs."""
-
-    start: float
-    end: float
-    speaker: int
-
-
-@dataclass(frozen=True)
 class Segment:
     id: str
     start: float

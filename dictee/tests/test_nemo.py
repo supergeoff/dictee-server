@@ -1,13 +1,9 @@
 import asyncio
-import hashlib
-import io
 import json
 import logging
-import os
-import re
 import socket
 import struct
-import tracemalloc
+import time
 import wave
 from contextlib import aclosing
 from http import HTTPStatus
@@ -20,36 +16,38 @@ from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
 from dictee import nemo as nemo_module
-from dictee.audio import wav_pcm
 from dictee.nemo import (
+    SPEAKER_KEY,
     TTS_SAMPLE_RATE,
     NemoClient,
     NemoError,
     NemoOverloaded,
     NemoUnavailable,
 )
-from dictee.types import Final, Partial, Turn, Word
+from dictee.types import Final, Partial, Word
 
 pytestmark = pytest.mark.anyio
 
 FIXTURES = Path(__file__).parent / "fixtures" / "nemo"
-MIB = 1024 * 1024
 
 
-def make_wav(seconds: float) -> bytes:
-    """WAV PCM16 mono 16 kHz aux octets variés : une trame perdue ou déplacée change le contenu relu."""
+def write_wav(directory: Path, seconds: float) -> Path:
+    """Écrit un WAV PCM16 mono 16 kHz aux octets variés : une trame perdue ou déplacée change le contenu relu."""
+    path = directory / f"audio-{seconds:g}s.wav"
     count = int(16000 * seconds)
     pcm = struct.pack(f"<{count}h", *((n * 37) % 20000 - 10000 for n in range(count)))
-    buffer = io.BytesIO()
-    with wave.open(buffer, "wb") as out:
+    with wave.open(str(path), "wb") as out:
         out.setnchannels(1)
         out.setsampwidth(2)
         out.setframerate(16000)
         out.writeframes(pcm)
-    return buffer.getvalue()
+    return path
 
 
-WAV_1S = make_wav(1.0)
+@pytest.fixture
+def wav_1s(tmp_path) -> Path:
+    return write_wav(tmp_path, 1.0)
+
 
 # Relevé de la session temps réel de la tâche 1 : session.created, session.updated, puis les événements qui
 # suivent le commit (deltas, completed, committed).
@@ -59,6 +57,14 @@ COMPLETED = next(event for event in AFTER_COMMIT if event["type"].endswith(".com
 COMMITTED = next(event for event in AFTER_COMMIT if event["type"] == "input_audio_buffer.committed")
 # NeMo a rendu le final mais n'a pas annoncé la fin : la session reste ouverte.
 HELD_BACK = [event for event in AFTER_COMMIT if event is not COMMITTED]
+
+# Relevé de la même session avec `speaker_diarization` : les deux premiers événements sont ceux de l'ouverture, les
+# suivants ceux d'après le commit. Chaque mot du `completed` porte sa personne, un entier numéroté à partir de 1.
+SPEAKERS_RECORDED = [
+    json.loads(line) for line in (FIXTURES / "realtime_speakers_events.jsonl").read_text().splitlines()
+]
+SPEAKERS_AFTER_COMMIT = SPEAKERS_RECORDED[2:]
+SPEAKERS_COMPLETED = next(event for event in SPEAKERS_AFTER_COMMIT if event["type"].endswith(".completed"))
 
 
 def error_event(code: str, error_type: str) -> dict:
@@ -79,6 +85,7 @@ class FakeNemoRealtime:
     def __init__(self) -> None:
         # Événements envoyés après le commit ; une liste vide donne un NeMo qui ne répond plus.
         self.after_commit: list[dict] = AFTER_COMMIT
+        self.commit_delay = 0.0  # secondes d'attente entre le commit et le premier événement qui le suit
         self.drop_on_commit = False  # coupe la connexion à la réception du commit
         self.error_code: str | None = None  # envoie cet `error` à la place de session.updated
         self.reject_status: int | None = None  # refuse la poignée de main avec ce statut HTTP
@@ -114,6 +121,7 @@ class FakeNemoRealtime:
                     if self.drop_on_commit:
                         await ws.close()
                         return
+                    await asyncio.sleep(self.commit_delay)
                     for item in self.after_commit:
                         await ws.send(json.dumps(item))
         except ConnectionClosed:
@@ -151,17 +159,15 @@ async def until(condition, timeout: float = 2.0) -> None:
             await asyncio.sleep(0.01)
 
 
-async def transcribe(nemo, wav=WAV_1S, *, language="fr-FR", phrases=(), boost=3.0, prompt=None, **options):
-    return await collect(
-        nemo.transcribe(wav, language=language, phrases=list(phrases), boost=boost, prompt=prompt, **options)
-    )
+async def transcribe(nemo, path, *, language="fr-FR", phrases=(), boost=3.0, **options):
+    return await collect(nemo.transcribe(path, language=language, phrases=list(phrases), boost=boost, **options))
 
 
 # --- Temps réel ---
 
 
-async def test_session_update_carries_language_timestamps_and_boost(fake_ws, nemo):
-    await transcribe(nemo, phrases=["Nemotron"])
+async def test_session_update_carries_language_timestamps_and_boost(fake_ws, nemo, wav_1s):
+    await transcribe(nemo, wav_1s, phrases=["Nemotron"])
     assert fake_ws.session == {
         "sample_rate": 16000,
         "language": "fr-FR",
@@ -170,48 +176,66 @@ async def test_session_update_carries_language_timestamps_and_boost(fake_ws, nem
     }
 
 
-async def test_no_speech_contexts_without_phrases(fake_ws, nemo):
-    await transcribe(nemo, phrases=[])
+async def test_no_speech_contexts_without_phrases(fake_ws, nemo, wav_1s):
+    await transcribe(nemo, wav_1s, phrases=[])
     assert "speech_contexts" not in fake_ws.session
-    assert "prompt" not in fake_ws.session
 
 
-async def test_prompt_is_passed_on(fake_ws, nemo):
-    await transcribe(nemo, prompt="Nemotron")
-    assert fake_ws.session["prompt"] == "Nemotron"
+async def test_speakers_are_asked_in_the_session_update(fake_ws, nemo, tmp_path):
+    await transcribe(nemo, write_wav(tmp_path, 1.0), speakers=True)
+    assert fake_ws.session["speaker_diarization"] is True
 
 
-async def test_connects_to_the_realtime_route(fake_ws, nemo):
-    await transcribe(nemo)
+async def test_no_speakers_and_no_prompt_unless_asked(fake_ws, nemo, tmp_path):
+    await transcribe(nemo, write_wav(tmp_path, 1.0))
+    assert "speaker_diarization" not in fake_ws.session and "prompt" not in fake_ws.session
+
+
+async def test_words_carry_the_speaker_that_nemo_gives(fake_ws, nemo, tmp_path):
+    fake_ws.after_commit = SPEAKERS_AFTER_COMMIT
+    events = await transcribe(nemo, write_wav(tmp_path, 1.0), speakers=True)
+    speakers = [word.speaker for event in events if isinstance(event, Final) for word in event.words]
+    assert speakers == [str(word[SPEAKER_KEY]) for word in SPEAKERS_COMPLETED["words"]]
+
+
+async def test_the_recorded_speakers_are_strings_numbered_from_one(fake_ws, nemo, wav_1s):
+    fake_ws.after_commit = SPEAKERS_AFTER_COMMIT
+    (final,) = [event for event in await transcribe(nemo, wav_1s, speakers=True) if isinstance(event, Final)]
+    assert {word.speaker for word in final.words} == {"1", "2"}
+    assert [word.speaker for word in final.words][:2] == ["1", "1"]
+
+
+async def test_connects_to_the_realtime_route(fake_ws, nemo, wav_1s):
+    await transcribe(nemo, wav_1s)
     assert fake_ws.path == "/v1/audio/transcriptions/realtime"
 
 
-async def test_sends_the_api_key(fake_ws, nemo):
-    await transcribe(nemo)
+async def test_sends_the_api_key(fake_ws, nemo, wav_1s):
+    await transcribe(nemo, wav_1s)
     assert fake_ws.authorization == "Bearer test-nemo-key"
 
 
-async def test_session_update_comes_before_the_audio_and_commit_after_it(fake_ws, nemo):
-    await transcribe(nemo)
+async def test_session_update_comes_before_the_audio_and_commit_after_it(fake_ws, nemo, wav_1s):
+    await transcribe(nemo, wav_1s)
     assert [message["type"] for message in fake_ws.text_messages] == ["session.update", "input_audio_buffer.commit"]
 
 
-async def test_audio_goes_as_binary_frames_then_commit(fake_ws, nemo):
-    wav = make_wav(2.5)
-    await transcribe(nemo, wav)
-    assert b"".join(fake_ws.frames) == wav_pcm(wav)
+async def test_the_audio_is_read_from_the_file_by_one_second_frames(fake_ws, nemo, tmp_path):
+    path = write_wav(tmp_path, 2.5)
+    await transcribe(nemo, path)
     assert [len(frame) for frame in fake_ws.frames] == [32000, 32000, 16000]
+    assert b"".join(fake_ws.frames) == path.read_bytes()[44:]
     assert fake_ws.text_messages[-1] == {"type": "input_audio_buffer.commit"}
 
 
-async def test_audio_given_as_a_bytearray_is_sent_the_same(fake_ws, nemo):
-    wav = make_wav(1.5)
-    await transcribe(nemo, bytearray(wav))
-    assert b"".join(fake_ws.frames) == wav_pcm(wav)
+async def test_progress_gives_the_seconds_already_sent(fake_ws, nemo, tmp_path):
+    seen = []
+    await transcribe(nemo, write_wav(tmp_path, 2.5), on_progress=seen.append)
+    assert seen == [1.0, 2.0, 2.5]
 
 
-async def test_finals_come_from_completed_events(fake_ws, nemo):
-    finals = await transcribe(nemo)
+async def test_finals_come_from_completed_events(fake_ws, nemo, wav_1s):
+    finals = await transcribe(nemo, wav_1s)
     assert len(finals) == 1
     final = finals[0]
     assert final.text == COMPLETED["transcript"]
@@ -221,7 +245,7 @@ async def test_finals_come_from_completed_events(fake_ws, nemo):
     assert all(word.speaker is None for word in final.words)
 
 
-async def test_each_completed_event_gives_a_final_and_committed_ends_the_session(fake_ws, nemo):
+async def test_each_completed_event_gives_a_final_and_committed_ends_the_session(fake_ws, nemo, wav_1s):
     second = {
         **COMPLETED,
         "event_id": "event_19",
@@ -232,51 +256,51 @@ async def test_each_completed_event_gives_a_final_and_committed_ends_the_session
         ],
     }
     fake_ws.after_commit = [COMPLETED, second, COMMITTED]
-    finals = await transcribe(nemo)
+    finals = await transcribe(nemo, wav_1s)
     assert [final.text for final in finals] == [COMPLETED["transcript"], "Deuxième phrase."]
     assert finals[1].words == (Word("Deuxième", 0.1, 0.5), Word("phrase.", 0.6, 1.0))
 
 
-async def test_no_partials_unless_they_are_asked_for(fake_ws, nemo):
-    items = await transcribe(nemo)
+async def test_no_partials_unless_they_are_asked_for(fake_ws, nemo, wav_1s):
+    items = await transcribe(nemo, wav_1s)
     assert [type(item) for item in items] == [Final]
-    assert items == await transcribe(nemo, partials=False)
+    assert items == await transcribe(nemo, wav_1s, partials=False)
 
 
-async def test_partials_come_from_the_non_empty_deltas_in_order_before_the_final(fake_ws, nemo):
+async def test_partials_come_from_the_non_empty_deltas_in_order_before_the_final(fake_ws, nemo, wav_1s):
     deltas = [event["delta"] for event in AFTER_COMMIT if event["type"].endswith(".delta")]
     # Le relevé contient bien un delta vide, que le client ne relaie pas ; les autres gardent leurs espaces.
     assert "" in deltas
     assert any(delta != delta.strip() for delta in deltas)
-    items = await transcribe(nemo, partials=True)
+    items = await transcribe(nemo, wav_1s, partials=True)
     assert items[:-1] == [Partial(delta) for delta in deltas if delta]
     assert [type(item) for item in items[-1:]] == [Final]
 
 
-async def test_the_finals_do_not_change_with_the_partials(fake_ws, nemo):
-    with_partials = await transcribe(nemo, partials=True)
-    assert [item for item in with_partials if isinstance(item, Final)] == await transcribe(nemo)
+async def test_the_finals_do_not_change_with_the_partials(fake_ws, nemo, wav_1s):
+    with_partials = await transcribe(nemo, wav_1s, partials=True)
+    assert [item for item in with_partials if isinstance(item, Final)] == await transcribe(nemo, wav_1s)
 
 
-async def test_the_deltas_the_recording_shows_start_the_final_text(fake_ws, nemo):
+async def test_the_deltas_the_recording_shows_start_the_final_text(fake_ws, nemo, wav_1s):
     # La route en flux émet le reste du `Final` après les `Partial` : elle suppose ce préfixe, que le relevé montre.
-    items = await transcribe(nemo, partials=True)
+    items = await transcribe(nemo, wav_1s, partials=True)
     streamed = "".join(item.text for item in items if isinstance(item, Partial))
     assert items[-1].text.startswith(streamed)
     assert items[-1].text != streamed
 
 
-async def test_partials_of_each_item_come_before_its_final(fake_ws, nemo):
+async def test_partials_of_each_item_come_before_its_final(fake_ws, nemo, wav_1s):
     second = {**COMPLETED, "event_id": "event_19", "transcript": "Deuxième phrase.", "words": []}
     delta = {"type": "conversation.item.input_audio_transcription.delta", "delta": "Deuxième"}
     fake_ws.after_commit = [delta, COMPLETED, delta, second, COMMITTED]
-    items = await transcribe(nemo, partials=True)
-    recorded_final = (await transcribe(nemo))[0]
+    items = await transcribe(nemo, wav_1s, partials=True)
+    recorded_final = (await transcribe(nemo, wav_1s))[0]
     assert items == [Partial("Deuxième"), recorded_final, Partial("Deuxième"), Final("Deuxième phrase.", ())]
 
 
-async def test_the_client_closes_the_socket_when_the_session_ends(fake_ws, nemo):
-    await transcribe(nemo)
+async def test_the_client_closes_the_socket_when_the_session_ends(fake_ws, nemo, wav_1s):
+    await transcribe(nemo, wav_1s)
     await asyncio.wait_for(fake_ws.closed.wait(), 1)
 
 
@@ -289,27 +313,27 @@ async def test_the_client_closes_the_socket_when_the_session_ends(fake_ws, nemo)
         ("internal_error", NemoError),
     ],
 )
-async def test_error_event_raises_the_exception_of_its_code(fake_ws, nemo, code, expected):
+async def test_error_event_raises_the_exception_of_its_code(fake_ws, nemo, wav_1s, code, expected):
     fake_ws.error_code = code
     with pytest.raises(expected, match=f"{code} sent by the fake NeMo" if expected is NemoError else None):
-        await transcribe(nemo)
+        await transcribe(nemo, wav_1s)
     await asyncio.wait_for(fake_ws.closed.wait(), 1)
 
 
-async def test_error_event_after_the_audio_raises_too(fake_ws, nemo):
+async def test_error_event_after_the_audio_raises_too(fake_ws, nemo, wav_1s):
     fake_ws.after_commit = [error_event("resource_exhausted", "rate_limit_error")]
     with pytest.raises(NemoOverloaded):
-        await transcribe(nemo)
+        await transcribe(nemo, wav_1s)
 
 
 @pytest.mark.parametrize(("status", "expected"), [(429, NemoOverloaded), (401, NemoError), (503, NemoError)])
-async def test_refused_handshake_maps_the_http_status(fake_ws, nemo, status, expected):
+async def test_refused_handshake_maps_the_http_status(fake_ws, nemo, wav_1s, status, expected):
     fake_ws.reject_status = status
     with pytest.raises(expected):
-        await transcribe(nemo)
+        await transcribe(nemo, wav_1s)
 
 
-async def test_unreachable_server_raises_unavailable():
+async def test_unreachable_server_raises_unavailable(wav_1s):
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
@@ -317,29 +341,55 @@ async def test_unreachable_server_raises_unavailable():
     async with httpx.AsyncClient() as http:
         nemo = NemoClient(f"http://127.0.0.1:{port}", "test-nemo-key", http)
         with pytest.raises(NemoUnavailable):
-            await transcribe(nemo)
+            await transcribe(nemo, wav_1s)
 
 
-async def test_connection_dropped_by_nemo_raises_unavailable(fake_ws, nemo):
+async def test_connection_dropped_by_nemo_raises_unavailable(fake_ws, nemo, wav_1s):
     fake_ws.drop_on_commit = True
     with pytest.raises(NemoUnavailable):
-        await transcribe(nemo)
+        await transcribe(nemo, wav_1s)
 
 
-async def test_silence_from_nemo_raises_nemo_error(fake_ws, nemo, monkeypatch):
+async def test_silence_from_nemo_raises_nemo_error(fake_ws, nemo, wav_1s, monkeypatch):
     monkeypatch.setattr(nemo_module, "EVENT_TIMEOUT", 0.2)
     fake_ws.after_commit = []
     with pytest.raises(NemoError, match="no event"):
-        await transcribe(nemo)
+        await transcribe(nemo, wav_1s)
     await asyncio.wait_for(fake_ws.closed.wait(), 1)
 
 
-async def test_stopping_the_consumer_closes_the_session(fake_ws, nemo):
+async def test_with_speakers_the_wait_between_two_events_goes_up_to_the_speakers_timeout(
+    fake_ws, nemo, wav_1s, monkeypatch
+):
+    # NeMo marque les personnes sur tout l'audio avant de rendre le seul événement final : l'attente y est plus longue.
+    monkeypatch.setattr(nemo_module, "EVENT_TIMEOUT", 0.2)
+    monkeypatch.setattr(nemo_module, "SPEAKERS_EVENT_TIMEOUT", 3.0)
+    fake_ws.commit_delay = 0.6
+    with pytest.raises(NemoError, match="no event from NeMo for 0.2 seconds"):
+        await transcribe(nemo, wav_1s)
+    fake_ws.after_commit = SPEAKERS_AFTER_COMMIT
+    items = await transcribe(nemo, wav_1s, speakers=True)
+    assert [type(item) for item in items] == [Final]
+
+
+async def test_with_speakers_silence_from_nemo_still_ends_after_the_speakers_timeout(
+    fake_ws, nemo, wav_1s, monkeypatch
+):
+    monkeypatch.setattr(nemo_module, "SPEAKERS_EVENT_TIMEOUT", 0.3)
+    fake_ws.after_commit = []
+    started = time.monotonic()
+    with pytest.raises(NemoError, match="no event from NeMo for 0.3 seconds"):
+        await transcribe(nemo, wav_1s, speakers=True)
+    assert time.monotonic() - started >= 0.3
+    await asyncio.wait_for(fake_ws.closed.wait(), 1)
+
+
+async def test_stopping_the_consumer_closes_the_session(fake_ws, nemo, wav_1s):
     fake_ws.after_commit = HELD_BACK
     first_final = asyncio.Event()
 
     async def consume():
-        async with aclosing(nemo.transcribe(WAV_1S, language="fr-FR", phrases=[], boost=3.0, prompt=None)) as finals:
+        async with aclosing(nemo.transcribe(wav_1s, language="fr-FR", phrases=[], boost=3.0)) as finals:
             async for _ in finals:
                 first_final.set()
                 await asyncio.Event().wait()  # le consommateur ne revient jamais chercher la suite
@@ -352,9 +402,9 @@ async def test_stopping_the_consumer_closes_the_session(fake_ws, nemo):
         await task
 
 
-async def test_cancelling_a_consumer_that_waits_for_nemo_closes_the_session(fake_ws, nemo):
+async def test_cancelling_a_consumer_that_waits_for_nemo_closes_the_session(fake_ws, nemo, wav_1s):
     fake_ws.after_commit = []
-    task = asyncio.create_task(transcribe(nemo))
+    task = asyncio.create_task(transcribe(nemo, wav_1s))
     await until(lambda: fake_ws.text_messages and fake_ws.text_messages[-1]["type"] == "input_audio_buffer.commit")
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -362,14 +412,14 @@ async def test_cancelling_a_consumer_that_waits_for_nemo_closes_the_session(fake
     await asyncio.wait_for(fake_ws.closed.wait(), 1)
 
 
-async def test_cancelling_during_the_audio_upload_closes_the_session(fake_ws, nemo, monkeypatch):
+async def test_cancelling_during_the_audio_upload_closes_the_session(fake_ws, nemo, wav_1s, monkeypatch):
     # NeMo lit l'audio à sa vitesse : l'envoi d'une longue dictée dure des minutes.
     # On simule un envoi qui ne finit pas.
-    async def endless_upload(ws, pcm):
+    async def endless_upload(*_):
         await asyncio.Event().wait()
 
     monkeypatch.setattr(nemo_module, "_send_audio", endless_upload)
-    task = asyncio.create_task(transcribe(nemo))
+    task = asyncio.create_task(transcribe(nemo, wav_1s))
     await until(lambda: fake_ws.session is not None)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -377,7 +427,27 @@ async def test_cancelling_during_the_audio_upload_closes_the_session(fake_ws, ne
     await asyncio.wait_for(fake_ws.closed.wait(), 1)
 
 
-async def test_connection_options_fit_nemo(fake_ws, nemo, monkeypatch):
+async def test_an_error_of_the_progress_callback_ends_the_session_at_once(fake_ws, nemo, wav_1s):
+    def broken(seconds):
+        raise RuntimeError("progress failed")
+
+    # NeMo ne dit rien : sans la garde de l'envoi, la session attendrait le délai d'attente avant de s'arrêter.
+    fake_ws.after_commit = []
+    async with asyncio.timeout(5):
+        with pytest.raises(RuntimeError, match="progress failed"):
+            await transcribe(nemo, wav_1s, on_progress=broken)
+    await asyncio.wait_for(fake_ws.closed.wait(), 1)
+
+
+async def test_a_file_that_cannot_be_read_ends_the_session_with_its_own_error(fake_ws, nemo, tmp_path):
+    fake_ws.after_commit = []
+    async with asyncio.timeout(5):
+        with pytest.raises(FileNotFoundError):
+            await transcribe(nemo, tmp_path / "missing.wav")
+    await asyncio.wait_for(fake_ws.closed.wait(), 1)
+
+
+async def test_connection_options_fit_nemo(fake_ws, nemo, wav_1s, monkeypatch):
     # NeMo ne répond à un ping qu'après l'audio envoyé avant lui, le `completed` d'une longue dictée est un seul
     # événement plus gros que la limite par défaut de `websockets`, et une session abandonnée pendant l'envoi de
     # l'audio ne répond pas à la fermeture : on n'attend pas les 10 s par défaut.
@@ -389,13 +459,13 @@ async def test_connection_options_fit_nemo(fake_ws, nemo, monkeypatch):
         return real_connect(*args, **kwargs)
 
     monkeypatch.setattr(nemo_module, "connect", spy)
-    await transcribe(nemo)
+    await transcribe(nemo, wav_1s)
     assert seen["ping_interval"] is None
     assert seen["max_size"] is None
     assert seen["close_timeout"] == nemo_module.CLOSE_TIMEOUT < 10
 
 
-async def test_logs_never_carry_the_api_key_nor_the_session_content(fake_ws, nemo, caplog):
+async def test_logs_never_carry_the_api_key_nor_the_session_content(fake_ws, nemo, wav_1s, caplog):
     # À son niveau DEBUG, `websockets` écrit les en-têtes de la poignée de main et un extrait de chaque trame.
     caplog.set_level(logging.DEBUG)
     caplog.set_level(logging.DEBUG, logger="websockets")
@@ -405,9 +475,9 @@ async def test_logs_never_carry_the_api_key_nor_the_session_content(fake_ws, nem
     assert "Bearer control-key" in caplog.text
     caplog.clear()
 
-    await transcribe(nemo, phrases=["Sortformer"], prompt="Nemotron")
+    await transcribe(nemo, wav_1s, phrases=["Sortformer"], speakers=True)
     assert fake_ws.authorization == "Bearer test-nemo-key"  # la session a bien eu lieu, clé comprise
-    for secret in ("test-nemo-key", "Sortformer", "Nemotron", "speech_contexts"):
+    for secret in ("test-nemo-key", "Sortformer", "speech_contexts", "speaker_diarization"):
         assert secret not in caplog.text
 
 
@@ -420,8 +490,6 @@ def envelope(message: str, error_type: str) -> dict:
 
 
 def ok_response(path: str) -> httpx.Response:
-    if path == "/v1/audio/diarizations":
-        return httpx.Response(200, json=json.loads((FIXTURES / "diarization.json").read_text()))
     if path == "/v1/audio/speech":
         return httpx.Response(200, content=b"\x01\x00" * 100, headers={"Content-Type": "audio/pcm"})
     if path == "/v1/models":
@@ -459,113 +527,9 @@ async def http_nemo():
 
 
 CALLS = {
-    "diarize": lambda nemo: nemo.diarize(WAV_1S),
     "speak": lambda nemo: nemo.speak("Bonjour.", voice="Leo", language="fr-FR"),
     "voices": lambda nemo: nemo.voices(),
 }
-
-
-async def test_diarize_posts_the_file_and_parses_turns(http_nemo):
-    recorder = Recorder()
-    turns = await http_nemo(recorder).diarize(WAV_1S)
-    (request,) = recorder.requests
-    assert (request.method, request.url.path) == ("POST", "/v1/audio/diarizations")
-    assert request.headers["Authorization"] == "Bearer test-nemo-key"
-    assert b'name="file"' in request.content
-    assert WAV_1S in request.content
-    assert b'name="mode"\r\n\r\nstreaming\r\n' in request.content
-    segments = json.loads((FIXTURES / "diarization.json").read_text())["segments"]
-    assert turns == [Turn(start=s["start"], end=s["end"], speaker=s["speaker"]) for s in segments]
-    assert [turn.speaker for turn in turns] == [1, 2]
-    assert all(isinstance(turn.start, float) and isinstance(turn.end, float) for turn in turns)
-
-
-async def test_diarize_accepts_a_bytearray(http_nemo):
-    recorder = Recorder()
-    await http_nemo(recorder).diarize(bytearray(WAV_1S))
-    assert WAV_1S in recorder.requests[0].content
-
-
-EDGE = 1024
-
-
-class Sink(httpx.AsyncBaseTransport):
-    """Faux transport qui lit le corps d'une requête par morceaux sans le garder.
-
-    Il n'en retient que la taille, l'empreinte SHA-256, les `EDGE` premiers et derniers octets : un test de mémoire
-    ne doit pas compter ce que le faux transport accumulerait lui-même.
-    """
-
-    def __init__(self) -> None:
-        self.headers = httpx.Headers()
-        self.size = 0
-        self.digest = hashlib.sha256()
-        self.head = b""
-        self.tail = b""
-
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        self.headers = request.headers
-        async for chunk in request.stream:
-            self.size += len(chunk)
-            self.digest.update(chunk)
-            self.head += chunk[: EDGE - len(self.head)]
-            self.tail = chunk[-EDGE:] if len(chunk) >= EDGE else (self.tail + chunk)[-EDGE:]
-        return httpx.Response(200, json=json.loads((FIXTURES / "diarization.json").read_text()))
-
-
-def diarize_body(boundary: str, wav: bytes) -> bytes:
-    """Le corps que NeMo reçoit : le champ `mode`, puis le fichier, sous la frontière `boundary`."""
-    head = (
-        f'--{boundary}\r\nContent-Disposition: form-data; name="mode"\r\n\r\nstreaming\r\n'
-        f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.wav"\r\n'
-        "Content-Type: audio/wav\r\n\r\n"
-    )
-    return head.encode() + wav + f"\r\n--{boundary}--\r\n".encode()
-
-
-def boundary_of(headers: httpx.Headers) -> str:
-    match = re.fullmatch(r"multipart/form-data; boundary=(\w+)", headers["content-type"])
-    assert match, headers["content-type"]
-    return match.group(1)
-
-
-async def test_diarize_sends_the_wav_in_blocks_without_copying_it():
-    # 4 Mio de WAV, soit environ deux minutes : le décodage d'une heure en pèse 110.
-    wav = bytearray(b"RIFF" + os.urandom(4 * MIB))
-    sink = Sink()
-    async with httpx.AsyncClient(transport=sink) as http:
-        nemo = NemoClient("http://nemo.test", "test-nemo-key", http)
-        tracemalloc.start()
-        try:
-            turns = await nemo.diarize(wav)
-            peak = tracemalloc.get_traced_memory()[1]
-        finally:
-            tracemalloc.stop()
-    assert peak < MIB, f"{peak} octets alloués pendant l'envoi d'un WAV de {len(wav)} octets"
-    assert [turn.speaker for turn in turns] == [1, 2]
-    expected = diarize_body(boundary_of(sink.headers), bytes(wav))
-    assert sink.size == len(expected)
-    assert sink.digest.digest() == hashlib.sha256(expected).digest()
-
-
-async def test_diarize_announces_the_exact_length_of_its_body():
-    # NeMo n'accepte peut-être pas l'encodage par morceaux : le corps annonce sa taille, sans `Transfer-Encoding`.
-    sink = Sink()
-    async with httpx.AsyncClient(transport=sink) as http:
-        await NemoClient("http://nemo.test", "test-nemo-key", http).diarize(WAV_1S)
-    assert sink.headers["content-length"] == str(sink.size)
-    assert "transfer-encoding" not in sink.headers
-    assert sink.headers["authorization"] == "Bearer test-nemo-key"
-
-
-@pytest.mark.parametrize("container", [bytes, bytearray, memoryview], ids=lambda kind: kind.__name__)
-async def test_diarize_body_is_the_same_multipart_form_whatever_the_buffer(container):
-    sink = Sink()
-    async with httpx.AsyncClient(transport=sink) as http:
-        await NemoClient("http://nemo.test", "test-nemo-key", http).diarize(container(WAV_1S))
-    expected = diarize_body(boundary_of(sink.headers), WAV_1S)
-    assert sink.head == expected[:EDGE] and sink.tail == expected[-EDGE:]
-    assert sink.digest.digest() == hashlib.sha256(expected).digest()
 
 
 @pytest.mark.parametrize("call", CALLS.values(), ids=CALLS.keys())
@@ -590,7 +554,7 @@ async def test_connect_error_raises_unavailable(http_nemo, call):
 async def test_timeout_or_lost_connection_raises_unavailable(http_nemo, error):
     nemo = http_nemo(Recorder(error=error))
     with pytest.raises(NemoUnavailable):
-        await nemo.diarize(WAV_1S)
+        await nemo.speak("Bonjour.", voice="Leo", language="fr-FR")
 
 
 @pytest.mark.parametrize(
@@ -607,7 +571,7 @@ async def test_timeout_or_lost_connection_raises_unavailable(http_nemo, error):
 async def test_other_error_status_raises_nemo_error(http_nemo, response, expected):
     nemo = http_nemo(Recorder(response))
     with pytest.raises(NemoError, match=expected):
-        await nemo.diarize(WAV_1S)
+        await nemo.speak("Bonjour.", voice="Leo", language="fr-FR")
 
 
 async def test_speak_asks_for_pcm(http_nemo):
@@ -648,7 +612,7 @@ async def test_voices_without_a_speech_model_raises_nemo_error(http_nemo):
 
 @pytest.mark.parametrize(
     ("call", "read_timeout"),
-    [(CALLS["diarize"], 1200.0), (CALLS["speak"], 120.0), (CALLS["voices"], 10.0)],
+    [(CALLS["speak"], 120.0), (CALLS["voices"], 10.0)],
     ids=CALLS.keys(),
 )
 async def test_http_calls_set_their_own_timeout(http_nemo, call, read_timeout):

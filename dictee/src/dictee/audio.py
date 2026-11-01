@@ -2,7 +2,7 @@
 
 import asyncio
 import struct
-from collections.abc import AsyncIterator, Buffer, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 
 # NeMo transcrit du PCM16 mono à 16 kHz.
@@ -118,12 +118,12 @@ async def _decode_pcm(
 
     ffmpeg lit le chemin et non un tube : un m4a d'Android range souvent son index en fin de fichier, que ffmpeg
     ne peut atteindre qu'en se déplaçant dans le fichier. Il rend du PCM brut, que `sink` range là où l'appelant le
-    veut (un tampon, un fichier) : rien d'autre n'est gardé ici. Le poids du décodé n'a pas de rapport avec celui de
-    l'envoi (une heure de silence en FLAC pèse quelques centaines de Ko et décode en 115 Mo), donc la taille décodée
-    est bornée ici et nulle part ailleurs : au-delà de `max_seconds` d'audio, ffmpeg est tué et `AudioTooLong` est
-    levée, après avoir lu au plus `DECODE_READ_SIZE` octets de plus que le plafond ; après `timeout_s` secondes,
-    ffmpeg est tué et `AudioDecodeError` est levée. Le plafond n'a pas de valeur par défaut : chaque appelant a le
-    sien.
+    veut (`decode_wav16k` l'écrit dans un fichier) : rien d'autre n'est gardé ici. Le poids du décodé n'a pas de
+    rapport avec celui de l'envoi (une heure de silence en FLAC pèse quelques centaines de Ko et décode en 115 Mo),
+    donc la taille décodée est bornée ici et nulle part ailleurs : au-delà de `max_seconds` d'audio, ffmpeg est tué et
+    `AudioTooLong` est levée, après avoir lu au plus `DECODE_READ_SIZE` octets de plus que le plafond ; après
+    `timeout_s` secondes, ffmpeg est tué et `AudioDecodeError` est levée. Le plafond n'a pas de valeur par défaut :
+    chaque appelant a le sien.
 
     `long_seconds` et `on_long` vont ensemble. `on_long()` est appelé une fois, de façon synchrone, juste après la
     lecture qui fait passer l'audio décodé au-dessus de `long_seconds`, donc après au plus `DECODE_READ_SIZE` octets
@@ -192,28 +192,6 @@ async def _decode_pcm(
     return pcm_size
 
 
-async def to_wav16k(
-    src: Path,
-    *,
-    max_seconds: float,
-    timeout_s: float = 600.0,
-    long_seconds: float | None = None,
-    on_long: Callable[[], None] | None = None,
-) -> bytearray:
-    """Décode n'importe quel audio en WAV PCM16 mono 16 kHz, dans un seul tampon.
-
-    Le PCM s'ajoute au fur et à mesure à un `bytearray` dont les 44 premiers octets sont réservés à l'en-tête WAV,
-    écrit en place à la fin : ni copie, ni second tampon. Les limites, `long_seconds`, `on_long` et les erreurs sont
-    celles de `_decode_pcm`.
-    """
-    wav = bytearray(WAV_HEADER_SIZE)
-    pcm_size = await _decode_pcm(
-        src, wav.extend, max_seconds=max_seconds, timeout_s=timeout_s, long_seconds=long_seconds, on_long=on_long
-    )
-    wav[:WAV_HEADER_SIZE] = _wav_header(pcm_size)
-    return wav
-
-
 async def decode_wav16k(
     src: Path,
     dst: Path,
@@ -242,44 +220,6 @@ async def decode_wav16k(
         dst.unlink(missing_ok=True)
         raise
     return pcm_size / _BYTES_PER_SECOND
-
-
-def _parse_wav(wav: Buffer) -> tuple[int, int, memoryview]:
-    """Cadence, taille d'une trame et données d'un WAV PCM, sans copier ses échantillons.
-
-    Les chunks sont parcourus un à un : un enregistreur peut en placer d'autres (LIST, par exemple) avant les données.
-    Une taille de données qui dépasse la fin du tampon, comme en écrit un WAV diffusé en continu, est ramenée à
-    cette fin.
-    """
-    view = memoryview(wav)
-    if len(view) < 12 or view[:4] != b"RIFF" or view[8:12] != b"WAVE":
-        raise ValueError("not a WAV file")
-    frame = None
-    position = 12
-    while position + 8 <= len(view):
-        chunk_id = bytes(view[position : position + 4])
-        (size,) = struct.unpack_from("<I", view, position + 4)
-        body = position + 8
-        if chunk_id == b"fmt ":
-            _, channels, rate, _, _, bits = struct.unpack_from("<HHIIHH", view, body)
-            frame = (rate, channels * bits // 8)
-        elif chunk_id == b"data":
-            if frame is None:
-                raise ValueError("WAV data before its format")
-            return frame[0], frame[1], view[body : body + size]
-        position = body + size + size % 2
-    raise ValueError("WAV without data")
-
-
-def wav_duration(wav: Buffer) -> float:
-    """Durée en secondes d'un WAV, lue dans son en-tête."""
-    rate, frame_size, data = _parse_wav(wav)
-    return len(data) / frame_size / rate
-
-
-def wav_pcm(wav: Buffer) -> memoryview:
-    """Les échantillons d'un WAV, sans l'en-tête : une vue sur le tampon, sans copie."""
-    return _parse_wav(wav)[2]
 
 
 def read_wav_slice(path: Path, start: float, end: float) -> bytes:

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import anyio
 import pytest
-from fakes import FINALS, TURNS, FakeLlm, FakeNemo
+from fakes import FINALS, FakeLlm, FakeNemo
 from openai import OpenAI
 from starlette.testclient import TestClient
 
@@ -103,7 +103,7 @@ def client(settings):
 
 @pytest.fixture
 def fake_nemo():
-    return FakeNemo(finals=FINALS, turns=TURNS)
+    return FakeNemo(finals=FINALS)
 
 
 @pytest.fixture

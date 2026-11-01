@@ -1,9 +1,9 @@
 """Route `POST /v1/audio/transcriptions`, compatible avec celle d'OpenAI.
 
-La route lit l'envoi, convertit l'audio, fait transcrire par NeMo (avec les locuteurs ou la reformulation selon le
-modèle demandé) et répond dans le format demandé, en une fois ou en événements SSE. Rien n'est journalisé ici qui
-vienne du contenu : ni le texte transcrit, ni les consignes, ni l'audio. La ligne de chaque requête dit qui, quoi,
-combien de temps et comment elle s'est terminée.
+La route lit l'envoi, décode l'audio dans un fichier temporaire, fait transcrire par NeMo (avec les personnes que sa
+session marque ou la reformulation selon le modèle demandé) et répond dans le format demandé, en une fois ou en
+événements SSE. Rien n'est journalisé ici qui vienne du contenu : ni le texte transcrit, ni les consignes, ni l'audio.
+La ligne de chaque requête dit qui, quoi, combien de temps et comment elle s'est terminée.
 
 Les pièces que d'autres routes réutilisent sont dans `upload` (lecture de l'envoi), `lifecycle` (ligne de journal,
 tâches détachées, client qui raccroche), `errors` (erreurs de NeMo) et `formats` (événements SSE).
@@ -22,7 +22,7 @@ from starlette.datastructures import State
 from starlette.requests import ClientDisconnect, Request
 from starlette.responses import Response, StreamingResponse
 
-from dictee.audio import AudioDecodeError, AudioTooLong, to_wav16k, wav_duration
+from dictee.audio import AudioDecodeError, AudioTooLong, decode_wav16k
 from dictee.auth import require_caller
 from dictee.cleanup import clean
 from dictee.errors import NEMO_ERRORS, ApiError, nemo_failure, unexpected_error
@@ -30,19 +30,13 @@ from dictee.formats import delta_event, done_event, error_event, render, segment
 from dictee.lifecycle import CLIENT_CLOSED, Trace, cancel_once, elapsed_ms, loggable, run_unless_disconnected, spawn
 from dictee.modes import Mode, resolve_mode, to_iso_language, to_nemo_language
 from dictee.profile import Profile, glossary_terms, load_profile
-from dictee.speakers import assign_speakers, build_segments
-from dictee.types import Partial, Transcript, Turn, Word
+from dictee.speakers import build_segments, label_speakers
+from dictee.types import Partial, Transcript, Word
 from dictee.upload import read_upload
 
-# Plafond de durée d'un envoi, toutes transcriptions confondues. Dictee garde le WAV décodé en mémoire, à 32 000 octets
-# par seconde : 165 Mio pour 5400 s. Le pire cas que la porte des audios longs permet tient sous la limite de 512 Mio du
-# conteneur : le socle mesuré (101 Mio), deux audios de 5400 s (celui qui tourne et celui qui attend, 330 Mio) et un
-# troisième envoi long, refusé dès qu'il passe `LONG_AUDIO_SECONDS` (18 Mio à 600 s), soit environ 450 Mio, plus les
-# audios courts en cours.
-MAX_AUDIO_SECONDS = 5400.0
-# Les routes REST de NeMo refusent plus de 3600 s : la passe de locuteurs s'arrête un peu avant. Le décodage s'arrête
-# à ce plafond en mode locuteurs, sans décoder le reste.
-MAX_DIARIZE_SECONDS = 3590.0
+# Plafond de durée d'un envoi, tous modes confondus : 2 heures, la durée de l'enregistreur. Le WAV décodé vit sur le
+# disque, 230 Mio à ce plafond (32 000 octets par seconde), et seule une trame d'une seconde passe en mémoire.
+MAX_AUDIO_SECONDS = 7200.0
 GRANULARITIES = frozenset({"word", "segment"})
 
 
@@ -53,11 +47,11 @@ def long_audio_busy() -> ApiError:
 
 
 class LongAudioGate:
-    """Une transcription longue à la fois et une seule en attente, pour borner la mémoire de dictee et de NeMo.
+    """Une transcription longue à la fois et une seule en attente, pour borner la mémoire de NeMo et le disque.
 
     Un audio plus long que `threshold_s` est « long » ; un audio de `threshold_s` ou moins est « court » et ne passe
     pas par la porte : il n'attend jamais, même quand les places des longs sont prises. Le décodage réserve la place
-    d'un audio long (`reserve`) dès qu'il franchit le seuil, donc avant d'avoir le WAV entier en mémoire : une place
+    d'un audio long (`reserve`) dès qu'il franchit le seuil, donc avant d'avoir le WAV entier sur le disque : une place
     pour celui qui tourne, une pour celui qui attend. Un audio long qui arrive quand les deux sont prises est refusé
     tout de suite par `long_audio_busy`, et son décodage s'arrête au seuil.
     """
@@ -122,7 +116,6 @@ class _Params:
     mode: Mode
     stream: bool
     granularities: frozenset[str]
-    prompt: str | None
 
 
 def _first(fields: dict[str, list[str]], name: str) -> str | None:
@@ -143,8 +136,8 @@ def _parse_params(fields: dict[str, list[str]], trace: Trace) -> _Params:
     """Lit les champs du formulaire, et lève une erreur 400 pour une langue, un format ou un `stream` refusés.
 
     Un champ absent prend sa valeur par défaut : la fonction vaut aussi pour les champs reçus avant le fichier.
-    `chunking_strategy`, `temperature`, `known_speaker_names[]`, `known_speaker_references[]` et `include[]` sont
-    acceptés et ignorés.
+    `prompt`, `chunking_strategy`, `temperature`, `known_speaker_names[]`, `known_speaker_references[]` et
+    `include[]` sont acceptés et ignorés : NeMo ne reçoit jamais `prompt`.
     """
     model = _first(fields, "model")
     trace.model = loggable(model)
@@ -162,7 +155,6 @@ def _parse_params(fields: dict[str, list[str]], trace: Trace) -> _Params:
         mode=mode,
         stream=_stream_flag(_first(fields, "stream")),
         granularities=frozenset(values) & GRANULARITIES or frozenset({"segment"}),
-        prompt=_first(fields, "prompt") or None,
     )
 
 
@@ -170,22 +162,18 @@ def _minutes(seconds: float) -> int:
     return int(seconds // 60)
 
 
-async def _decode(path: Path, mode: Mode, long_seconds: float, on_long: Callable[[], None]) -> bytearray:
-    """Convertit l'envoi en WAV 16 kHz ; un audio trop long ou illisible devient une erreur 400, 422 ou 429.
+async def _decode(src: Path, dst: Path, long_seconds: float, on_long: Callable[[], None]) -> float:
+    """Décode l'envoi `src` en WAV 16 kHz dans `dst` et rend sa durée en secondes.
 
-    Le décodage s'arrête au plafond du mode, `MAX_DIARIZE_SECONDS` pour les locuteurs et `MAX_AUDIO_SECONDS` sinon : au
-    delà, le reste n'est pas décodé. `on_long` est appelé quand l'audio passe `long_seconds` (voir `to_wav16k`) ;
-    l'erreur 429 qu'il lève arrête le décodage à ce moment.
+    Un audio trop long ou illisible devient une erreur 400 ou 422. Le décodage s'arrête à `MAX_AUDIO_SECONDS`, pour
+    tous les modes : au delà, le reste n'est pas décodé. `on_long` est appelé quand l'audio passe `long_seconds` (voir
+    `decode_wav16k`) ; l'erreur 429 qu'il lève arrête le décodage à ce moment. Quelle que soit l'erreur, `dst` n'existe
+    plus.
     """
-    diarize = mode is Mode.DIARIZE
-    limit = MAX_DIARIZE_SECONDS if diarize else MAX_AUDIO_SECONDS
     try:
-        return await to_wav16k(path, max_seconds=limit, long_seconds=long_seconds, on_long=on_long)
+        return await decode_wav16k(src, dst, max_seconds=MAX_AUDIO_SECONDS, long_seconds=long_seconds, on_long=on_long)
     except AudioTooLong:
-        if diarize:
-            message = f"Speaker separation accepts audio up to {_minutes(limit)} minutes."
-        else:
-            message = f"The audio is longer than {_minutes(limit)} minutes."
+        message = f"The audio is longer than {_minutes(MAX_AUDIO_SECONDS)} minutes."
         raise ApiError(400, message, param="file", code="audio_too_long") from None
     except AudioDecodeError:
         raise ApiError(422, "The audio file could not be read.", param="file", code="invalid_audio") from None
@@ -193,11 +181,10 @@ async def _decode(path: Path, mode: Mode, long_seconds: float, on_long: Callable
 
 @dataclass
 class _Recognition:
-    """Ce que NeMo a rendu : les textes des phrases finales, leurs mots, les tours de parole."""
+    """Ce que NeMo a rendu : les textes des phrases finales et leurs mots."""
 
     texts: list[str]
     words: list[Word]
-    turns: list[Turn]
 
 
 class _End:
@@ -257,29 +244,35 @@ async def _abandon(recognition: asyncio.Task, trace: Trace) -> None:
 
 @dataclass
 class _Job:
-    """Une transcription en cours : l'audio converti et ce que ses étapes partagent."""
+    """Une transcription en cours : l'audio converti et ce que ses étapes partagent.
+
+    `wav` est le WAV décodé, dans le dossier `scratch`. Le dossier appartient à la transcription : il disparaît à la
+    fin de la reconnaissance, quelle qu'en soit l'issue (par `_handle` ou, pour une réponse en continu, par
+    `open_stream`).
+    """
 
     state: State
     params: _Params
     profile: Profile
     trace: Trace
-    wav: bytearray
+    wav: Path
     duration: float
+    scratch: tempfile.TemporaryDirectory
     place: LongPlace | None = None
 
     async def recognize(self, on_text: Callable[[str], None] | None = None) -> _Recognition:
         """Les passes de NeMo sur l'audio, à leur tour parmi les transcriptions longues.
 
         `on_text` reçoit le texte au fur et à mesure (voir `_DeltaFeed`) : chaque morceau que NeMo produit en cours de
-        route, puis le reste de la phrase finale de son item. Sans `on_text`, NeMo ne rend que les phrases finales.
-        La session de NeMo se ferme, et la place se libère, quelle que soit la sortie, annulation comprise. Un audio
-        long a déjà sa place, réservée pendant son décodage : il attend son tour derrière celui qui tourne, sans
-        pouvoir être refusé ici. Un audio court n'attend pas.
+        route, puis le reste de la phrase finale de son item. Sans `on_text`, NeMo ne rend que les phrases finales. En
+        mode réunion, la session de NeMo marque les personnes (`speakers`). La session de NeMo se ferme, et la place se
+        libère, quelle que soit la sortie, annulation comprise. Un audio long a déjà sa place, réservée pendant son
+        décodage : il attend son tour derrière celui qui tourne, sans pouvoir être refusé ici. Un audio court n'attend
+        pas.
         """
         state, params = self.state, self.params
         texts: list[str] = []
         words: list[Word] = []
-        turns: list[Turn] = []
         feed = None if on_text is None else _DeltaFeed(on_text)
         async with contextlib.nullcontext() if self.place is None else self.place.turn():
             started = time.monotonic()
@@ -290,7 +283,7 @@ class _Job:
                         language=params.nemo_language,
                         phrases=glossary_terms(self.profile.glossary),
                         boost=state.settings.glossary_boost,
-                        prompt=params.prompt,
+                        speakers=params.mode is Mode.DIARIZE,
                         partials=feed is not None,
                     )
                 ) as events:
@@ -305,22 +298,20 @@ class _Job:
                             texts.append(text)
                         if feed is not None:
                             feed.final(text)
-                if params.mode is Mode.DIARIZE and words:
-                    turns = await state.nemo.diarize(self.wav)
             finally:
                 self.trace.nemo_ms = elapsed_ms(started)
                 if feed is not None:
                     self.trace.mismatch = feed.mismatches
-        return _Recognition(texts, words, turns)
+        return _Recognition(texts, words)
 
     async def finish(self, recognition: _Recognition) -> Transcript:
-        """Le texte entier, avec ses locuteurs ou reformulé selon le mode."""
+        """Le texte entier, avec ses personnes ou reformulé selon le mode."""
         params = self.params
         text = " ".join(recognition.texts)
         words = tuple(recognition.words)
         segments = None
         if params.mode is Mode.DIARIZE:
-            words = tuple(assign_speakers(words, recognition.turns))
+            words = tuple(label_speakers(words))
             segments = tuple(build_segments(words))
         elif params.mode is Mode.CLEAN:
             started = time.monotonic()
@@ -338,16 +329,18 @@ class _Job:
         reconnaissance. La reconnaissance démarre ici, sous la garde du client qui raccroche. Un échec qui survient
         avant le premier delta est rendu comme celui d'une réponse ordinaire (429 ou 502 pour NeMo) : le statut part
         après, quand on sait déjà si NeMo répond. Un échec plus tard n'a plus de statut à changer et part en événement
-        `error` (voir `events`). La place d'un audio long, réservée pendant le décodage, se rend à la fin de la
-        reconnaissance.
+        `error` (voir `events`). La place d'un audio long, réservée pendant le décodage, et le dossier du WAV se
+        rendent à la fin de la reconnaissance.
         """
         deltas: asyncio.Queue[str | _End] = asyncio.Queue()
         # Avec la reformulation, le texte part en un seul delta, quand le LLM l'a rendu.
         on_text = None if self.params.mode is Mode.CLEAN else deltas.put_nowait
         recognition = spawn(self.recognize(on_text))
         recognition.add_done_callback(lambda _: deltas.put_nowait(_END))
+        # Une tâche annulée avant son premier pas n'entre jamais dans `recognize` : le dossier du WAV et la place se
+        # rendent ici, à la fin de la tâche.
+        recognition.add_done_callback(lambda _: self.scratch.cleanup())
         if self.place is not None:
-            # Une tâche annulée avant son premier pas n'entre jamais dans `recognize` : sa place se rend ici aussi.
             recognition.add_done_callback(lambda _: self.place.release())
         try:
             first = await run_unless_disconnected(request, deltas.get())
@@ -420,27 +413,28 @@ async def _handle(request: Request, trace: Trace) -> Response:
         place = state.gate.reserve()
 
     handed_over = False
+    # Le dossier garde l'envoi, puis le WAV décodé. Il vit jusqu'à la fin de la reconnaissance, quelle qu'en soit
+    # l'issue : pour une réponse en continu, le rappel de fin de la tâche de reconnaissance le rend (`open_stream`).
+    scratch = tempfile.TemporaryDirectory(prefix="dictee-")
     try:
-        # L'envoi vit seul dans son dossier, supprimé dès la conversion faite, quelle que soit l'issue.
-        with tempfile.TemporaryDirectory(prefix="dictee-") as directory:
-            path = Path(directory) / "upload"
-            # Une langue ou un format refusés le sont dès le début du fichier, avant d'en lire le moindre octet.
-            fields, has_file = await read_upload(
-                request, path, settings.max_upload_mb, lambda early: _parse_params(early, trace)
-            )
-            params = _parse_params(fields, trace)
-            if not has_file:
-                raise ApiError(
-                    400, "Missing required parameter: 'file'.", param="file", code="missing_required_parameter"
-                )
-            wav = await _decode(path, params.mode, state.gate.threshold_s, reserve)
-
-        duration = wav_duration(wav)
+        directory = Path(scratch.name)
+        upload, wav = directory / "upload", directory / "audio.wav"
+        # Une langue ou un format refusés le sont dès le début du fichier, avant d'en lire le moindre octet.
+        fields, has_file = await read_upload(
+            request, upload, settings.max_upload_mb, lambda early: _parse_params(early, trace)
+        )
+        params = _parse_params(fields, trace)
+        if not has_file:
+            raise ApiError(400, "Missing required parameter: 'file'.", param="file", code="missing_required_parameter")
+        try:
+            duration = await _decode(upload, wav, state.gate.threshold_s, reserve)
+        finally:
+            upload.unlink(missing_ok=True)  # l'envoi disparaît dès le décodage fini, quelle qu'en soit l'issue
         trace.audio_s = duration
-        job = _Job(state, params, profile, trace, wav, duration, place)
+        job = _Job(state, params, profile, trace, wav, duration, scratch, place)
 
         if params.stream:
-            handed_over = True  # la reconnaissance, lancée par `open_stream`, rend la place à sa fin
+            handed_over = True  # la reconnaissance, lancée par `open_stream`, rend la place et le dossier à sa fin
             return await job.open_stream(request)
         try:
             recognition = await run_unless_disconnected(request, job.recognize())
@@ -451,9 +445,12 @@ async def _handle(request: Request, trace: Trace) -> Response:
             raise nemo_failure(error) from None
         return render(transcript, params.response_format, granularities=params.granularities)
     finally:
-        # Quelle que soit la sortie (refus, audio illisible, panne, client parti), la place réservée est rendue.
-        if not handed_over and place is not None:
-            place.release()
+        # Quelle que soit la sortie (refus, audio illisible, panne, client parti), la place réservée et le dossier sont
+        # rendus.
+        if not handed_over:
+            scratch.cleanup()
+            if place is not None:
+                place.release()
 
 
 async def transcriptions(request: Request) -> Response:

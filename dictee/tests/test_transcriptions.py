@@ -1,10 +1,12 @@
 import contextlib
 import dataclasses
 import functools
+import gc
 import json
 import logging
 import re
 import tempfile
+import warnings
 
 import anyio
 import httpx
@@ -19,7 +21,7 @@ from dictee.app import create_app
 from dictee.errors import ApiError
 from dictee.nemo import NemoError, NemoOverloaded, NemoUnavailable
 from dictee.transcribe import LongAudioGate
-from dictee.types import Final, Partial
+from dictee.types import Final, Partial, Word
 
 URL = "/v1/audio/transcriptions"
 BOUNDARY = "dictee-test-boundary"
@@ -79,8 +81,7 @@ def test_json_with_any_model_name(openai_client, fake_nemo, tone_mp3):
     assert r.text == "Bonjour à tous. Salut."
     call = fake_nemo.calls[0]
     assert (call["language"], call["boost"], call["wav_rate"]) == ("fr-FR", 2.0, 16000)
-    assert (call["phrases"], call["prompt"]) == ([], None)
-    assert fake_nemo.diarize_calls == []
+    assert (call["phrases"], call["speakers"], call["partials"]) == ([], False, False)
 
 
 def test_user_glossary_becomes_boosted_phrases(openai_client, fake_nemo, db, tone_mp3):
@@ -103,8 +104,8 @@ def test_personal_key_uses_its_owner_glossary(transcriptions_client, fake_nemo, 
 
 @pytest.mark.parametrize("sent,expected", [("fr-FR", "fr-FR"), ("EN", "en-US"), ("de", "de-DE"), ("", "fr-FR")])
 def test_language_reaches_nemo_in_its_own_form(ask, fake_nemo, sent, expected):
-    assert ask(language=sent, prompt="Sortformer").status_code == 200
-    assert (fake_nemo.calls[0]["language"], fake_nemo.calls[0]["prompt"]) == (expected, "Sortformer")
+    assert ask(language=sent).status_code == 200
+    assert fake_nemo.calls[0]["language"] == expected
 
 
 def test_verbose_json_reports_the_iso_language(ask):
@@ -138,12 +139,46 @@ def test_diarized_json_through_the_sdk(openai_client, fake_nemo, tone_mp3):
     assert [s.speaker for s in r.segments] == ["A", "B"]
     assert [s.text for s in r.segments] == ["Bonjour à tous.", "Salut."]
     assert r.text == "Bonjour à tous. Salut."
-    assert len(fake_nemo.diarize_calls) == 1
+    assert [call["speakers"] for call in fake_nemo.calls] == [True]
 
 
 def test_diarized_json_overrides_the_model_name(ask):
     r = ask(model="whisper-1", response_format="diarized_json")
     assert [s["speaker"] for s in r.json()["segments"]] == ["A", "B"]
+
+
+def test_diarized_json_takes_its_speakers_from_the_realtime_session(ask, fake_nemo):
+    body = ask(response_format="diarized_json").json()
+    assert [segment["speaker"] for segment in body["segments"]] == ["A", "B"]
+    assert fake_nemo.calls[0]["speakers"] is True
+
+
+@pytest.mark.parametrize(
+    "fields,asked",
+    [
+        ({}, False),
+        ({"model": "dictee-clean"}, False),
+        ({"model": "dictee", "stream": "true"}, False),
+        ({"model": "dictee-diarize"}, True),
+        ({"response_format": "diarized_json"}, True),
+        ({"model": "dictee-diarize", "stream": "true"}, True),
+    ],
+    ids=["raw", "clean", "stream", "diarize", "diarized-json", "diarize-stream"],
+)
+def test_nemo_is_asked_for_the_speakers_in_meeting_mode_only(ask, fake_nemo, fields, asked):
+    assert ask(**fields).status_code == 200
+    assert fake_nemo.calls[0]["speakers"] is asked
+
+
+def test_a_meeting_whose_words_have_no_speaker_goes_all_to_a(ask, fake_nemo):
+    fake_nemo.finals = (Final("Bonjour.", (Word("Bonjour.", 0.0, 0.5),)),)
+    body = ask(response_format="diarized_json").json()
+    assert [(segment["speaker"], segment["text"]) for segment in body["segments"]] == [("A", "Bonjour.")]
+
+
+def test_prompt_is_accepted_and_never_reaches_nemo(ask, fake_nemo):
+    assert ask(prompt="Sortformer").status_code == 200
+    assert "prompt" not in fake_nemo.calls[0]
 
 
 def test_verbose_json_words_through_the_sdk(openai_client, tone_mp3):
@@ -515,37 +550,86 @@ def test_audio_over_the_duration_limit_is_400(ask, fake_nemo, monkeypatch):
     assert fake_nemo.calls == []
 
 
-def test_speaker_separation_has_its_own_duration_limit(ask, fake_nemo, monkeypatch):
-    monkeypatch.setattr(transcribe, "MAX_DIARIZE_SECONDS", 1.0)
-    assert ask().status_code == 200
-    r = ask(model="dictee-diarize")
-    assert r.status_code == 400 and r.json()["error"]["code"] == "audio_too_long"
-    assert ask(response_format="diarized_json").status_code == 400
-    assert len(fake_nemo.calls) == 1  # seul le premier envoi a atteint NeMo
+class ListingNemo(FakeNemo):
+    """Faux NeMo qui note, à chaque transcription, ce que le dossier du WAV contient."""
+
+    def __init__(self, **options) -> None:
+        super().__init__(**options)
+        self.listings: list[list[str]] = []
+
+    async def transcribe(self, wav, **options):
+        self.listings.append(sorted(path.name for path in wav.parent.iterdir()))
+        async for event in super().transcribe(wav, **options):
+            yield event
+
+
+@pytest.fixture
+def scratch(tmp_path, monkeypatch):
+    """Le dossier temporaire du système, remplacé par un dossier du test : ce qu'il garde, dictee le garde.
+
+    Python efface de lui-même un `TemporaryDirectory` que plus rien ne référence, en le signalant par un
+    `ResourceWarning` : dictee doit effacer ses dossiers lui-même, sans attendre le ramasse-miettes, qui peut tarder
+    et laisser des centaines de Mio sur le disque. Le test échoue si un dossier a été effacé de cette façon.
+    """
+    root = tmp_path / "scratch"
+    root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(root))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ResourceWarning)
+        yield root
+        gc.collect()
+    implicit = [str(warning.message) for warning in caught if "Implicitly cleaning up" in str(warning.message)]
+    assert implicit == []
 
 
 def test_each_upload_lives_alone_in_a_directory_removed_afterwards(
-    settings, fake_nemo, fake_llm, service_headers, tone_mp3, tmp_path, monkeypatch
+    settings, fake_llm, service_headers, tone_mp3, scratch, monkeypatch
 ):
-    uploads = tmp_path / "uploads"
-    uploads.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(uploads))
     seen = []
-    convert = transcribe.to_wav16k
+    convert = transcribe.decode_wav16k
 
-    async def spy(path, **kwargs):
-        assert list(path.parent.iterdir()) == [path] and path.parent.parent == uploads
-        seen.append(path)
-        return await convert(path, **kwargs)
+    async def spy(src, dst, **kwargs):
+        # Au début du décodage le dossier ne contient que l'envoi ; le WAV s'écrit à côté de lui.
+        assert list(src.parent.iterdir()) == [src] and src.parent.parent == scratch and dst.parent == src.parent
+        seen.append(dst)
+        return await convert(src, dst, **kwargs)
 
-    monkeypatch.setattr(transcribe, "to_wav16k", spy)
-    with TestClient(app_with(settings, fake_nemo, fake_llm, max_upload_mb=1)) as client:
+    monkeypatch.setattr(transcribe, "decode_wav16k", spy)
+    nemo = ListingNemo(finals=FINALS)
+    with TestClient(app_with(settings, nemo, fake_llm, max_upload_mb=1)) as client:
         assert post(client, service_headers, tone_mp3).status_code == 200
         assert post(client, service_headers, b"this is not audio").status_code == 422
         assert post(client, service_headers, tone_mp3, stream="true").status_code == 200
         assert post(client, service_headers, bytes(2 * MIB)).status_code == 413
     assert len(seen) == 3
-    assert list(uploads.iterdir()) == []
+    # Quand NeMo lit le WAV, l'envoi a déjà disparu : le dossier ne garde que lui, jusqu'à la fin de la réponse.
+    assert nemo.listings == [[seen[0].name], [seen[2].name]]
+    assert not any(wav.exists() for wav in seen)
+    assert list(scratch.iterdir()) == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", ["false", "true"])
+async def test_the_decoded_wav_stays_on_the_disk_until_the_recognition_ends(
+    stream, settings, fake_llm, service_headers, tmp_path, scratch
+):
+    release = anyio.Event()
+    nemo = FakeNemo(finals=FINALS, release=release)
+    app = app_with(settings, nemo, fake_llm)
+    audio = make_audio(tmp_path, "a.mp3", seconds=3.0).read_bytes()
+    body, content_type = multipart_body({"model": "dictee", "stream": stream}, audio)
+    headers = streaming_headers(service_headers, body, content_type)
+    hung_up = anyio.Event()
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(call_app, app, headers, body, hung_up)
+        await wait_until(lambda: nemo.calls)
+        # Le faux NeMo attend : la reconnaissance est en cours, le WAV qu'il a lu est encore là.
+        (directory,) = scratch.iterdir()
+        assert [path.name for path in directory.iterdir()] == ["audio.wav"]
+        release.set()
+        await wait_until(lambda: nemo.sessions_closed == 1)
+        await wait_until(lambda: not list(scratch.iterdir()))
+        hung_up.set()
 
 
 def test_request_without_a_file_is_400(transcriptions_client, service_headers):
@@ -595,7 +679,6 @@ def test_silence_gives_empty_text(openai_client, ask, fake_nemo, tone_mp3):
     )
     assert (r.text, r.segments) == ("", [])
     assert sse_events(ask(model="dictee-diarize", stream="true")) == [{"type": "transcript.text.done", "text": ""}]
-    assert fake_nemo.diarize_calls == []
 
 
 def test_silence_reported_as_a_blank_final_gives_empty_text(ask, fake_nemo):
@@ -603,7 +686,6 @@ def test_silence_reported_as_a_blank_final_gives_empty_text(ask, fake_nemo):
     fake_nemo.finals = (Final("", ()),)
     r = ask(response_format="diarized_json")
     assert r.status_code == 200 and r.json()["segments"] == [] and r.json()["text"] == ""
-    assert fake_nemo.diarize_calls == []
 
 
 def test_logs_never_contain_the_text(caplog, transcriptions_client, fake_llm, db, tone_mp3):
@@ -865,8 +947,8 @@ async def test_cancelled_waiter_frees_its_waiting_place():
     assert not gate.full
 
 
-def test_audio_limit_is_an_hour_and_a_half():
-    assert transcribe.MAX_AUDIO_SECONDS == 5400.0
+def test_audio_limit_is_two_hours():
+    assert transcribe.MAX_AUDIO_SECONDS == 7200.0
 
 
 @pytest.mark.anyio
@@ -967,7 +1049,7 @@ async def call_app(
 @pytest.mark.anyio
 @pytest.mark.parametrize("stream", ["false", "true"])
 async def test_client_hanging_up_closes_the_session_and_frees_the_slot(
-    stream, caplog, settings, fake_llm, service_headers, tmp_path
+    stream, caplog, settings, fake_llm, service_headers, tmp_path, scratch
 ):
     # Le faux NeMo ne rend jamais la main : la requête attend dans la session, comme une transcription longue.
     nemo = FakeNemo(finals=FINALS, release=anyio.Event())
@@ -983,6 +1065,7 @@ async def test_client_hanging_up_closes_the_session_and_frees_the_slot(
         hung_up.set()
         await wait_until(lambda: nemo.sessions_closed == 1)
     await assert_gate_is_free(app.state.gate)
+    await wait_until(lambda: not list(scratch.iterdir()))
     lines = [record.getMessage() for record in caplog.records if record.name == "dictee"]
     assert len(lines) == 1 and lines[0].endswith("status=499")
 
@@ -1011,7 +1094,7 @@ FIRST_DELTA_FROM_IDS = ["a-final", "a-partial"]
 @pytest.mark.anyio
 @pytest.mark.parametrize("finals", FIRST_DELTA_FROM, ids=FIRST_DELTA_FROM_IDS)
 async def test_client_hanging_up_mid_stream_closes_the_session_and_frees_the_slot(
-    finals, caplog, settings, fake_llm, service_headers, tmp_path
+    finals, caplog, settings, fake_llm, service_headers, tmp_path, scratch
 ):
     # Le premier delta est parti : la réponse est ouverte, et c'est Starlette qui voit le client raccrocher.
     nemo = FakeNemo(finals=finals, release=anyio.Event(), after=1)
@@ -1029,6 +1112,7 @@ async def test_client_hanging_up_mid_stream_closes_the_session_and_frees_the_slo
         hung_up.set()
         await wait_until(lambda: nemo.sessions_closed == 1)
     await assert_gate_is_free(app.state.gate)
+    await wait_until(lambda: not list(scratch.iterdir()))
     lines = [record.getMessage() for record in caplog.records if record.name == "dictee"]
     assert len(lines) == 1 and lines[0].endswith("status=499")
 
@@ -1036,7 +1120,7 @@ async def test_client_hanging_up_mid_stream_closes_the_session_and_frees_the_slo
 @pytest.mark.anyio
 @pytest.mark.parametrize("finals", FIRST_DELTA_FROM, ids=FIRST_DELTA_FROM_IDS)
 async def test_client_hanging_up_before_the_stream_starts_still_ends_the_recognition(
-    finals, caplog, settings, fake_llm, service_headers, tmp_path
+    finals, caplog, settings, fake_llm, service_headers, tmp_path, scratch
 ):
     # Le client raccroche entre la création de la réponse et son premier octet : le générateur ne démarre jamais et ses
     # `finally` ne courent pas. Seul le filet de la réponse ferme alors la session de NeMo et libère la place.
@@ -1059,6 +1143,7 @@ async def test_client_hanging_up_before_the_stream_starts_still_ends_the_recogni
         await wait_until(lambda: nemo.sessions_closed == 1)
     assert [message["type"] for message in sent] == ["http.response.start"]
     await assert_gate_is_free(app.state.gate)
+    await wait_until(lambda: not list(scratch.iterdir()))
     lines = [record.getMessage() for record in caplog.records if record.name == "dictee"]
     assert len(lines) == 1 and lines[0].endswith("status=499")
 
@@ -1073,9 +1158,9 @@ async def test_third_concurrent_long_request_is_429_while_decoding_and_decodes_n
     app = app_with(settings, nemo, fake_llm, long_audio_seconds=1.0)
     audio = make_audio(tmp_path, "long.mp3", seconds=3.0).read_bytes()
     decodes = []
-    convert = transcribe.to_wav16k
+    convert = transcribe.decode_wav16k
 
-    async def spy(path, **kwargs):
+    async def spy(src, dst, **kwargs):
         decode = {"max_seconds": kwargs["max_seconds"], "long_seconds": kwargs["long_seconds"], "past": None}
         decodes.append(decode)
         reserve = kwargs["on_long"]
@@ -1089,9 +1174,9 @@ async def test_third_concurrent_long_request_is_429_while_decoding_and_decodes_n
                 raise
             decode["past"] = True
 
-        return await convert(path, **{**kwargs, "on_long": on_long})
+        return await convert(src, dst, **{**kwargs, "on_long": on_long})
 
-    monkeypatch.setattr(transcribe, "to_wav16k", spy)
+    monkeypatch.setattr(transcribe, "decode_wav16k", spy)
     caplog.set_level(logging.INFO, logger="dictee")
     answers = {}
     async with asgi_client(app) as client:
@@ -1139,7 +1224,6 @@ EXITS = {
     "nemo-fails": ({"error": NemoUnavailable("down")}, {}, {}, 502),
     "stream-nemo-fails": ({"error": NemoUnavailable("down")}, {"stream": "true"}, {}, 502),
     "too-long": ({}, {}, {"MAX_AUDIO_SECONDS": 2.9}, 400),
-    "diarize-too-long": ({}, {"model": "dictee-diarize"}, {"MAX_DIARIZE_SECONDS": 2.9}, 400),
 }
 
 
@@ -1154,18 +1238,18 @@ async def test_the_place_is_given_back_whatever_the_exit(
         monkeypatch.setattr(transcribe, name, value)
     app = app_with(settings, FakeNemo(finals=FINALS, **nemo_options), fake_llm, long_audio_seconds=1.0)
     admitted = []
-    convert = transcribe.to_wav16k
+    convert = transcribe.decode_wav16k
 
-    async def spy(path, **kwargs):
+    async def spy(src, dst, **kwargs):
         reserve = kwargs["on_long"]
 
         def on_long():
             reserve()
             admitted.append(True)  # le décodage a passé le seuil et réservé une place avant de sortir
 
-        return await convert(path, **{**kwargs, "on_long": on_long})
+        return await convert(src, dst, **{**kwargs, "on_long": on_long})
 
-    monkeypatch.setattr(transcribe, "to_wav16k", spy)
+    monkeypatch.setattr(transcribe, "decode_wav16k", spy)
     audio = make_audio(tmp_path, "long.mp3", seconds=3.0).read_bytes()
     async with asgi_client(app) as client:
         answer = await client.post(
@@ -1182,38 +1266,36 @@ def long_mp3(tmp_path_factory):
     return make_audio(tmp_path_factory.mktemp("long"), "long.mp3", seconds=200.0).read_bytes()
 
 
-@pytest.mark.parametrize(
-    ("fields", "constant", "limit", "message"),
-    [
-        ({}, "MAX_AUDIO_SECONDS", 120.0, "The audio is longer than 2 minutes."),
-        (
-            {"model": "dictee-diarize"},
-            "MAX_DIARIZE_SECONDS",
-            180.0,
-            "Speaker separation accepts audio up to 3 minutes.",
-        ),
-    ],
-    ids=["transcription", "speakers"],
-)
-def test_the_duration_limit_messages_follow_the_constants(ask, long_mp3, monkeypatch, fields, constant, limit, message):
-    monkeypatch.setattr(transcribe, constant, limit)
+@pytest.mark.parametrize("fields", [{}, {"model": "dictee-diarize"}], ids=["transcription", "speakers"])
+def test_the_duration_limit_message_follows_the_constant_in_every_mode(ask, long_mp3, monkeypatch, fields):
+    monkeypatch.setattr(transcribe, "MAX_AUDIO_SECONDS", 120.0)
     r = ask(long_mp3, **fields)
     assert r.status_code == 400
-    assert r.json()["error"]["message"] == message
+    assert r.json()["error"]["message"] == "The audio is longer than 2 minutes."
     assert r.json()["error"]["code"] == "audio_too_long"
 
 
-def test_the_decoding_is_bounded_by_the_limit_of_the_mode(
+def test_the_duration_limit_message_names_two_hours_in_minutes(ask, monkeypatch):
+    async def too_long(*args, **kwargs):
+        raise audio_module.AudioTooLong("too long")
+
+    monkeypatch.setattr(transcribe, "decode_wav16k", too_long)
+    r = ask()
+    assert r.status_code == 400
+    assert r.json()["error"]["message"] == "The audio is longer than 120 minutes."
+
+
+def test_the_decoding_is_bounded_by_the_same_limit_in_every_mode(
     settings, fake_nemo, fake_llm, service_headers, tone_mp3, monkeypatch
 ):
     seen = []
-    convert = transcribe.to_wav16k
+    convert = transcribe.decode_wav16k
 
-    async def spy(path, **kwargs):
+    async def spy(src, dst, **kwargs):
         seen.append((kwargs["max_seconds"], kwargs["long_seconds"]))
-        return await convert(path, **kwargs)
+        return await convert(src, dst, **kwargs)
 
-    monkeypatch.setattr(transcribe, "to_wav16k", spy)
+    monkeypatch.setattr(transcribe, "decode_wav16k", spy)
     with TestClient(app_with(settings, fake_nemo, fake_llm, long_audio_seconds=120.0)) as client:
         for fields in (
             {},
@@ -1222,5 +1304,4 @@ def test_the_decoding_is_bounded_by_the_limit_of_the_mode(
             {"response_format": "diarized_json"},
         ):
             assert post(client, service_headers, tone_mp3, **fields).status_code == 200
-    raw, diarize = (transcribe.MAX_AUDIO_SECONDS, 120.0), (transcribe.MAX_DIARIZE_SECONDS, 120.0)
-    assert seen == [raw, raw, diarize, diarize]
+    assert seen == [(transcribe.MAX_AUDIO_SECONDS, 120.0)] * 4
