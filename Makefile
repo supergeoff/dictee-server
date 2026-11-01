@@ -10,7 +10,7 @@ COMPOSE_FILES = -f compose.yaml -f compose.integration.yaml
 network:
 	docker network inspect dokploy-network >/dev/null 2>&1 || docker network create dokploy-network
 
-# Démarre seulement models et nemo (le service dictee n'existe pas encore avant la tâche 2).
+# Démarre seulement models et nemo, sans dictee : pratique pour travailler sur les modèles ou sur NeMo seul.
 nemo-up: .env network
 	$(COMPOSE) $(COMPOSE_FILES) up -d --build models nemo
 
