@@ -18,9 +18,11 @@ down:
 	$(COMPOSE) $(COMPOSE_FILES) down
 
 # Lance pytest dans l'image Docker : ffmpeg n'est pas installé sur le Mac et la CI utilise les mêmes commandes.
+# ARGS est passé à pytest, avec des chemins relatifs à dictee/ : make test ARGS="tests/test_audio.py::test_name".
+# Sans ARGS, toute la suite passe, comme dans la CI.
 test:
 	docker build --target test -t dictee-test dictee
-	docker run --rm dictee-test
+	docker run --rm dictee-test uv run --frozen pytest -q $(ARGS)
 
 # Lance la stack complète avec les vrais modèles, attend /health (300 s au plus), puis joue integration/run.py.
 # La stack reste démarrée à la fin : `make down` l'arrête. Le script reçoit le binaire compose du Makefile.

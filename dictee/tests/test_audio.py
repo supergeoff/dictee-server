@@ -19,7 +19,10 @@ from dictee.audio import (
     AudioDecodeError,
     AudioTooLong,
     atempo_chain,
+    decode_wav16k,
     encode_stream,
+    pcm_frames,
+    read_wav_slice,
     to_wav16k,
     wav_duration,
     wav_pcm,
@@ -27,11 +30,25 @@ from dictee.audio import (
 
 pytestmark = pytest.mark.anyio
 
+MIB = 1024 * 1024
+
 
 def sine_pcm(rate: int, seconds: float) -> bytes:
     """PCM16 mono petit-boutiste d'un sinus à 440 Hz."""
     count = int(rate * seconds)
     return struct.pack(f"<{count}h", *(int(12000 * math.sin(2 * math.pi * 440 * n / rate)) for n in range(count)))
+
+
+def numbered_wav(directory: Path, seconds: float) -> Path:
+    """WAV canonique mono 16 kHz dont l'échantillon `n` vaut `(n % 20000) - 10000`, pour reconnaître chaque position."""
+    path = directory / "numbered.wav"
+    count = round(seconds * 16000)
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(struct.pack(f"<{count}h", *((n % 20000) - 10000 for n in range(count))))
+    return path
 
 
 async def chunks(data: bytes, size: int = 4096) -> AsyncIterator[bytes]:
@@ -322,6 +339,95 @@ async def test_decodes_an_amr_file(tmp_path):
     amr.write_bytes(b"#!AMR\n" + (b"\x04" + bytes(12)) * 50)
     wav = await decode(amr)
     assert abs(wav_duration(wav) - 1.0) < 0.15
+
+
+async def test_decoding_to_a_file_writes_a_canonical_wav_and_gives_its_duration(tmp_path):
+    dst = tmp_path / "audio.wav"
+    duration = await decode_wav16k(make_audio(tmp_path, "tone.mp3", seconds=3.0), dst, max_seconds=60)
+    assert duration == pytest.approx(3.0, abs=0.1)
+    with wave.open(str(dst)) as wav:
+        assert (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) == (1, 2, 16000)
+    assert dst.stat().st_size == 44 + round(duration * 32000)
+
+
+async def test_decoding_to_a_file_stops_at_the_limit_and_leaves_no_file(tmp_path):
+    dst = tmp_path / "audio.wav"
+    with pytest.raises(AudioTooLong):
+        await decode_wav16k(make_audio(tmp_path, "long.mp3", seconds=5.0), dst, max_seconds=2)
+    assert not dst.exists()
+
+
+async def test_an_unreadable_file_leaves_no_decoded_file(tmp_path):
+    src = tmp_path / "junk.mp3"
+    src.write_bytes(b"not audio")
+    with pytest.raises(AudioDecodeError):
+        await decode_wav16k(src, tmp_path / "audio.wav", max_seconds=60)
+    assert not (tmp_path / "audio.wav").exists()
+
+
+async def test_a_file_without_any_sample_leaves_no_decoded_file(tmp_path):
+    empty = tmp_path / "empty.wav"
+    with wave.open(str(empty), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+    with pytest.raises(AudioDecodeError):
+        await decode_wav16k(empty, tmp_path / "audio.wav", max_seconds=60)
+    assert not (tmp_path / "audio.wav").exists()
+
+
+async def test_a_refusal_from_on_long_stops_the_decoding_and_leaves_no_file(tmp_path):
+    calls = []
+
+    def refuse():
+        calls.append(1)
+        raise RuntimeError("busy")
+
+    src = make_audio(tmp_path, "five.mp3", seconds=5.0)
+    with pytest.raises(RuntimeError):
+        await decode_wav16k(src, tmp_path / "audio.wav", max_seconds=60, long_seconds=1, on_long=refuse)
+    assert calls == [1] and not (tmp_path / "audio.wav").exists()
+
+
+async def test_cancelling_the_decoding_to_a_file_leaves_no_file(tmp_path):
+    src = make_audio(tmp_path, "minute.flac", seconds=60.0)
+    dst = tmp_path / "audio.wav"
+    # La tâche s'annule elle-même quand le seuil est franchi : des échantillons sont alors déjà écrits dans `dst`.
+    decoding = asyncio.create_task(
+        decode_wav16k(src, dst, max_seconds=120, long_seconds=1, on_long=lambda: decoding.cancel())
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await decoding
+    assert not dst.exists()
+
+
+async def test_decoding_memory_does_not_grow_with_the_duration(tmp_path):
+    src = make_audio(tmp_path, "minute.flac", seconds=60.0)
+    tracemalloc.start()
+    await decode_wav16k(src, tmp_path / "audio.wav", max_seconds=120)
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert peak < 2 * MIB  # une minute décodée pèse 1,9 Mio
+
+
+def test_a_slice_is_a_wav_of_the_samples_between_its_bounds(tmp_path):
+    piece = read_wav_slice(numbered_wav(tmp_path, 3.0), 1.0, 2.5)
+    with wave.open(io.BytesIO(piece)) as wav:
+        assert (wav.getframerate(), wav.getnframes()) == (16000, 24000)
+        first = struct.unpack("<h", wav.readframes(1))[0]
+    assert first == 16000 % 20000 - 10000
+
+
+def test_a_slice_past_the_end_stops_at_the_end(tmp_path):
+    with wave.open(io.BytesIO(read_wav_slice(numbered_wav(tmp_path, 3.0), 2.0, 10.0))) as wav:
+        assert wav.getnframes() == 16000
+
+
+def test_pcm_frames_give_the_samples_after_the_header_in_order(tmp_path):
+    path = numbered_wav(tmp_path, 2.5)
+    frames = list(pcm_frames(path, 32000))
+    assert [len(frame) for frame in frames] == [32000, 32000, 16000]
+    assert b"".join(frames) == path.read_bytes()[44:]
 
 
 def test_atempo_chain():
