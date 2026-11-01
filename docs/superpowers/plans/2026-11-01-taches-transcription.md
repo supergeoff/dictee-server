@@ -136,11 +136,11 @@ git add integration/check_nemo.py integration/nemo_rt.py dictee/tests/fixtures/n
 git commit -m "Vérifie la route REST de NeMo, une réunion de 2 heures et les prises de parole multiples"
 ```
 
-**Résultats** (remplis à l'exécution, sans aucun texte transcrit) :
-- Morceau REST de 30 s : durées des trois requêtes ; `CHUNK_TIMEOUT` retenu ; réponse de NeMo quand sa file est pleine.
-- Réunion de 2 heures : temps total ; temps entre commit et final ; plus long silence entre deux événements ; taille de l'événement final ; pic mémoire de NeMo ; nombre de personnes ; `SPEAKERS_EVENT_TIMEOUT` retenu.
-- `SPEAKER_KEY` et forme de sa valeur (entier ou `spk:N`).
-- `NEMO_MANY_COMMITS` et `SERVER_VAD`, avec ce qu'en disent les relevés.
+**Résultats** (1er novembre 2026, NeMo jetable sur le VPS, aucun texte de la Note gardé) :
+- Morceau REST de 30 s : le dialogue de synthèse rend 46 mots horodatés (`word`, `start`, `end`, `confidence`). Les 30 premières secondes de la Note prennent 8,2 s, 8,5 s puis 7,5 s. `CHUNK_TIMEOUT` retenu : 120 s. File pleine : 16 requêtes simultanées reçoivent toutes 200 en 127,7 s, NeMo les met en file sans répondre 429.
+- Réunion de 2 heures (Note répétée jusqu'à 7200 s) : 67,4 minutes de traitement ; 16 s entre le commit et l'événement final ; plus long silence entre deux événements de 23 s ; événement final de 1,47 Mo ; 16 758 mots ; 3 personnes ; pic mémoire de NeMo à 2,19 Gio sur 3 Gio. `SPEAKERS_EVENT_TIMEOUT` retenu : 300 s.
+- `SPEAKER_KEY` : `speaker`, un entier numéroté à partir de 1.
+- `NEMO_MANY_COMMITS` vaut vrai : une session accepte de l'audio après un commit et rend un second `completed` puis un second `committed`. `SERVER_VAD` vaut faux : avec `endpointing_ms` à 500, aucun `completed` n'arrive avant le commit, même après 2 s de silence et 10 s d'attente.
 
 ### Tâche 2 : environnement (vérifications 12.4, 12.5 et 12.7)
 
@@ -178,11 +178,11 @@ git add docs/superpowers/plans/2026-11-01-taches-transcription.md
 git commit -m "Consigne les vérifications de silencedetect, des délais et de la place libre"
 ```
 
-**Résultats** (remplis à l'exécution) :
-- Silences, coupes et coupes nettes du Call et de la Note ; réglage retenu.
-- Version de Traefik et délais qui s'appliquent ; conclusion.
-- Délai et reprises du client d'OpenAI.
-- Place libre sur le volume `dictee-data`.
+**Résultats** (1er novembre 2026) :
+- `silencedetect` (ffmpeg 7.1.5 de l'image dictee) à -35 dB et 0,3 s : le Call (43,6 s) a 17 silences et 1 coupe, la Note (385,9 s) 97 silences et 12 coupes, sans aucune coupe nette. Les réglages -30 dB et 0,2 s ne coupent pas plus net. Réglage retenu : celui de la spec, -35 dB et 0,3 s.
+- Traefik v3.6.7 : la configuration statique ne fixe aucun `respondingTimeouts`, et le routeur de dictee n'a pas de `serversTransport`. Les défauts s'appliquent : `writeTimeout` à 0 et `responseHeaderTimeout` à 0, donc rien ne coupe l'attente d'une réponse synchrone d'une heure ; `readTimeout` à 60 s, qui borne la lecture de toute la requête, corps compris. Ce dernier point est signalé à Geoff : un envoi de plus de 60 s (un gros fichier sur une liaison lente) serait coupé.
+- Client Python d'OpenAI 3.42.0 : délai de 600 s et 2 reprises. Une requête synchrone de plus de 10 minutes est renvoyée deux fois, rejoint sa tâche, puis le client abandonne après 30 minutes environ ; la tâche continue et un renvoi plus tard reçoit le résultat.
+- Volume `dictee-data` : 46 Go libres.
 
 ### Tâche 3 : audio décodé sur le disque
 
