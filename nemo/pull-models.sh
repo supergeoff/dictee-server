@@ -3,10 +3,17 @@
 # sous /models/current pour que serve.sh les charge par des chemins stables.
 # `nemo-speech pull` vérifie la taille et l'empreinte SHA-256 de chaque fichier et ne
 # retélécharge pas un fichier déjà vérifié.
+#
+# Un redéploiement ne dépend pas de Hugging Face quand les modèles sont déjà là : si les
+# liens de /models/current pointent vers les dépôt, révision et fichier attendus, et si le
+# fichier témoin pins.txt porte ces mêmes épinglages, le script sort en 0 sans appel réseau.
+# Sinon il interroge Hugging Face, avec trois nouveaux essais sur les erreurs passagères.
 set -eu
 
 MODEL_DIR="${NEMO_SPEECH_MODEL_DIR:-/models}"
 INDEX=/opt/nemo-speech/share/nemo-speech/model-index.json
+# Fichier témoin : les épinglages du dernier lancement réussi, un par lien de current/.
+WITNESS="$MODEL_DIR/pins.txt"
 
 # L'index de NeMo-Speech.cpp 0.3.0 épingle deux révisions qui ne conviennent pas à dictee.
 # Pour chacune, on pointe vers un commit plus récent du même dépôt (même format de GGUF,
@@ -34,13 +41,83 @@ DIAR_FILE=Nemotron-3-Diarization.q8_0.gguf
 CODEC_REPO=nvidia/nemo-nano-codec-22khz-1.89kbps-21.5fps
 CODEC_FILE=nemo_nano_codec_22khz_1.89kbps_21.5fps.decoder.f16.gguf
 
+# hf_get URL
+# Appel à Hugging Face : trois nouveaux essais sur un délai dépassé, un refus de connexion ou
+# une erreur 5xx, et un délai par essai. Une indisponibilité brève ne doit pas faire échouer
+# le service `models`, car compose ne démarrerait alors ni `nemo` ni `dictee`.
+hf_get() {
+  curl -fsSL --retry 3 --retry-connrefused --connect-timeout 10 --max-time 60 "$1"
+}
+
+# Le dossier du modèle est <dépôt>/<révision>/<fichier> : on compare ces trois niveaux à ce
+# que serve.sh doit charger, pour ne jamais lier un autre fichier (f16 de Magpie, GGUF de
+# Nemotron sans tokenizer) si l'épinglage échoue sans bruit.
+index_revision() {
+  rev="$(jq -r --arg repo "$1" '[.models[] | select(.repo == $repo)] | if length == 1 then .[0].revision else empty end' "$INDEX")"
+  if [ -z "$rev" ]; then
+    echo "$1 est absent de l'index de NeMo (ou y figure plusieurs fois)" >&2
+    exit 1
+  fi
+  printf '%s\n' "$rev"
+}
+
+# path_matches CHEMIN DÉPÔT RÉVISION NOM : réussit si le chemin se termine par
+# <dépôt>/<révision>/<nom>.
+path_matches() {
+  [ "$(basename "$1")" = "$4" ] \
+    && [ "$(basename "$(dirname "$1")")" = "$3" ] \
+    && [ "$(basename "$(dirname "$(dirname "$1")")")" = "${2#*/}" ]
+}
+
+# check_path CHEMIN DÉPÔT RÉVISION NOM : arrête le script si le chemin n'est pas le bon.
+check_path() {
+  if ! path_matches "$1" "$2" "$3" "$4"; then
+    echo "modèle inattendu : $1" >&2
+    echo "  attendu : $2 / $3 / $4" >&2
+    exit 1
+  fi
+}
+
+diar_revision="$(index_revision "$DIAR_REPO")"
+codec_revision="$(index_revision "$CODEC_REPO")"
+
+# expected_pins
+# Les épinglages attendus, une ligne "lien<TAB>dépôt<TAB>révision<TAB>nom" par lien de
+# current/. Le même texte sert de fichier témoin.
+expected_pins() {
+  printf '%s\t%s\t%s\t%s\n' \
+    asr.gguf "$ASR_REPO" "$ASR_REVISION" "$ASR_FILE" \
+    diar.gguf "$DIAR_REPO" "$diar_revision" "$DIAR_FILE" \
+    tts.gguf "$MAGPIE_REPO" "$MAGPIE_REVISION" "$MAGPIE_FILE" \
+    codec.gguf "$CODEC_REPO" "$codec_revision" "$CODEC_FILE" \
+    tokenizer "$MAGPIE_REPO" "$MAGPIE_REVISION" tokenizer
+}
+
+# models_in_place
+# Réussit si le fichier témoin porte les épinglages attendus et si chaque lien de current/
+# pointe vers un fichier présent, au bon dépôt, à la bonne révision et sous le bon nom.
+models_in_place() {
+  [ -f "$WITNESS" ] && [ "$(cat "$WITNESS")" = "$(expected_pins)" ] || return 1
+  expected_pins | while IFS="$(printf '\t')" read -r link repo revision name; do
+    target="$(readlink "$MODEL_DIR/current/$link")" || exit 1
+    { [ -e "$target" ] && path_matches "$target" "$repo" "$revision" "$name"; } || exit 1
+  done
+}
+
+if models_in_place; then
+  echo "modèles déjà en place aux révisions épinglées, aucun appel réseau :"
+  ls -l "$MODEL_DIR/current"
+  exit 0
+fi
+echo "modèles absents ou épinglages changés : téléchargement depuis Hugging Face"
+
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 # pin_artifact INDEX_ENTREE INDEX_SORTIE DÉPÔT RÉVISION RÔLE FICHIER
 # Réécrit dans l'index l'entrée du dépôt : révision, et fichier du rôle (nom, taille, SHA-256).
 pin_artifact() {
-  tree="$(curl -fsSL "https://huggingface.co/api/models/$3/tree/$4")"
+  tree="$(hf_get "https://huggingface.co/api/models/$3/tree/$4")"
   sha="$(printf '%s' "$tree" | jq -r --arg f "$6" '.[] | select(.path == $f) | .lfs.oid')"
   size="$(printf '%s' "$tree" | jq -r --arg f "$6" '.[] | select(.path == $f) | .lfs.size')"
   if [ -z "$sha" ] || [ -z "$size" ]; then
@@ -100,44 +177,23 @@ tts_path="$(role_path "$tts_out" tts)"
 codec_path="$(role_path "$codec_out" codec)"
 tokenizer_path="$(role_path "$tts_out" tokenizer)"
 
-# Le dossier du modèle est <dépôt>/<révision>/<fichier> : on compare ces trois niveaux à ce
-# que serve.sh doit charger, pour ne jamais lier un autre fichier (f16 de Magpie, GGUF de
-# Nemotron sans tokenizer) si l'épinglage échoue sans bruit.
-index_revision() {
-  rev="$(jq -r --arg repo "$1" '[.models[] | select(.repo == $repo)] | if length == 1 then .[0].revision else empty end' "$INDEX")"
-  if [ -z "$rev" ]; then
-    echo "$1 est absent de l'index de NeMo (ou y figure plusieurs fois)" >&2
-    exit 1
-  fi
-  printf '%s\n' "$rev"
-}
-
-# check_path CHEMIN DÉPÔT RÉVISION NOM
-check_path() {
-  got_name="$(basename "$1")"
-  got_rev="$(basename "$(dirname "$1")")"
-  got_repo="$(basename "$(dirname "$(dirname "$1")")")"
-  if [ "$got_name" != "$4" ] || [ "$got_rev" != "$3" ] || [ "$got_repo" != "${2#*/}" ]; then
-    echo "modèle inattendu : $1" >&2
-    echo "  attendu : $2 / $3 / $4" >&2
-    exit 1
-  fi
-}
-
-diar_revision="$(index_revision "$DIAR_REPO")"
-codec_revision="$(index_revision "$CODEC_REPO")"
 check_path "$asr_path" "$ASR_REPO" "$ASR_REVISION" "$ASR_FILE"
 check_path "$diar_path" "$DIAR_REPO" "$diar_revision" "$DIAR_FILE"
 check_path "$tts_path" "$MAGPIE_REPO" "$MAGPIE_REVISION" "$MAGPIE_FILE"
 check_path "$codec_path" "$CODEC_REPO" "$codec_revision" "$CODEC_FILE"
 check_path "$tokenizer_path" "$MAGPIE_REPO" "$MAGPIE_REVISION" tokenizer
 
+# Le témoin tombe avant de relier et n'est réécrit qu'une fois les cinq liens posés : un
+# lancement interrompu entre les deux ne laisse jamais croire que les modèles sont en place.
 mkdir -p "$MODEL_DIR/current"
+rm -f "$WITNESS"
 link_model asr.gguf "$asr_path"
 link_model diar.gguf "$diar_path"
 link_model tts.gguf "$tts_path"
 link_model codec.gguf "$codec_path"
 link_model tokenizer "$tokenizer_path"
+expected_pins > "$WITNESS.tmp"
+mv "$WITNESS.tmp" "$WITNESS"
 
 echo "modèles prêts dans $MODEL_DIR/current :"
 ls -l "$MODEL_DIR/current"
