@@ -45,8 +45,10 @@ DEFAULT_FORMAT = "mp3"
 
 # Fin d'une phrase : un signe final ou plusieurs (`?!`, `...`), puis les guillemets et parenthèses fermants qui le
 # suivent (« Salut. » garde son guillemet). Une espace ou la fin de la ligne doit venir ensuite : « 3.14 » et
-# « example.org » ne se coupent pas. L'espace qui précède le signe (« Ça va ? ») reste dans la phrase.
-_SENTENCE_END = re.compile(r"[.!?…]+(?:[ \u00a0\u202f]?»|[”\"')\]])*(?!\S)")
+# « example.org » ne se coupent pas. L'espace qui précède le signe (« Ça va ? ») reste dans la phrase. Le premier
+# lookbehind limite le départ d'une recherche au début d'une suite de signes : sans lui, une longue suite de signes
+# suivie d'une lettre est reprise depuis chacun de ses signes, en temps quadratique.
+_SENTENCE_END = re.compile(r"(?<![.!?…])[.!?…]+(?:[ \u00a0\u202f]?»|[”\"')\]])*(?!\S)")
 # Coupes d'une phrase trop longue, de la plus naturelle à la moins naturelle : après une virgule, après une espace.
 _CUTS = (re.compile(r"(?<=,)"), re.compile(r"(?<=[ \t])"))
 
@@ -74,12 +76,39 @@ def _fit(text: str, max_chars: int, cuts: tuple[re.Pattern[str], ...]) -> list[s
     return chunks + _fit(current, max_chars, cuts[1:])
 
 
+def _has_speech(piece: str) -> bool:
+    """Vrai si `piece` contient une lettre ou un chiffre : sinon NeMo n'a rien à dire."""
+    return any(char.isalnum() for char in piece)
+
+
+def _attach_silent(pieces: list[str]) -> list[str]:
+    """Rattache chaque morceau sans lettre ni chiffre au morceau précédent, ou au suivant s'il n'y en a pas.
+
+    Les deux morceaux se joignent par une espace. Si aucun morceau ne contient de lettre ni de chiffre, la liste est
+    rendue telle quelle.
+    """
+    merged: list[str] = []
+    leading: list[str] = []
+    for piece in pieces:
+        if _has_speech(piece):
+            merged.append(" ".join([*leading, piece]))
+            leading = []
+        elif merged:
+            merged[-1] += " " + piece
+        else:
+            leading.append(piece)
+    return merged or leading
+
+
 def split_sentences(text: str, max_chars: int = MAX_SENTENCE_CHARS) -> list[str]:
     """Découpe `text` en phrases, sur la ponctuation finale (`.`, `!`, `?`, `…`) et sur chaque saut de ligne.
 
     Une phrase de plus de `max_chars` caractères est recoupée sur ses virgules, puis sur ses espaces, puis au
-    caractère pour un mot qui dépasse seul la limite. Les espaces de bord et les morceaux vides disparaissent ;
-    aucun autre caractère n'est perdu ni réordonné. Lève `ValueError` si `max_chars` est inférieur à 1.
+    caractère pour un mot qui dépasse seul la limite. Les espaces de bord et les morceaux vides disparaissent. Un
+    morceau sans lettre ni chiffre (`...` entre deux phrases, un signe resté seul après une coupe) se rattache au
+    morceau précédent, ou au suivant s'il n'y en a pas : la limite compte donc les lettres et les chiffres de chaque
+    morceau, et non ces signes. Aucun autre caractère n'est perdu ni réordonné. Lève `ValueError` si `max_chars` est
+    inférieur à 1.
     """
     if max_chars < 1:
         raise ValueError(f"max_chars must be at least 1, got {max_chars}")
@@ -90,7 +119,7 @@ def split_sentences(text: str, max_chars: int = MAX_SENTENCE_CHARS) -> list[str]
             sentences += _fit(line[start : end.end()], max_chars, _CUTS)
             start = end.end()
         sentences += _fit(line[start:], max_chars, _CUTS)
-    return sentences
+    return _attach_silent(sentences)
 
 
 def resolve_voice(requested: str | None, profile_voice: str, available: Sequence[str]) -> str:
@@ -185,6 +214,12 @@ def _parse_params(body: dict[str, Any], trace: _Trace) -> _Params:
     if len(text) > MAX_INPUT_CHARS:
         message = f"'input' is longer than {MAX_INPUT_CHARS} characters."
         raise ApiError(400, message, param="input", code="string_above_max_length")
+    if not _has_speech(text):
+        raise ApiError(400, "'input' must contain a letter or a digit.", param="input", code="invalid_value")
+    try:
+        text.encode("utf-8")  # un substitut isolé (`\ud800` en JSON) ne s'encode pas : httpx lèverait une erreur
+    except UnicodeEncodeError:
+        raise ApiError(400, "'input' must be valid Unicode text.", param="input", code="invalid_value") from None
 
     response_format = body.get("response_format", DEFAULT_FORMAT)
     if response_format is None:

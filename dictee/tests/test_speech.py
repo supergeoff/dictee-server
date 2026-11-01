@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import signal
+import time
 
 import anyio
 import pytest
@@ -124,17 +125,57 @@ def test_word_over_the_limit_is_cut_at_the_character():
         "abc" * 40 + ", " + "de fg " * 30 + ".",
         "Élève, étudiante: ça marche. Voilà 3.14 et example.org. « Oui. » Non !",
         "x" * 50,
+        "Oui ! ... Non. ?\n... Fin ,; ",
+        "?! Bonjour, ... , ; ça va ? -- . Fin",
+        "... " * 30 + "mot ! " + ", " * 30,
     ],
 )
 def test_no_character_is_lost_or_reordered(text, max_chars):
     parts = split_sentences(text, max_chars)
     assert squash("".join(parts)) == squash(text)
-    assert all(part and part == part.strip() and len(part) <= max_chars for part in parts)
+    assert all(part and part == part.strip() for part in parts)
+    # La limite compte les lettres et les chiffres : les signes rattachés à un morceau ne la font pas dépasser.
+    assert all(sum(char.isalnum() for char in part) <= max_chars for part in parts)
+    assert all(any(char.isalnum() for char in part) for part in parts)  # chaque morceau a de quoi être dit
 
 
 def test_split_refuses_a_limit_below_one():
     with pytest.raises(ValueError):
         split_sentences("Bonjour.", 0)
+
+
+@pytest.mark.parametrize("text", ["." * (MAX_INPUT_CHARS - 1) + "x", "!?" * 2047 + "x"])
+def test_split_takes_linear_time_on_a_long_run_of_signs_followed_by_a_letter(text):
+    started = time.perf_counter()
+    parts = split_sentences(text)
+    assert time.perf_counter() - started < 0.05  # en temps quadratique : plusieurs secondes
+    assert squash("".join(parts)) == squash(text)
+
+
+def test_split_attaches_a_piece_without_letter_or_digit_to_the_previous_sentence():
+    assert split_sentences("Oui ! ... Non") == ["Oui ! ...", "Non"]
+    assert split_sentences("Oui. ... ... Non") == ["Oui. ... ...", "Non"]
+    assert split_sentences("Oui.\n?\nNon") == ["Oui. ?", "Non"]
+    assert split_sentences("Oui. ?!") == ["Oui. ?!"]
+
+
+def test_split_attaches_a_leading_piece_without_letter_or_digit_to_the_next_sentence():
+    assert split_sentences("? Bonjour.") == ["? Bonjour."]
+    assert split_sentences("...\n!\nBonjour. Salut") == ["... ! Bonjour.", "Salut"]
+
+
+def test_split_attaches_a_sign_left_alone_by_a_cut():
+    assert split_sentences("abcde , fghij", 5) == ["abcde ,", "fghij"]
+    assert split_sentences("abcde fghij ,", 5) == ["abcde", "fghij ,"]
+
+
+def test_split_counts_letters_and_digits_in_a_piece_not_the_signs_attached_to_it():
+    assert split_sentences("Oui. ... Non", 4) == ["Oui. ...", "Non"]  # « Oui. ... » fait 8 caractères, 3 lettres
+
+
+def test_split_of_text_without_letter_or_digit_keeps_the_pieces_as_they_are():
+    assert split_sentences("?!") == ["?!"]
+    assert split_sentences("... ?\n!") == ["...", "?", "!"]
 
 
 # --- Choix de la voix ---
@@ -308,6 +349,50 @@ def test_input_that_is_missing_or_not_text_is_400(say, fake_nemo, body):
     assert fake_nemo.calls == []
 
 
+@pytest.mark.parametrize("text", ["?", "...", "!?\n…", " . , ; ", "« »", "-- ♥ 😀"])
+def test_input_without_a_letter_or_a_digit_is_400_without_calling_nemo(say, fake_nemo, text):
+    r = say(input=text)
+    assert r.status_code == 400
+    error = r.json()["error"]
+    assert (error["type"], error["param"], error["code"]) == ("invalid_request_error", "input", "invalid_value")
+    assert fake_nemo.calls == []
+
+
+@pytest.mark.parametrize("text", ["a", "7", "?a", "... Oui"])
+def test_input_with_a_single_letter_or_digit_is_accepted(say, fake_nemo, text):
+    assert say(input=text).status_code == 200
+    assert len(fake_nemo.speak_calls) == 1
+
+
+def test_piece_without_letter_or_digit_goes_to_nemo_with_its_neighbour(say, fake_nemo):
+    assert say(input="Oui ! ... Non").status_code == 200
+    assert [call["text"] for call in fake_nemo.speak_calls] == ["Oui ! ...", "Non"]
+
+
+def json_input_with(*units: str) -> bytes:
+    """Un corps JSON dont `input` est « Bonjour » suivi des unités UTF-16 données, écrites en échappements JSON.
+
+    Une unité se donne sans son antislash (`ud800`) : le JSON est monté ici, pour que le fichier ne contienne
+    aucun substitut isolé.
+    """
+    escapes = "".join(chr(92) + unit for unit in units)
+    return ('{"input": "Bonjour' + escapes + '"}').encode()
+
+
+@pytest.mark.parametrize("units", [("ud800",), ("udc00",), ("ude00", "ud83d"), ("ud83d", "u0041")])
+def test_input_with_a_lone_surrogate_is_400_without_calling_nemo(say, fake_nemo, units):
+    r = say(content=json_input_with(*units))
+    assert r.status_code == 400
+    error = r.json()["error"]
+    assert (error["type"], error["param"], error["code"]) == ("invalid_request_error", "input", "invalid_value")
+    assert fake_nemo.calls == []
+
+
+def test_input_with_a_surrogate_pair_is_accepted(say, fake_nemo):
+    assert say(content=json_input_with("ud83d", "ude00")).status_code == 200
+    assert [call["text"] for call in fake_nemo.speak_calls] == ["Bonjour😀"]
+
+
 def test_input_over_4096_characters_is_400(say, fake_nemo):
     r = say(input="a" * (MAX_INPUT_CHARS + 1))
     assert r.status_code == 400
@@ -342,6 +427,7 @@ def test_unsupported_response_format_is_400(say, fake_nemo, fmt):
     "fields,param",
     [
         ({"input": " ", "response_format": "ogg", "speed": 9}, "input"),
+        ({"input": "?!", "response_format": "ogg", "speed": 9}, "input"),
         ({"input": "a" * 5000, "response_format": "ogg", "speed": 9}, "input"),
         ({"input": "Bonjour.", "response_format": "ogg", "speed": 9}, "response_format"),
         ({"input": "Bonjour.", "speed": 9}, "speed"),
