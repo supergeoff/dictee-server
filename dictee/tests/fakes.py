@@ -55,6 +55,14 @@ class FakeNemo:
     def diarize_calls(self) -> list[dict]:
         return [call for call in self.calls if "diarize" in call]
 
+    @property
+    def speak_calls(self) -> list[dict]:
+        return [call for call in self.calls if "text" in call]
+
+    @property
+    def voices_calls(self) -> list[dict]:
+        return [call for call in self.calls if "voices" in call]
+
     async def transcribe(self, wav, *, language, phrases, boost, prompt):
         call = {"language": language, "phrases": list(phrases), "boost": boost, "prompt": prompt}
         self.calls.append({**call, "wav_rate": _wav_rate(wav)})

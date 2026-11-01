@@ -16,6 +16,7 @@ from dictee.errors import ApiError, handle_api_error, handle_http_exception, han
 from dictee.modes import MODELS
 from dictee.nemo import NemoClient
 from dictee.settings import Settings
+from dictee.speech import speech
 from dictee.transcribe import LongAudioGate, transcriptions
 
 
@@ -32,10 +33,11 @@ async def list_models(request: Request) -> JSONResponse:
 def create_app(settings: Settings, *, nemo=None, http: httpx.AsyncClient | None = None) -> Starlette:
     """Construit l'application.
 
-    `settings`, `nemo`, `http`, la base de données et la place des transcriptions longues (`gate`) sont rangés dans
-    `app.state`. La base s'ouvre à `settings.db_path`, dossier parent créé au besoin. Sans `http`, l'app crée son
-    client à son démarrage et le ferme à son arrêt ; un client fourni reste à la charge de l'appelant. Sans `nemo`,
-    elle crée aussi à son démarrage le client de NeMo, sur ce client HTTP ; `app.state.nemo` reste `None` jusque-là.
+    `settings`, `nemo`, `http`, la base de données, la place des transcriptions longues (`gate`) et les voix de la
+    synthèse (`voices`, `None` jusqu'à la première lecture) sont rangés dans `app.state`. La base s'ouvre à
+    `settings.db_path`, dossier parent créé au besoin. Sans `http`, l'app crée son client à son démarrage et le ferme
+    à son arrêt ; un client fourni reste à la charge de l'appelant. Sans `nemo`, elle crée aussi à son démarrage le
+    client de NeMo, sur ce client HTTP ; `app.state.nemo` reste `None` jusque-là.
 
     Chaque route `/v1` appelle `require_caller` en premier ; `/health` reste ouverte.
     """
@@ -58,6 +60,7 @@ def create_app(settings: Settings, *, nemo=None, http: httpx.AsyncClient | None 
             Route("/health", health),
             Route("/v1/models", list_models),
             Route("/v1/audio/transcriptions", transcriptions, methods=["POST"]),
+            Route("/v1/audio/speech", speech, methods=["POST"]),
         ],
         exception_handlers={
             ApiError: handle_api_error,
@@ -71,4 +74,5 @@ def create_app(settings: Settings, *, nemo=None, http: httpx.AsyncClient | None 
     app.state.nemo = nemo
     app.state.http = http
     app.state.gate = LongAudioGate(settings.long_audio_seconds)
+    app.state.voices = None
     return app
