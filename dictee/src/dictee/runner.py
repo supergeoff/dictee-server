@@ -55,10 +55,10 @@ def long_audio_busy() -> ApiError:
 class LongLane:
     """La file des tâches longues : une qui tourne et `max_waiting` qui attendent, servies dans l'ordre d'arrivée.
 
-    Elle reprend le principe de `LongAudioGate` : un verrou asyncio, servi dans l'ordre d'arrivée, et un compte des
-    places pris sans attente entre le test et l'incrément, donc sans course entre deux requêtes. Une place se réserve
-    (`reserve`) avant que la tâche demande son tour (`LongTicket.turn`) : une tâche longue refusée l'est donc tout de
-    suite, avant que son audio soit décodé en entier.
+    Elle tient sur un verrou asyncio, servi dans l'ordre d'arrivée, et un compte des places pris sans attente entre le
+    test et l'incrément, donc sans course entre deux requêtes. Une place se réserve (`reserve`) avant que la tâche
+    demande son tour (`LongTicket.turn`) : une tâche longue refusée l'est donc tout de suite, avant que son audio soit
+    décodé en entier. Un flux long (`stream=true`) y prend sa place comme une tâche longue.
     """
 
     def __init__(self, max_waiting: int) -> None:

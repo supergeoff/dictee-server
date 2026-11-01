@@ -29,7 +29,8 @@ class Trace:
 
     `route` nomme la route (`transcriptions`, par exemple). Le statut d'une requête qui s'arrête sur une erreur
     imprévue reste 500. `mismatch` compte, dans une réponse en continu, les items dont la phrase finale ne prolonge
-    pas les morceaux déjà envoyés : un nombre sans contenu, `-` hors réponse en continu. `log` n'écrit la ligne
+    pas les morceaux déjà envoyés : un nombre sans contenu, `-` hors réponse en continu. `task` est l'identifiant de
+    la tâche de transcription que la requête a créée ou rejointe, écrit en fin de ligne. `log` n'écrit la ligne
     qu'une fois : la première qui l'appelle la fixe.
     """
 
@@ -43,6 +44,7 @@ class Trace:
     decision: str = "-"
     mismatch: int | None = None
     status: int = 500
+    task: str = "-"
     logged: bool = False
 
     def log(self) -> None:
@@ -54,7 +56,8 @@ class Trace:
             return "-" if value is None else template.format(value)
 
         logger.info(
-            "user=%s route=%s model=%s mode=%s audio_s=%s nemo_ms=%s llm_ms=%s decision=%s mismatch=%s status=%d",
+            "user=%s route=%s model=%s mode=%s audio_s=%s nemo_ms=%s llm_ms=%s decision=%s mismatch=%s status=%d"
+            " task=%s",
             self.user,
             self.route,
             self.model,
@@ -65,6 +68,7 @@ class Trace:
             self.decision,
             show(self.mismatch),
             self.status,
+            self.task,
         )
 
 

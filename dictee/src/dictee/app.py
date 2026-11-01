@@ -23,7 +23,7 @@ from dictee.settings import Settings
 from dictee.speech import speech
 from dictee.tasks_api import cancel_task, get_task
 from dictee.taskstore import TaskStore
-from dictee.transcribe import LongAudioGate, transcriptions
+from dictee.transcribe import transcriptions
 from dictee.web import (
     PreviewCache,
     WebError,
@@ -54,8 +54,8 @@ async def list_models(request: Request) -> JSONResponse:
 def create_app(settings: Settings, *, nemo=None, http: httpx.AsyncClient | None = None) -> Starlette:
     """Construit l'application.
 
-    `settings`, `nemo`, `http`, la base de données, la place des transcriptions longues (`gate`), le registre des tâches
-    (`store`), la file des tâches longues (`lane`) et les voix de la synthèse (`voices`, `None` jusqu'à la première
+    `settings`, `nemo`, `http`, la base de données, le registre des tâches (`store`), la file des tâches longues
+    (`lane`, que les flux longs partagent avec elles) et les voix de la synthèse (`voices`, `None` jusqu'à la première
     lecture) sont rangés dans `app.state`. La base s'ouvre à `settings.db_path`, dossier parent créé au besoin. Sans
     `http`, l'app crée son client à son démarrage et le ferme à son arrêt ; un client fourni reste à la charge de
     l'appelant. Sans `nemo`, elle crée aussi à son démarrage le client de NeMo, sur ce client HTTP ; `app.state.nemo`
@@ -123,7 +123,6 @@ def create_app(settings: Settings, *, nemo=None, http: httpx.AsyncClient | None 
     app.state.db = Database(settings.db_path)
     app.state.nemo = nemo
     app.state.http = http
-    app.state.gate = LongAudioGate(settings.long_audio_seconds)
     app.state.store = TaskStore(app.state.db)
     app.state.lane = LongLane(settings.max_queued_long)
     app.state.voices = None

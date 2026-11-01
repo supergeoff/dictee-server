@@ -71,6 +71,23 @@ async def test_release_holds_the_first_chunk_only():
     assert (await asyncio.wait_for(first, 1)).text == "un"
 
 
+async def test_release_stays_in_place_and_a_new_event_holds_the_next_transcription():
+    release = anyio.Event()
+    nemo = FakeNemo(release=release)
+    held = asyncio.create_task(chunk(nemo))
+    await asyncio.sleep(0.05)
+    # La transcription retenue a pris l'événement : le test le retrouve dans `release` pour le poser.
+    assert nemo.release is release and not held.done()
+    nemo.release.set()
+    await asyncio.wait_for(held, 1)
+    nemo.release = anyio.Event()
+    again = asyncio.create_task(chunk(nemo))
+    await asyncio.sleep(0.05)
+    assert not again.done()
+    nemo.release.set()
+    await asyncio.wait_for(again, 1)
+
+
 async def test_release_goes_to_the_first_transcription_of_either_kind(tmp_path):
     release = anyio.Event()
     nemo = FakeNemo(finals=FINALS, release=release)

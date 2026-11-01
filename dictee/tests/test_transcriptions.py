@@ -2,16 +2,20 @@ import contextlib
 import dataclasses
 import functools
 import gc
+import hashlib
+import itertools
 import json
 import logging
 import re
 import tempfile
+import time
 import warnings
+from pathlib import Path
 
 import anyio
 import httpx
 import pytest
-from conftest import make_audio, wait_until
+from conftest import make_audio, personal_headers, wait_until, write_wav
 from fakes import FINALS, FakeNemo
 from starlette.testclient import TestClient
 
@@ -20,8 +24,12 @@ from dictee import transcribe
 from dictee.app import create_app
 from dictee.errors import ApiError
 from dictee.nemo import NemoError, NemoOverloaded, NemoUnavailable
-from dictee.transcribe import LongAudioGate
+from dictee.taskstore import TERMINAL_STATUSES, TaskStatus
 from dictee.types import Final, Partial, Word
+
+# Sans `stream`, une transcription passe par une tâche, que NeMo indisponible ou saturé fait reprendre : aucune
+# reprise n'attend ici.
+pytestmark = pytest.mark.usefixtures("no_retry_delays")
 
 URL = "/v1/audio/transcriptions"
 BOUNDARY = "dictee-test-boundary"
@@ -76,12 +84,94 @@ def asgi_client(app) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://testserver")
 
 
+@contextlib.asynccontextmanager
+async def app_running(app):
+    """Démarre l'app (lifespan), donc son runner de tâches, et l'arrête à la sortie : `asgi_client` ne le fait pas."""
+    async with app.router.lifespan_context(app):
+        yield
+
+
+def tasks_of(client) -> list:
+    """Toutes les tâches du registre de l'app, de la plus ancienne à la plus récente."""
+    store = client.app.state.store
+    return sorted((store.get(task_id) for task_id in store.known_ids()), key=lambda task: (task.created_at, task.id))
+
+
+def release(client, fake_nemo) -> None:
+    """Pose l'événement `release` du faux NeMo depuis le fil du test, par le portail du `TestClient`."""
+    client.portal.call(fake_nemo.release.set)
+
+
+def poll_task(client, headers, task_id: str) -> dict:
+    """Relit l'objet de la tâche jusqu'à ce qu'elle soit finie, 5 s au plus, et rend le dernier lu."""
+    deadline = time.monotonic() + 5.0
+    while True:
+        body = client.get(f"{URL}/{task_id}", headers=headers).json()
+        if body["status"] in TERMINAL_STATUSES or time.monotonic() > deadline:
+            return body
+        time.sleep(0.01)
+
+
+def post_fields(client, headers, audio: bytes, fields: dict[str, str], order: str):
+    """Envoie les champs avant le fichier (`before_file`) ou après lui (`after_file`)."""
+    parts = [(name, (None, value)) for name, value in fields.items()]
+    file = ("file", ("a.mp3", audio, "audio/mpeg"))
+    return client.post(URL, headers=headers, files=[*parts, file] if order == "before_file" else [file, *parts])
+
+
+def request_lines(caplog) -> list[str]:
+    """Les lignes de journal des requêtes de la route, sans celles des tâches."""
+    lines = (record.getMessage() for record in caplog.records if record.name == "dictee")
+    return [line for line in lines if " route=transcriptions " in line]
+
+
+def request_line(caplog) -> str:
+    """La ligne de journal de la seule requête de la route."""
+    (line,) = request_lines(caplog)
+    return line
+
+
+def tone_wav(directory: Path) -> Path:
+    """Écrit un WAV de trois secondes de sinus et rend son chemin."""
+    path = directory / "tone.wav"
+    write_wav(path, 3.0)
+    return path
+
+
+# Chaque appel de `upload` prend la fréquence suivante : deux envois ne sont jamais identiques, donc jamais rejoints.
+_FREQUENCIES = itertools.count(300, 25)
+
+
+def upload(directory: Path, name: str, seconds: float) -> dict:
+    """La partie `file` d'un WAV de sinus de `seconds` secondes, d'une fréquence que nul autre envoi n'a."""
+    path = directory / name
+    write_wav(path, seconds, next(_FREQUENCIES))
+    return {"file": (name, path.read_bytes(), "audio/wav")}
+
+
+def take_every_place(app) -> None:
+    """Réserve puis rend toutes les places de la file des tâches longues ; lève 429 si une place est restée prise."""
+    lane = app.state.lane
+    tickets = [lane.reserve() for _ in range(1 + app.state.settings.max_queued_long)]
+    for ticket in tickets:
+        ticket.release()
+
+
+async def assert_lane_is_free(app) -> None:
+    """Aucune place réservée et aucun tour tenu dans la file des tâches longues."""
+    take_every_place(app)
+    with anyio.fail_after(0.5):
+        async with app.state.lane.reserve().turn():
+            pass
+
+
 def test_json_with_any_model_name(openai_client, fake_nemo, tone_mp3):
     r = openai_client.audio.transcriptions.create(model="whisper-1", file=("a.mp3", tone_mp3))
     assert r.text == "Bonjour à tous. Salut."
+    # Sans `stream`, le fichier passe par morceaux (section 7.2 de la spec) : ni session, ni personnes, ni partiels.
+    assert fake_nemo.calls == fake_nemo.chunk_calls
     call = fake_nemo.calls[0]
-    assert (call["language"], call["boost"], call["wav_rate"]) == ("fr-FR", 2.0, 16000)
-    assert (call["phrases"], call["speakers"], call["partials"]) == ([], False, False)
+    assert (call["language"], call["boost"], call["phrases"]) == ("fr-FR", 2.0, [])
 
 
 def test_user_glossary_becomes_boosted_phrases(openai_client, fake_nemo, db, tone_mp3):
@@ -122,11 +212,12 @@ def test_empty_and_blank_finals_are_left_out_of_the_text(ask, fake_nemo):
 def test_clean_applies_to_json_and_text_only(openai_client, fake_llm, tone_mp3):
     create = openai_client.audio.transcriptions.create
     assert create(model="dictee-clean", file=("a.mp3", tone_mp3)).text == fake_llm.reply
+    # Le même envoi en `text` rejoint la tâche reformulée de `json` : il reçoit son texte sans nouvel appel au LLM.
     assert create(model="dictee-clean", file=("a.mp3", tone_mp3), response_format="text") == fake_llm.reply
-    assert len(fake_llm.calls) == 2
+    assert len(fake_llm.calls) == 1
     srt = create(model="dictee-clean", file=("a.mp3", tone_mp3), response_format="srt")
     assert "Bonjour à tous." in srt and fake_llm.reply not in srt
-    assert len(fake_llm.calls) == 2
+    assert len(fake_llm.calls) == 1
 
 
 def test_diarized_json_through_the_sdk(openai_client, fake_nemo, tone_mp3):
@@ -167,7 +258,8 @@ def test_diarized_json_takes_its_speakers_from_the_realtime_session(ask, fake_ne
 )
 def test_nemo_is_asked_for_the_speakers_in_meeting_mode_only(ask, fake_nemo, fields, asked):
     assert ask(**fields).status_code == 200
-    assert fake_nemo.calls[0]["speakers"] is asked
+    # Un morceau (sans `stream`, hors réunion) passe par la route REST de NeMo, qui ne marque jamais les personnes.
+    assert fake_nemo.calls[0].get("speakers", False) is asked
 
 
 def test_a_meeting_whose_words_have_no_speaker_goes_all_to_a(ask, fake_nemo):
@@ -336,7 +428,8 @@ def test_stream_with_clean_keeps_its_single_delta_whatever_nemo_sends_on_the_way
 def test_partials_are_asked_of_nemo_only_by_a_stream_that_shows_them(ask, fake_nemo, fields, asked):
     fake_nemo.finals = PARTIAL_FINALS
     assert ask(**fields).status_code == 200
-    assert fake_nemo.calls[0]["partials"] is asked
+    # Un morceau (sans `stream`, hors réunion) passe par la route REST de NeMo, qui ne rend jamais de partiels.
+    assert fake_nemo.calls[0].get("partials", False) is asked
 
 
 def test_the_text_without_stream_ignores_the_partials(ask, fake_nemo):
@@ -414,7 +507,7 @@ def test_nemo_failure_when_a_stream_opens_is_a_429_or_502(ask, fake_nemo, caplog
     assert (body["type"], body["code"], body["param"]) == (error_type, code, None)
     assert str(error) not in body["message"]
     (line,) = [record.getMessage() for record in caplog.records if record.name == "dictee"]
-    assert line.endswith(f"status={status}")
+    assert line.endswith(f"status={status} task=-")
 
 
 def test_nemo_failure_after_the_first_delta_is_an_error_event(ask, fake_nemo, caplog):
@@ -430,7 +523,7 @@ def test_nemo_failure_after_the_first_delta_is_an_error_event(ask, fake_nemo, ca
     assert (event["error"]["type"], event["error"]["code"]) == ("rate_limit_error", "overloaded")
     assert "queue" not in event["error"]["message"]
     (line,) = [record.getMessage() for record in caplog.records if record.name == "dictee"]
-    assert line.endswith("status=429")
+    assert line.endswith("status=429 task=-")
 
 
 UNEXPECTED_BODY = {
@@ -453,6 +546,7 @@ def test_unexpected_error_is_a_500_that_leaks_nothing(ask, fake_nemo, caplog, st
     # un journal, y compris celui d'uvicorn qui journalise le message d'une exception que Starlette relève.
     marker = "Magpie-marker-7f3a91"
     fake_nemo.error = RuntimeError(f"failed on {marker}")
+    fake_nemo.chunks = [fake_nemo.error]  # sans `stream`, l'audio passe par morceaux
     fake_nemo.after = after
     caplog.set_level(logging.DEBUG)
     r = ask(stream=stream)
@@ -461,16 +555,20 @@ def test_unexpected_error_is_a_500_that_leaks_nothing(ask, fake_nemo, caplog, st
         delta, event = sse_events(r)
         assert delta["type"] == "transcript.text.delta"
         assert event == {"type": "error", **UNEXPECTED_BODY}
-    else:
+    elif stream == "true":
         assert r.status_code == 500
         assert r.json() == UNEXPECTED_BODY
+    else:
+        # La tâche en échec garde le code `server_error`, que la requête qui l'attend rend (`task_error`).
+        assert r.status_code == 500
+        assert r.json() == {"error": {**UNEXPECTED_BODY["error"], "code": "server_error"}}
     assert marker not in r.text and marker not in caplog.text
     for record in caplog.records:
         assert marker not in record.getMessage()
         assert marker not in str(record.exc_info) and marker not in str(record.args)
     messages = [record.getMessage() for record in caplog.records if record.name == "dictee"]
     assert "unexpected error class=RuntimeError" in messages
-    assert messages[-1].endswith("status=500")
+    assert re.search(r" status=500 task=\S+$", messages[-1])
 
 
 def test_stream_accepts_only_true_or_false(ask):
@@ -589,8 +687,9 @@ def test_each_upload_lives_alone_in_a_directory_removed_afterwards(
     convert = transcribe.decode_wav16k
 
     async def spy(src, dst, **kwargs):
-        # Au début du décodage le dossier ne contient que l'envoi ; le WAV s'écrit à côté de lui.
-        assert list(src.parent.iterdir()) == [src] and src.parent.parent == scratch and dst.parent == src.parent
+        # Au début du décodage le dossier ne contient que l'envoi. Le WAV d'un flux s'écrit à côté de lui, celui d'une
+        # tâche dans le dossier de la tâche.
+        assert list(src.parent.iterdir()) == [src] and src.parent.parent == scratch
         seen.append(dst)
         return await convert(src, dst, **kwargs)
 
@@ -602,22 +701,46 @@ def test_each_upload_lives_alone_in_a_directory_removed_afterwards(
         assert post(client, service_headers, tone_mp3, stream="true").status_code == 200
         assert post(client, service_headers, bytes(2 * MIB)).status_code == 413
     assert len(seen) == 3
-    # Quand NeMo lit le WAV, l'envoi a déjà disparu : le dossier ne garde que lui, jusqu'à la fin de la réponse.
-    assert nemo.listings == [[seen[0].name], [seen[2].name]]
+    assert [wav.parent.parent for wav in seen] == [settings.tasks_dir, settings.tasks_dir, scratch]
+    # Quand NeMo lit le WAV d'un flux, l'envoi a déjà disparu : le dossier ne garde que lui, jusqu'à la fin de la
+    # réponse. Une tâche lit le sien par tranches, sans le nommer à NeMo.
+    assert nemo.listings == [[seen[2].name]]
     assert not any(wav.exists() for wav in seen)
-    assert list(scratch.iterdir()) == []
+    assert list(scratch.iterdir()) == [] and list(settings.tasks_dir.iterdir()) == []
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("stream", ["false", "true"])
-async def test_the_decoded_wav_stays_on_the_disk_until_the_recognition_ends(
-    stream, settings, fake_llm, service_headers, tmp_path, scratch
+async def test_the_wav_of_a_task_stays_in_its_folder_until_the_task_ends(
+    settings, fake_llm, service_headers, tmp_path, scratch
 ):
     release = anyio.Event()
     nemo = FakeNemo(finals=FINALS, release=release)
     app = app_with(settings, nemo, fake_llm)
     audio = make_audio(tmp_path, "a.mp3", seconds=3.0).read_bytes()
-    body, content_type = multipart_body({"model": "dictee", "stream": stream}, audio)
+    body, content_type = multipart_body({"model": "dictee"}, audio)
+    headers = streaming_headers(service_headers, body, content_type)
+    hung_up = anyio.Event()
+    async with app_running(app), anyio.create_task_group() as tg:
+        tg.start_soon(call_app, app, headers, body, hung_up)
+        await wait_until(lambda: nemo.calls)
+        # Le faux NeMo attend : la tâche est en cours, son WAV est dans son dossier, et l'envoi a déjà disparu.
+        (directory,) = settings.tasks_dir.iterdir()
+        assert [path.name for path in directory.iterdir()] == ["audio.wav"]
+        assert list(scratch.iterdir()) == []
+        release.set()
+        await wait_until(lambda: not list(settings.tasks_dir.iterdir()))
+        hung_up.set()
+
+
+@pytest.mark.anyio
+async def test_the_decoded_wav_of_a_stream_stays_on_the_disk_until_the_recognition_ends(
+    settings, fake_llm, service_headers, tmp_path, scratch
+):
+    release = anyio.Event()
+    nemo = FakeNemo(finals=FINALS, release=release)
+    app = app_with(settings, nemo, fake_llm)
+    audio = make_audio(tmp_path, "a.mp3", seconds=3.0).read_bytes()
+    body, content_type = multipart_body({"model": "dictee", "stream": "true"}, audio)
     headers = streaming_headers(service_headers, body, content_type)
     hung_up = anyio.Event()
     async with anyio.create_task_group() as tg:
@@ -662,7 +785,7 @@ def test_oversized_text_field_is_400(ask):
     ],
 )
 def test_nemo_overloaded_is_429_and_unavailable_is_502(ask, fake_nemo, error, status, error_type, code):
-    fake_nemo.error = error
+    fake_nemo.chunks = [error]  # sans `stream`, l'audio passe par morceaux
     r = ask()
     assert r.status_code == status
     body = r.json()["error"]
@@ -672,6 +795,7 @@ def test_nemo_overloaded_is_429_and_unavailable_is_502(ask, fake_nemo, error, st
 
 def test_silence_gives_empty_text(openai_client, ask, fake_nemo, tone_mp3):
     fake_nemo.finals = ()
+    fake_nemo.chunks = [Final("", ())]  # sans `stream`, hors réunion, l'audio passe par morceaux
     assert ask().json() == {"text": ""}
     assert ask(model="dictee-clean").json() == {"text": ""}
     r = openai_client.audio.transcriptions.create(
@@ -696,7 +820,7 @@ def test_logs_never_contain_the_text(caplog, transcriptions_client, fake_llm, db
     for model, fmt in [("dictee-clean", "json"), ("dictee-diarize", "srt"), ("whisper-1", "json")]:
         r = post(transcriptions_client, headers, tone_mp3, model=model, response_format=fmt, prompt="Sortformer")
         assert r.status_code == 200
-    lines = [record.getMessage() for record in caplog.records if record.name == "dictee"]
+    lines = request_lines(caplog)
     assert len(lines) == 3
     assert all("decision=" in line and f"user={user} " in line for line in lines)
     for secret in ("Bonjour", "Salut", "Nemotron", "Sortformer", fake_llm.reply):
@@ -710,16 +834,20 @@ def test_log_line_says_who_what_how_long_and_how_it_ended(caplog, ask, transcrip
     ask(model="dictee-diarize", stream="true")
     ask(b"not audio", model="dictee")
     transcriptions_client.post(URL)
-    lines = [record.getMessage() for record in caplog.records if record.name == "dictee"]
+    lines = request_lines(caplog)
     start = r"user=default route=transcriptions "
+    # Une tâche nomme son identifiant ; ses temps de NeMo et du LLM sont sur la ligne de la tâche, pas ici.
+    of_a_task = r"nemo_ms=- llm_ms=- decision=- mismatch=- status=200 task=trn_[0-9A-HJKMNP-TV-Z]{26}"
+    no_task = " task=-"
     patterns = [
-        start + r"model=whisper-1 mode=raw audio_s=3\.\d nemo_ms=\d+ llm_ms=- decision=- mismatch=- status=200",
+        start + r"model=whisper-1 mode=raw audio_s=3\.\d " + of_a_task,
+        start + r"model=dictee-clean mode=clean audio_s=3\.\d " + of_a_task,
         start
-        + r"model=dictee-clean mode=clean audio_s=3\.\d nemo_ms=\d+ llm_ms=\d+ decision=cleaned mismatch=- status=200",
-        start
-        + r"model=dictee-diarize mode=diarize audio_s=3\.\d nemo_ms=\d+ llm_ms=- decision=- mismatch=0 status=200",
-        start + r"model=dictee mode=raw audio_s=- nemo_ms=- llm_ms=- decision=- mismatch=- status=422",
-        r"user=- route=transcriptions model=- mode=- audio_s=- nemo_ms=- llm_ms=- decision=- mismatch=- status=401",
+        + r"model=dictee-diarize mode=diarize audio_s=3\.\d nemo_ms=\d+ llm_ms=- decision=- mismatch=0 status=200"
+        + no_task,
+        start + r"model=dictee mode=raw audio_s=- nemo_ms=- llm_ms=- decision=- mismatch=- status=422" + no_task,
+        r"user=- route=transcriptions model=- mode=- audio_s=- nemo_ms=- llm_ms=- decision=- mismatch=- status=401"
+        + no_task,
     ]
     assert len(lines) == len(patterns)
     for line, pattern in zip(lines, patterns, strict=True):
@@ -727,8 +855,7 @@ def test_log_line_says_who_what_how_long_and_how_it_ended(caplog, ask, transcrip
 
 
 def mismatch_of(caplog) -> str:
-    (line,) = [record.getMessage() for record in caplog.records if record.name == "dictee"]
-    return re.search(r" mismatch=(\S+) ", line).group(1)
+    return re.search(r" mismatch=(\S+) ", request_line(caplog)).group(1)
 
 
 @pytest.mark.parametrize(
@@ -782,169 +909,9 @@ def test_log_line_never_carries_the_text_of_a_mismatch(caplog, ask, fake_nemo):
 def test_model_name_cannot_forge_a_log_line(caplog, ask):
     caplog.set_level(logging.INFO, logger="dictee")
     ask(model="x\nuser=1 status=200 " + "y" * 200)
-    (line,) = [record.getMessage() for record in caplog.records if record.name == "dictee"]
-    assert "\n" not in line and len(line) < 250
-
-
-@contextlib.asynccontextmanager
-async def slot(gate: LongAudioGate, duration_s: float):
-    """Le passage d'un audio de `duration_s` secondes par la porte, comme la route le fait.
-
-    Un audio court ne passe pas par la porte. Un audio long réserve sa place, attend son tour, et la rend à la sortie.
-    """
-    if duration_s <= gate.threshold_s:
-        yield
-        return
-    async with gate.reserve().turn():
-        yield
-
-
-async def assert_gate_is_free(gate: LongAudioGate) -> None:
-    """Aucune place réservée et aucun tour tenu : deux audios longs sont admis, et le tour est libre."""
-    places = [gate.reserve(), gate.reserve()]  # lève `long_audio_busy` si une place est restée prise
-    for place in places:
-        place.release()
-    with anyio.fail_after(0.5):
-        async with slot(gate, gate.threshold_s + 1):
-            pass
-
-
-def test_the_gate_admits_two_reservations_and_refuses_a_third_until_one_is_released():
-    gate = LongAudioGate(1.0)
-    first, second = gate.reserve(), gate.reserve()
-    assert gate.full
-    with pytest.raises(ApiError) as refused:
-        gate.reserve()
-    assert_long_audio_busy(refused.value)
-    first.release()
-    assert not gate.full
-    third = gate.reserve()
-    assert gate.full
-    second.release()
-    third.release()
-    assert not gate.full
-
-
-def test_releasing_a_place_twice_frees_one_place_only():
-    gate = LongAudioGate(1.0)
-    first, _second = gate.reserve(), gate.reserve()
-    first.release()
-    first.release()
-    gate.reserve()
-    assert gate.full  # la seconde libération de `first` n'a pas rendu la place d'une autre
-
-
-@pytest.mark.anyio
-async def test_a_place_is_given_back_when_its_turn_ends_on_an_error():
-    gate = LongAudioGate(1.0)
-    with pytest.raises(RuntimeError):
-        async with gate.reserve().turn():
-            raise RuntimeError("the recognition failed")
-    await assert_gate_is_free(gate)
-
-
-@pytest.mark.anyio
-async def test_a_place_that_never_took_its_turn_is_given_back_by_release():
-    gate = LongAudioGate(1.0)
-    gate.reserve().release()
-    await assert_gate_is_free(gate)
-
-
-@pytest.mark.anyio
-async def test_gate_lets_short_audio_through_and_serializes_long_audio():
-    gate = LongAudioGate(1.0)
-    async with slot(gate, 5.0):
-        with anyio.fail_after(0.5):
-            async with slot(gate, 1.0):  # pile au seuil : l'audio est court
-                pass
-        with pytest.raises(TimeoutError), anyio.fail_after(0.1):
-            async with slot(gate, 5.0):
-                pass
-    with anyio.fail_after(0.5):
-        async with slot(gate, 5.0):
-            pass
-
-
-@pytest.mark.anyio
-async def test_cancelled_long_request_frees_the_slot():
-    gate = LongAudioGate(1.0)
-    holding = anyio.Event()
-
-    async def hold():
-        async with slot(gate, 5.0):
-            holding.set()
-            await anyio.sleep_forever()
-
-    async with anyio.create_task_group() as tg:
-        tg.start_soon(hold)
-        await holding.wait()
-        tg.cancel_scope.cancel()
-    with anyio.fail_after(0.5):
-        async with slot(gate, 5.0):
-            pass
-
-
-@pytest.mark.anyio
-async def test_waiting_for_the_slot_can_be_cancelled():
-    gate = LongAudioGate(1.0)
-    async with slot(gate, 5.0):
-        with anyio.move_on_after(0.1):
-            async with slot(gate, 5.0):
-                pytest.fail("the slot is taken")
-    with anyio.fail_after(0.5):
-        async with slot(gate, 5.0):
-            pass
-
-
-def assert_long_audio_busy(error: ApiError) -> None:
-    assert (error.status, error.type, error.code, error.param) == (429, "rate_limit_error", "long_audio_busy", None)
-
-
-@pytest.mark.anyio
-async def test_third_long_request_is_refused_at_once_and_the_waiter_goes_on_after_the_runner():
-    gate = LongAudioGate(1.0)
-    waiter_ran = anyio.Event()
-
-    async def wait_for_the_slot():
-        async with slot(gate, 5.0):
-            waiter_ran.set()
-
-    async with anyio.create_task_group() as tg:
-        async with slot(gate, 5.0):
-            tg.start_soon(wait_for_the_slot)
-            await wait_until(lambda: gate.full)
-            with anyio.fail_after(0.5), pytest.raises(ApiError) as refused:
-                async with slot(gate, 5.0):
-                    pytest.fail("a third long request must not be admitted")
-            assert_long_audio_busy(refused.value)
-            async with slot(gate, 1.0):  # un audio court passe, même quand les places des longs sont prises
-                pass
-            assert not waiter_ran.is_set()
-        with anyio.fail_after(0.5):
-            await waiter_ran.wait()
-    assert not gate.full
-
-
-@pytest.mark.anyio
-async def test_cancelled_waiter_frees_its_waiting_place():
-    gate = LongAudioGate(1.0)
-
-    async def wait_for_the_slot():
-        async with slot(gate, 5.0):
-            pytest.fail("the slot is taken")
-
-    async with slot(gate, 5.0):
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(wait_for_the_slot)
-            await wait_until(lambda: gate.full)
-            tg.cancel_scope.cancel()
-        assert not gate.full
-        # La place d'attente est libre : un autre audio long l'obtient, il n'est pas refusé.
-        with anyio.move_on_after(0.1) as waiting:
-            async with slot(gate, 5.0):
-                pytest.fail("the slot is taken")
-        assert waiting.cancelled_caught
-    assert not gate.full
+    lines = [record.getMessage() for record in caplog.records if record.name == "dictee"]
+    assert len(request_lines(caplog)) == 1
+    assert all("\n" not in line and len(line) < 250 for line in lines)
 
 
 def test_audio_limit_is_two_hours():
@@ -959,7 +926,7 @@ async def test_short_request_passes_during_a_long_one(settings, fake_llm, servic
     long_audio = make_audio(tmp_path, "long.mp3", seconds=3.0).read_bytes()
     short_audio = make_audio(tmp_path, "short.mp3", seconds=0.5).read_bytes()
     answers = {}
-    async with asgi_client(app) as client:
+    async with app_running(app), asgi_client(app) as client:
 
         async def send(name, audio):
             files = {"file": ("a.mp3", audio)}
@@ -981,18 +948,18 @@ async def test_second_long_request_waits_for_the_first(settings, fake_llm, servi
     release = anyio.Event()
     nemo = FakeNemo(finals=FINALS, release=release)
     app = app_with(settings, nemo, fake_llm, long_audio_seconds=1.0)
-    audio = make_audio(tmp_path, "long.mp3", seconds=3.0).read_bytes()
     answers = []
-    async with asgi_client(app) as client:
+    async with app_running(app), asgi_client(app) as client:
 
-        async def send():
-            files = {"file": ("a.mp3", audio)}
+        async def send(name):
+            # Deux audios différents : le second, s'il était identique, rejoindrait la tâche du premier.
+            files = upload(tmp_path, name, seconds=3.0)
             answers.append(await client.post(URL, headers=service_headers, files=files, data={"model": "dictee"}))
 
         async with anyio.create_task_group() as tg:
-            tg.start_soon(send)
+            tg.start_soon(send, "first.wav")
             await wait_until(lambda: len(nemo.calls) == 1)
-            tg.start_soon(send)
+            tg.start_soon(send, "second.wav")
             await anyio.sleep(0.3)
             assert len(nemo.calls) == 1  # la seconde attend la place de la première
             release.set()
@@ -1002,18 +969,27 @@ async def test_second_long_request_waits_for_the_first(settings, fake_llm, servi
 async def call_app(
     app,
     headers: dict[str, str],
-    body: bytes,
-    hung_up: anyio.Event,
+    body: bytes | Path,
+    hung_up: anyio.Event | None = None,
     *,
     complete: bool = True,
     sent: list | None = None,
     on_send=None,
-) -> list:
-    """Appelle l'app sans client HTTP et rend les messages envoyés.
+    hang_up_after_upload: bool = False,
+) -> int | None:
+    """Appelle l'app sans client HTTP et rend le statut de sa réponse, ou `None` si elle n'a pas commencé.
 
-    Après le corps, `receive` attend que `hung_up` soit posé, puis dit `http.disconnect`. Les messages envoyés
-    s'ajoutent à `sent`, si elle est donnée, au fur et à mesure ; `on_send` est attendue avec chacun d'eux.
+    `body` est un corps multipart, dont `headers` donne le type, ou le chemin d'un audio, que la fonction envoie seul
+    avec `model=dictee`. Après le corps, `receive` attend que `hung_up` soit posé, puis dit `http.disconnect` ; avec
+    `hang_up_after_upload`, il le dit tout de suite. Les messages envoyés s'ajoutent à `sent`, si elle est donnée, au
+    fur et à mesure ; `on_send` est attendue avec chacun d'eux.
     """
+    if isinstance(body, Path):
+        body, content_type = multipart_body({"model": "dictee"}, body.read_bytes())
+        headers = streaming_headers(headers, body, content_type)
+    hung_up = anyio.Event() if hung_up is None else hung_up
+    if hang_up_after_upload:
+        hung_up.set()
     messages = [{"type": "http.request", "body": body, "more_body": not complete}]
     sent = [] if sent is None else sent
 
@@ -1043,19 +1019,19 @@ async def call_app(
         "server": ("testserver", 443),
     }
     await app(scope, receive, send)
-    return sent
+    return next((message["status"] for message in sent if message["type"] == "http.response.start"), None)
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("stream", ["false", "true"])
 async def test_client_hanging_up_closes_the_session_and_frees_the_slot(
-    stream, caplog, settings, fake_llm, service_headers, tmp_path, scratch
+    caplog, settings, fake_llm, service_headers, tmp_path, scratch
 ):
-    # Le faux NeMo ne rend jamais la main : la requête attend dans la session, comme une transcription longue.
+    # Le faux NeMo ne rend jamais la main : la requête attend dans la session, comme une transcription longue. Sans
+    # `stream`, la tâche, elle, continue après le départ du client (voir les tests des tâches).
     nemo = FakeNemo(finals=FINALS, release=anyio.Event())
     app = app_with(settings, nemo, fake_llm, long_audio_seconds=1.0)
     audio = make_audio(tmp_path, "long.mp3", seconds=3.0).read_bytes()
-    body, content_type = multipart_body({"model": "dictee", "stream": stream}, audio)
+    body, content_type = multipart_body({"model": "dictee", "stream": "true"}, audio)
     headers = {**service_headers, "content-type": content_type, "content-length": str(len(body))}
     hung_up = anyio.Event()
     caplog.set_level(logging.INFO, logger="dictee")
@@ -1064,10 +1040,10 @@ async def test_client_hanging_up_closes_the_session_and_frees_the_slot(
         await wait_until(lambda: nemo.calls)
         hung_up.set()
         await wait_until(lambda: nemo.sessions_closed == 1)
-    await assert_gate_is_free(app.state.gate)
+    await assert_lane_is_free(app)
     await wait_until(lambda: not list(scratch.iterdir()))
     lines = [record.getMessage() for record in caplog.records if record.name == "dictee"]
-    assert len(lines) == 1 and lines[0].endswith("status=499")
+    assert len(lines) == 1 and lines[0].endswith("status=499 task=-")
 
 
 @pytest.mark.anyio
@@ -1077,8 +1053,9 @@ async def test_client_hanging_up_during_the_upload_is_not_an_error(settings, fak
     hung_up = anyio.Event()
     hung_up.set()
     headers = {**service_headers, "content-type": content_type}
+    sent: list = []
     with anyio.fail_after(2):
-        sent = await call_app(app, headers, body[:200], hung_up, complete=False)
+        await call_app(app, headers, body[:200], hung_up, complete=False, sent=sent)
     assert [message["status"] for message in sent if message["type"] == "http.response.start"] == [499]
     assert fake_nemo.calls == []
 
@@ -1111,10 +1088,10 @@ async def test_client_hanging_up_mid_stream_closes_the_session_and_frees_the_slo
         assert sent[0]["type"] == "http.response.start" and sent[0]["status"] == 200
         hung_up.set()
         await wait_until(lambda: nemo.sessions_closed == 1)
-    await assert_gate_is_free(app.state.gate)
+    await assert_lane_is_free(app)
     await wait_until(lambda: not list(scratch.iterdir()))
     lines = [record.getMessage() for record in caplog.records if record.name == "dictee"]
-    assert len(lines) == 1 and lines[0].endswith("status=499")
+    assert len(lines) == 1 and lines[0].endswith("status=499 task=-")
 
 
 @pytest.mark.anyio
@@ -1142,10 +1119,10 @@ async def test_client_hanging_up_before_the_stream_starts_still_ends_the_recogni
         tg.start_soon(functools.partial(call_app, app, headers, body, hung_up, sent=sent, on_send=hang_up_at_the_start))
         await wait_until(lambda: nemo.sessions_closed == 1)
     assert [message["type"] for message in sent] == ["http.response.start"]
-    await assert_gate_is_free(app.state.gate)
+    await assert_lane_is_free(app)
     await wait_until(lambda: not list(scratch.iterdir()))
     lines = [record.getMessage() for record in caplog.records if record.name == "dictee"]
-    assert len(lines) == 1 and lines[0].endswith("status=499")
+    assert len(lines) == 1 and lines[0].endswith("status=499 task=-")
 
 
 @pytest.mark.anyio
@@ -1155,8 +1132,8 @@ async def test_third_concurrent_long_request_is_429_while_decoding_and_decodes_n
 ):
     release = anyio.Event()
     nemo = FakeNemo(finals=FINALS, release=release)
-    app = app_with(settings, nemo, fake_llm, long_audio_seconds=1.0)
-    audio = make_audio(tmp_path, "long.mp3", seconds=3.0).read_bytes()
+    # Une tâche longue qui tourne et une seule qui attend : la troisième demande longue, tâche ou flux, est de trop.
+    app = app_with(settings, nemo, fake_llm, long_audio_seconds=1.0, max_queued_long=1)
     decodes = []
     convert = transcribe.decode_wav16k
 
@@ -1179,10 +1156,11 @@ async def test_third_concurrent_long_request_is_429_while_decoding_and_decodes_n
     monkeypatch.setattr(transcribe, "decode_wav16k", spy)
     caplog.set_level(logging.INFO, logger="dictee")
     answers = {}
-    async with asgi_client(app) as client:
+    async with app_running(app), asgi_client(app) as client:
 
         async def send(name, **fields):
-            files = {"file": ("a.mp3", audio)}
+            # Trois audios différents : un audio identique rejoindrait la tâche d'un autre au lieu de prendre une place.
+            files = upload(tmp_path, f"{name}.wav", seconds=3.0)
             data = {"model": "dictee", **fields}
             answers[name] = await client.post(URL, headers=service_headers, files=files, data=data)
 
@@ -1190,7 +1168,7 @@ async def test_third_concurrent_long_request_is_429_while_decoding_and_decodes_n
             tg.start_soon(send, "runner")
             await wait_until(lambda: len(nemo.calls) == 1)
             tg.start_soon(send, "waiter")
-            await wait_until(lambda: app.state.gate.full)
+            await wait_until(lambda: app.state.lane.full)
             with anyio.fail_after(2):  # le runner tient la place : un refus ne peut pas attendre
                 await send("third", stream=stream)
             assert "runner" not in answers and "waiter" not in answers
@@ -1212,16 +1190,17 @@ async def test_third_concurrent_long_request_is_429_while_decoding_and_decodes_n
     assert [decode["past"] for decode in decodes] == [True, True, False]
     assert {decode["long_seconds"] for decode in decodes} == {1.0}
     assert {decode["max_seconds"] for decode in decodes} == {transcribe.MAX_AUDIO_SECONDS}
-    statuses = [record.getMessage().rsplit("status=", 1)[1] for record in caplog.records if record.name == "dictee"]
+    statuses = [re.search(r" status=(\d+) ", line).group(1) for line in request_lines(caplog)]
     assert sorted(statuses) == ["200", "200", "429"]
-    await assert_gate_is_free(app.state.gate)
+    await assert_lane_is_free(app)
 
 
 # Cas de sortie d'une requête longue : options du faux NeMo, champs du formulaire, plafonds remplacés, statut attendu.
+# Sans `stream`, l'audio passe par morceaux : la panne de NeMo s'y donne par `chunks`.
 EXITS = {
     "done": ({}, {}, {}, 200),
     "stream": ({}, {"stream": "true"}, {}, 200),
-    "nemo-fails": ({"error": NemoUnavailable("down")}, {}, {}, 502),
+    "nemo-fails": ({"chunks": [NemoUnavailable("down")]}, {}, {}, 502),
     "stream-nemo-fails": ({"error": NemoUnavailable("down")}, {"stream": "true"}, {}, 502),
     "too-long": ({}, {}, {"MAX_AUDIO_SECONDS": 2.9}, 400),
 }
@@ -1251,13 +1230,13 @@ async def test_the_place_is_given_back_whatever_the_exit(
 
     monkeypatch.setattr(transcribe, "decode_wav16k", spy)
     audio = make_audio(tmp_path, "long.mp3", seconds=3.0).read_bytes()
-    async with asgi_client(app) as client:
+    async with app_running(app), asgi_client(app) as client:
         answer = await client.post(
             URL, headers=service_headers, files={"file": ("a.mp3", audio)}, data={"model": "dictee", **fields}
         )
-    assert answer.status_code == status
-    assert admitted == [True]
-    await assert_gate_is_free(app.state.gate)
+        assert answer.status_code == status
+        assert admitted == [True]
+        await assert_lane_is_free(app)
 
 
 @pytest.fixture(scope="module")
@@ -1304,4 +1283,176 @@ def test_the_decoding_is_bounded_by_the_same_limit_in_every_mode(
             {"response_format": "diarized_json"},
         ):
             assert post(client, service_headers, tone_mp3, **fields).status_code == 200
-    assert seen == [(transcribe.MAX_AUDIO_SECONDS, 120.0)] * 4
+    # Le dernier envoi, en réunion comme le troisième, rejoint sa tâche : il n'a rien à décoder.
+    assert seen == [(transcribe.MAX_AUDIO_SECONDS, 120.0)] * 3
+
+
+# Tâches : sans `stream`, une transcription de fichier passe par une tâche enregistrée, synchrone ou en arrière-plan.
+
+
+def test_a_synchronous_request_leaves_a_finished_task(ask, transcriptions_client):
+    assert ask().json() == {"text": "Bonjour à tous. Salut."}
+    [task] = tasks_of(transcriptions_client)
+    assert task.status is TaskStatus.COMPLETED
+
+
+def test_background_gives_the_task_object_at_once_then_its_result(
+    ask, transcriptions_client, fake_nemo, service_headers
+):
+    fake_nemo.release = anyio.Event()
+    body = ask(background="true").json()
+    assert body["object"] == "audio.transcription.task" and body["status"] in ("queued", "in_progress")
+    assert body["output"] is None
+    release(transcriptions_client, fake_nemo)
+    final = poll_task(transcriptions_client, service_headers, body["id"])
+    assert (final["status"], final["output"]) == ("completed", {"text": "Bonjour à tous. Salut."})
+
+
+@pytest.mark.parametrize("field_order", ["before_file", "after_file"])
+def test_stream_with_background_is_refused_before_any_task(
+    transcriptions_client, service_headers, tone_mp3, field_order
+):
+    response = post_fields(
+        transcriptions_client, service_headers, tone_mp3, {"stream": "true", "background": "true"}, field_order
+    )
+    assert (response.status_code, response.json()["error"]["code"]) == (400, "unsupported_combination")
+    assert response.json()["error"]["param"] == "background" and tasks_of(transcriptions_client) == []
+
+
+def test_background_accepts_only_true_or_false(ask):
+    assert ask(background="yes").json()["error"]["param"] == "background"
+
+
+def test_an_identical_upload_joins_the_running_task(ask, transcriptions_client, fake_nemo):
+    fake_nemo.release = anyio.Event()
+    first, second = ask(background="true").json(), ask(background="true").json()
+    assert first["id"] == second["id"]
+    release(transcriptions_client, fake_nemo)
+    assert len([call for call in fake_nemo.calls if "chunk" in call]) == 1
+
+
+def test_an_identical_upload_gets_the_finished_result_without_nemo(ask, fake_nemo):
+    ask()
+    calls = len(fake_nemo.calls)
+    assert ask().json() == {"text": "Bonjour à tous. Salut."}
+    assert len(fake_nemo.calls) == calls
+
+
+def test_an_identical_upload_after_a_failure_makes_a_new_task(ask, transcriptions_client, fake_nemo, no_retry_delays):
+    fake_nemo.chunks = [NemoError("bad")]
+    assert ask().status_code == 502
+    fake_nemo.chunks = [Final("Bonjour.", ())]
+    assert ask().json() == {"text": "Bonjour."}
+    assert [task.status for task in tasks_of(transcriptions_client)] == [TaskStatus.FAILED, TaskStatus.COMPLETED]
+
+
+def test_another_glossary_makes_another_task(transcriptions_client, db, tone_mp3):
+    headers, owner = personal_headers(db, "alice@example.test")
+    post(transcriptions_client, headers, tone_mp3, model="dictee")
+    db.save_settings(owner, glossary="Sortformer")
+    post(transcriptions_client, headers, tone_mp3, model="dictee")
+    assert len(tasks_of(transcriptions_client)) == 2
+
+
+def test_each_request_gets_its_own_format_from_the_same_task(ask, transcriptions_client):
+    assert ask(response_format="json").json() == {"text": "Bonjour à tous. Salut."}
+    assert ask(response_format="srt").text.startswith("1\n00:00:00,000 --> ")
+    assert len(tasks_of(transcriptions_client)) == 1
+
+
+@pytest.mark.anyio
+async def test_a_client_hanging_up_leaves_the_task_running_to_its_end(
+    settings, fake_nemo, fake_llm, service_headers, tmp_path
+):
+    fake_nemo.release = anyio.Event()
+    app = app_with(settings, fake_nemo, fake_llm)
+    async with app_running(app):
+        status = await call_app(app, service_headers, tone_wav(tmp_path), hang_up_after_upload=True)
+        assert status == 499
+        [task] = app.state.store.unfinished()
+        fake_nemo.release.set()
+        assert (await app.state.runner.wait(task.id)).status is TaskStatus.COMPLETED
+
+
+@pytest.mark.parametrize(
+    ("error", "status", "code"),
+    [
+        (NemoOverloaded("full"), 429, "overloaded"),
+        (NemoUnavailable("down"), 502, "upstream_error"),
+        (NemoError("bad"), 502, "upstream_error"),
+    ],
+)
+def test_a_failed_task_gives_the_error_of_a_synchronous_request(ask, fake_nemo, no_retry_delays, error, status, code):
+    fake_nemo.chunks = [error]
+    response = ask()
+    assert (response.status_code, response.json()["error"]["code"]) == (status, code)
+
+
+def test_audio_over_two_hours_is_refused_before_any_task(ask, transcriptions_client, monkeypatch):
+    monkeypatch.setattr(transcribe, "MAX_AUDIO_SECONDS", 1.0)
+    response = ask()
+    assert (response.status_code, response.json()["error"]["code"]) == (400, "audio_too_long")
+    tasks_dir = transcriptions_client.app.state.settings.tasks_dir
+    assert tasks_of(transcriptions_client) == [] and not any(tasks_dir.iterdir())
+
+
+@pytest.mark.anyio
+async def test_the_fifth_long_upload_is_429_while_decoding_and_leaves_nothing(
+    settings, fake_nemo, fake_llm, service_headers, tmp_path
+):
+    fake_nemo.release = anyio.Event()
+    app = app_with(settings, fake_nemo, fake_llm, long_audio_seconds=1.0)
+    async with app_running(app), asgi_client(app) as client:
+        for index in range(4):
+            response = await client.post(
+                "/v1/audio/transcriptions",
+                headers=service_headers,
+                files=upload(tmp_path, f"long{index}.wav", seconds=3.0),
+                data={"model": "dictee", "background": "true"},
+            )
+            assert response.status_code == 200
+        refused = await client.post(
+            "/v1/audio/transcriptions",
+            headers=service_headers,
+            files=upload(tmp_path, "long4.wav", seconds=3.0),
+            data={"model": "dictee", "background": "true"},
+        )
+        assert (refused.status_code, refused.json()["error"]["code"]) == (429, "long_audio_busy")
+        assert len(app.state.store.unfinished()) == 4 and len(list(settings.tasks_dir.iterdir())) == 4
+        fake_nemo.release.set()
+
+
+def test_a_stream_makes_no_task(ask, transcriptions_client):
+    assert ask(stream="true").status_code == 200
+    assert tasks_of(transcriptions_client) == []
+
+
+def test_the_upload_digest_is_the_sha256_of_the_file_bytes(transcriptions_client, service_headers, tone_mp3):
+    post(transcriptions_client, service_headers, tone_mp3, model="dictee")
+    [task] = tasks_of(transcriptions_client)
+    assert task.upload_sha256 == hashlib.sha256(tone_mp3).hexdigest()
+
+
+def test_the_request_line_names_its_task(caplog, ask, transcriptions_client):
+    caplog.set_level(logging.INFO, logger="dictee")
+    ask()
+    [task] = tasks_of(transcriptions_client)
+    assert request_line(caplog).endswith(f"status=200 task={task.id}")
+
+
+def test_an_audio_decoded_to_zero_seconds_is_refused_like_an_unreadable_one(ask, transcriptions_client, monkeypatch):
+    # La durée sert de diviseur au traitement, et un morceau vide n'a rien à transcrire : la tâche n'est pas créée.
+    unreadable = ask(b"this is not audio")
+
+    async def nothing(src, dst, **kwargs):
+        kwargs["on_long"]()  # une place réservée pendant le décodage doit être rendue avec le refus
+        dst.write_bytes(b"")
+        return 0.0
+
+    monkeypatch.setattr(transcribe, "decode_wav16k", nothing)
+    refused = ask()
+    assert refused.status_code == 422
+    assert (refused.status_code, refused.json()) == (unreadable.status_code, unreadable.json())
+    tasks_dir = transcriptions_client.app.state.settings.tasks_dir
+    assert tasks_of(transcriptions_client) == [] and not any(tasks_dir.iterdir())
+    take_every_place(transcriptions_client.app)

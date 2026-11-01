@@ -1,10 +1,13 @@
 """Lecture d'un envoi multipart : les champs en mémoire, le fichier `file` sur disque, bloc par bloc.
 
 Le corps n'est jamais lu en entier avant d'être jugé : un envoi trop gros est refusé dès son `Content-Length`, ou dès
-que les octets reçus dépassent la limite. Rien n'est journalisé ici.
+que les octets reçus dépassent la limite. L'empreinte SHA-256 du fichier se calcule pendant son écriture, sans le
+relire. Rien n'est journalisé ici.
 """
 
+import hashlib
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
@@ -26,18 +29,33 @@ def payload_too_large(limit_mb: int) -> ApiError:
     return ApiError(413, message, param="file", code="payload_too_large")
 
 
+@dataclass(frozen=True)
+class Upload:
+    """Ce qu'un envoi a donné : ses champs, si sa partie `file` est venue, et l'empreinte de ses octets.
+
+    `fields` donne toutes les valeurs de chaque champ, dans l'ordre d'arrivée. `sha256` est l'empreinte SHA-256
+    hexadécimale des octets de la partie `file`, celle d'un fichier vide quand elle n'est pas venue.
+    """
+
+    fields: dict[str, list[str]]
+    has_file: bool
+    sha256: str
+
+
 class MultipartReader:
     """Lit un corps multipart bloc par bloc : les champs restent en mémoire, la partie `file` va sur disque.
 
     `write` reçoit les blocs du corps, `finish` clôt la lecture et `close` ferme le fichier ; `fields` donne alors
-    toutes les valeurs de chaque champ, dans l'ordre d'arrivée, et `has_file` dit si la partie `file` est venue. Les
-    autres parties qui portent un fichier sont acceptées et ignorées. `on_file` reçoit les champs déjà lus quand la
-    partie `file` commence, avant que son premier octet soit écrit.
+    toutes les valeurs de chaque champ, dans l'ordre d'arrivée, `has_file` dit si la partie `file` est venue et
+    `sha256` donne l'empreinte de ses octets, calculée à mesure qu'ils sont écrits. Les autres parties qui portent un
+    fichier sont acceptées et ignorées. `on_file` reçoit les champs déjà lus quand la partie `file` commence, avant que
+    son premier octet soit écrit.
     """
 
     def __init__(self, boundary: bytes, path: Path, on_file: Callable[[dict[str, list[str]]], None]) -> None:
         self.fields: dict[str, list[str]] = {}
         self.has_file = False
+        self._digest = hashlib.sha256()
         self._path = path
         self._on_file = on_file
         self._parts = 0
@@ -72,6 +90,10 @@ class MultipartReader:
             self._file.close()
             self._file = None
 
+    @property
+    def sha256(self) -> str:
+        return self._digest.hexdigest()
+
     def _part_begin(self) -> None:
         self._parts += 1
         if self._parts > MAX_PARTS:
@@ -105,7 +127,9 @@ class MultipartReader:
 
     def _part_data(self, data: bytes, start: int, end: int) -> None:
         if self._file is not None:
-            self._file.write(data[start:end])
+            block = data[start:end]
+            self._file.write(block)
+            self._digest.update(block)
         elif not self._ignored:
             self._value += data[start:end]
             if len(self._value) > MAX_FIELD_BYTES:
@@ -120,8 +144,8 @@ class MultipartReader:
 
 async def read_upload(
     request: Request, path: Path, limit_mb: int, on_file: Callable[[dict[str, list[str]]], None]
-) -> tuple[dict[str, list[str]], bool]:
-    """Lit le formulaire de la requête et écrit son fichier à `path` ; rend les champs et si un fichier est arrivé.
+) -> Upload:
+    """Lit le formulaire de la requête, écrit son fichier à `path` et rend ce que l'envoi a donné (voir `Upload`).
 
     Le corps ne dépasse pas `limit_mb` Mo : un `Content-Length` plus grand est refusé avant toute lecture, et la
     lecture s'arrête sur la même erreur 413 dès que les octets reçus dépassent la limite, sans avoir tout reçu. Un
@@ -152,4 +176,4 @@ async def read_upload(
         raise ApiError(400, "The multipart body is malformed.") from None
     finally:
         reader.close()
-    return reader.fields, reader.has_file
+    return Upload(reader.fields, reader.has_file, reader.sha256)

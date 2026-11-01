@@ -105,10 +105,12 @@ def services(store, fake_nemo, settings, fake_llm):
     return Services(store, fake_nemo, settings, fake_llm.http)
 
 
-def write_wav(path, seconds: float) -> None:
-    """WAV canonique mono 16 kHz d'un sinus à 400 Hz : sans silence, ffmpeg n'y repère aucune coupe."""
-    # 400 Hz fait un nombre entier de périodes par seconde : les secondes se mettent bout à bout sans raccord.
-    one_second = struct.pack(f"<{RATE}h", *(round(8000 * math.sin(2 * math.pi * 400 * n / RATE)) for n in range(RATE)))
+def write_wav(path, seconds: float, frequency: int = 400) -> None:
+    """WAV canonique mono 16 kHz d'un sinus à `frequency` Hz : sans silence, ffmpeg n'y repère aucune coupe."""
+    # Une fréquence entière fait un nombre entier de périodes par seconde : les secondes se mettent bout à bout sans
+    # raccord.
+    samples = (round(8000 * math.sin(2 * math.pi * frequency * n / RATE)) for n in range(RATE))
+    one_second = struct.pack(f"<{RATE}h", *samples)
     pcm = (one_second * math.ceil(seconds))[: round(seconds * RATE) * 2]
     with wave.open(str(path), "wb") as wav:
         wav.setnchannels(1)

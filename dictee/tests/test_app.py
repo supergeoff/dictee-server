@@ -151,6 +151,7 @@ def test_app_starts_its_task_runner_and_creates_the_task_folder(settings):
     app = create_app(settings)
     assert isinstance(app.state.store, TaskStore)
     assert isinstance(app.state.lane, LongLane)
+    assert not hasattr(app.state, "gate")  # la file des tâches longues sert aussi les flux : plus de porte à part
     assert not settings.tasks_dir.exists()
     with TestClient(app):
         assert isinstance(app.state.runner, TaskRunner)

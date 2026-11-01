@@ -44,9 +44,11 @@ class FakeNemo:
     `finals` sont rendus par `transcribe` (avec des `Partial` mêlés aux `Final`, ils ne sortent que si l'appel passe
     `partials=True`), `pcm` par `speak`. Les mots de `finals` portent les personnes brutes de la session ; comme
     NeMo, `transcribe` les retire quand l'appel ne passe pas `speakers=True`. `error`, s'il est donné, est levée par
-    `transcribe`, `speak` et `voices`. `release` (un `anyio.Event`) retient la première transcription, de `transcribe`
-    ou de `transcribe_chunk` selon celle qui arrive d'abord : elle n'a de résultat à rendre qu'une fois l'événement
-    posé, ce qui laisse les transcriptions suivantes passer sans attendre. `after` est le nombre d'éléments
+    `transcribe`, `speak` et `voices`. `release` (un `anyio.Event`) retient la première transcription qui arrive après
+    lui, de `transcribe` ou de `transcribe_chunk` : elle n'a de résultat à rendre qu'une fois l'événement posé, ce qui
+    laisse les transcriptions suivantes passer sans attendre. L'événement reste dans `release`, pour que le test le
+    pose quand il veut, même après que la transcription l'a pris ; un nouvel événement placé dans `release` retient de
+    même la transcription qui le suit. `after` est le nombre d'éléments
     (`Partial` demandés ou `Final`) que `transcribe` rend avant de lever `error` ou d'attendre `release` : avec 1, une
     réponse en continu a déjà son premier delta quand la panne ou l'attente arrive.
 
@@ -94,6 +96,7 @@ class FakeNemo:
         self.on_chunk = on_chunk
         self.calls: list[dict] = []
         self.sessions_closed = 0
+        self._taken = None  # le dernier événement de `release` qu'une transcription a pris
 
     @property
     def transcribe_calls(self) -> list[dict]:
@@ -116,9 +119,10 @@ class FakeNemo:
         return [call for call in self.calls if "ready" in call]
 
     async def _hold(self) -> None:
-        """Attend l'événement `release`, que seule la première transcription (de l'une ou l'autre sorte) prend."""
-        release, self.release = self.release, None
-        if release is not None:
+        """Attend `release`, que seule la première transcription qui le trouve prend ; il reste là pour le test."""
+        release = self.release
+        if release is not None and release is not self._taken:
+            self._taken = release
             await release.wait()
 
     async def transcribe(self, wav, *, language, phrases, boost, speakers=False, partials=False, on_progress=None):
