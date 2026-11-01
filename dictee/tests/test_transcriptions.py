@@ -313,7 +313,7 @@ def test_the_text_without_stream_ignores_the_partials(ask, fake_nemo):
     [(NemoOverloaded("the queue is full"), 429), (NemoUnavailable("connection refused"), 502), (NemoError("x"), 502)],
 )
 def test_nemo_failure_before_the_first_partial_is_a_429_or_502(ask, fake_nemo, error, status):
-    # La lecture anticipée s'arrête au premier `Partial` : tant qu'il manque, rien n'est parti et le statut dit la panne.
+    # La lecture anticipée s'arrête au premier `Partial` : sans lui, rien n'est parti et le statut dit la panne.
     fake_nemo.finals = PARTIAL_FINALS
     fake_nemo.error = error
     r = ask(stream="true")
@@ -628,15 +628,70 @@ def test_log_line_says_who_what_how_long_and_how_it_ended(caplog, ask, transcrip
     lines = [record.getMessage() for record in caplog.records if record.name == "dictee"]
     start = r"user=default route=transcriptions "
     patterns = [
-        start + r"model=whisper-1 mode=raw audio_s=3\.\d nemo_ms=\d+ llm_ms=- decision=- status=200",
-        start + r"model=dictee-clean mode=clean audio_s=3\.\d nemo_ms=\d+ llm_ms=\d+ decision=cleaned status=200",
-        start + r"model=dictee-diarize mode=diarize audio_s=3\.\d nemo_ms=\d+ llm_ms=- decision=- status=200",
-        start + r"model=dictee mode=raw audio_s=- nemo_ms=- llm_ms=- decision=- status=422",
-        r"user=- route=transcriptions model=- mode=- audio_s=- nemo_ms=- llm_ms=- decision=- status=401",
+        start + r"model=whisper-1 mode=raw audio_s=3\.\d nemo_ms=\d+ llm_ms=- decision=- mismatch=- status=200",
+        start
+        + r"model=dictee-clean mode=clean audio_s=3\.\d nemo_ms=\d+ llm_ms=\d+ decision=cleaned mismatch=- status=200",
+        start
+        + r"model=dictee-diarize mode=diarize audio_s=3\.\d nemo_ms=\d+ llm_ms=- decision=- mismatch=0 status=200",
+        start + r"model=dictee mode=raw audio_s=- nemo_ms=- llm_ms=- decision=- mismatch=- status=422",
+        r"user=- route=transcriptions model=- mode=- audio_s=- nemo_ms=- llm_ms=- decision=- mismatch=- status=401",
     ]
     assert len(lines) == len(patterns)
     for line, pattern in zip(lines, patterns, strict=True):
         assert re.fullmatch(pattern, line), line
+
+
+def mismatch_of(caplog) -> str:
+    (line,) = [record.getMessage() for record in caplog.records if record.name == "dictee"]
+    return re.search(r" mismatch=(\S+) ", line).group(1)
+
+
+@pytest.mark.parametrize(
+    "finals,expected",
+    [
+        (PARTIAL_FINALS, "0"),
+        (FINALS, "0"),
+        ((Partial("Bonjour"), Final("Salut tout le monde.", ()), Partial("Sa"), FINALS[1]), "1"),
+        ((Partial("Bonjour"), Final("Salut tout le monde.", ()), Partial("Sal"), Final("Au revoir.", ())), "2"),
+        ((Partial("Bonjour"), Final("", ())), "1"),
+    ],
+    ids=["partials-extended", "no-partials", "one-item", "two-items", "empty-final"],
+)
+def test_log_line_counts_the_items_whose_final_text_does_not_extend_what_was_sent(
+    caplog, ask, fake_nemo, finals, expected
+):
+    fake_nemo.finals = finals
+    caplog.set_level(logging.INFO, logger="dictee")
+    assert ask(stream="true").status_code == 200
+    assert mismatch_of(caplog) == expected
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [{"model": "dictee"}, {"model": "dictee-diarize"}, {"model": "dictee-clean", "stream": "true"}],
+    ids=["no-stream", "no-stream-with-speakers", "stream-with-clean"],
+)
+def test_log_line_has_no_mismatch_count_when_nothing_was_relayed(caplog, ask, fake_nemo, fields):
+    fake_nemo.finals = (Partial("Bonjour"), Final("Salut tout le monde.", ()))
+    caplog.set_level(logging.INFO, logger="dictee")
+    assert ask(**fields).status_code == 200
+    assert mismatch_of(caplog) == "-"
+
+
+def test_log_line_counts_a_mismatch_even_when_the_stream_ends_in_an_error(caplog, ask, fake_nemo):
+    fake_nemo.finals = (Partial("Bonjour"), Final("Salut tout le monde.", ()), Partial("Sa"), FINALS[1])
+    fake_nemo.error = NemoUnavailable("connection refused")
+    fake_nemo.after = 2
+    caplog.set_level(logging.INFO, logger="dictee")
+    ask(stream="true")
+    assert mismatch_of(caplog) == "1"
+
+
+def test_log_line_never_carries_the_text_of_a_mismatch(caplog, ask, fake_nemo):
+    fake_nemo.finals = (Partial("Bonjour"), Final("Salut tout le monde.", ()))
+    caplog.set_level(logging.DEBUG)
+    ask(stream="true")
+    assert "Bonjour" not in caplog.text and "Salut" not in caplog.text
 
 
 def test_model_name_cannot_forge_a_log_line(caplog, ask):

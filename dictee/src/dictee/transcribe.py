@@ -179,13 +179,14 @@ class _DeltaFeed:
     Le texte de `done` joint les phrases finales par une espace : le premier delta de chaque item, sauf du premier
     item non vide, la porte, quelles que soient les espaces que NeMo met en tête de ses morceaux. Quand la phrase
     finale ne commence pas par ce qui est déjà parti pour son item, rien de plus ne part : le texte de `done` fait
-    foi, et la suite reprend avec l'item suivant.
+    foi, la suite reprend avec l'item suivant, et `mismatches` compte ces items.
     """
 
     def __init__(self, emit: Callable[[str], None]) -> None:
         self._emit = emit
         self._sent_any = False  # un texte est déjà parti : le premier delta d'un nouvel item porte l'espace
         self._item = ""  # ce qui est parti pour l'item en cours
+        self.mismatches = 0  # items dont la phrase finale ne prolonge pas ce qui est parti
 
     def partial(self, text: str) -> None:
         # Le premier morceau d'un item perd ses espaces de tête : seule celle qui sépare les items est posée.
@@ -195,6 +196,8 @@ class _DeltaFeed:
         """Termine l'item avec le texte de sa phrase finale, sans espaces autour, vide ou non."""
         if text.startswith(self._item):
             self._send(text[len(self._item) :])
+        else:
+            self.mismatches += 1
         self._item = ""
 
     def _send(self, text: str) -> None:
@@ -270,6 +273,8 @@ class _Job:
                     turns = await state.nemo.diarize(self.wav)
             finally:
                 self.trace.nemo_ms = elapsed_ms(started)
+                if feed is not None:
+                    self.trace.mismatch = feed.mismatches
         return _Recognition(texts, words, turns)
 
     async def finish(self, recognition: _Recognition) -> Transcript:

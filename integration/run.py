@@ -7,6 +7,9 @@
 Prérequis : `make integration`, qui démarre la stack (`compose.yaml` et `compose.integration.yaml`), attend `/health`
 puis lance ce script. Usage : uv run --script integration/run.py [--only a,b,c]
 
+`--only` rejoue seulement les contrôles nommés, avec ceux dont ils dépendent, sur une stack déjà démarrée : pratique
+pour refaire un contrôle long (`--only hangup`) sans relancer tout le reste. `--help` donne la liste des noms.
+
 dictee répond sur http://127.0.0.1:18000. Le script l'appelle avec la clé de service (`OPENWEBUI_SERVICE_KEY` du
 `.env`, jamais affichée) et sans en-tête d'email : les valeurs par défaut s'appliquent. Chaque contrôle affiche `OK`
 ou `ÉCHEC` avec sa durée, et le script s'arrête au premier échec. Les lignes `INFO` sont des mesures, sans verdict.
@@ -58,6 +61,8 @@ LONG_HEADSTART = 5.0
 # de nemo après le raccroché.
 FIRST_DELTA_TIMEOUT = 30.0
 HANGUP_WINDOW = 15.0
+# Débit minimal, en octets par seconde, de l'envoi d'une requête à dictee : au-dessous, l'envoi échoue.
+SEND_MIN_RATE = 1024**2
 # CPU de nemo (en pourcents d'un cœur) au-dessus duquel il travaille, et au-dessous duquel il est au repos.
 BUSY_CPU = 50.0
 IDLE_CPU = 10.0
@@ -182,14 +187,20 @@ def cpu_percent(container: str) -> float:
 
 
 def wait_idle(container: str, timeout: float = 90.0) -> float:
-    """Attend que le CPU du conteneur retombe sous IDLE_CPU deux relevés de suite ; rend les secondes attendues."""
+    """Attend que le CPU du conteneur retombe sous IDLE_CPU deux relevés de suite ; rend les secondes attendues.
+
+    Échoue si le CPU ne retombe pas en `timeout` secondes : un contrôle qui part sur un nemo encore occupé mesurerait
+    autre chose que ce qu'il dit.
+    """
     started = time.monotonic()
     calm = 0
+    last = 0.0
     while time.monotonic() - started < timeout:
-        calm = calm + 1 if cpu_percent(container) < IDLE_CPU else 0
+        last = cpu_percent(container)
+        calm = calm + 1 if last < IDLE_CPU else 0
         if calm == 2:
-            break
-    return time.monotonic() - started
+            return time.monotonic() - started
+    raise Failure(f"nemo ne retombe pas sous {IDLE_CPU:.0f} % de CPU en {timeout:.0f} s (dernier relevé {last:.0f} %)")
 
 
 def multipart(fields: dict[str, str], filename: str, content: bytes) -> tuple[bytes, str]:
@@ -222,10 +233,19 @@ class RawStream:
         self.buffer = b""
         self.sock = socket.create_connection((HOST, PORT), timeout=10)
         self.started = time.monotonic()
+        # `sendall` a pour délai la durée totale de l'envoi : proportionné à la taille, pour qu'un envoi lent échoue.
+        send_timeout = 10 + (len(head) + len(body)) / SEND_MIN_RATE
+        self.sock.settimeout(send_timeout)
         try:
             self.sock.sendall(head + body)
-        except OSError:  # dictee a déjà répondu et fermé : la réponse est à lire
+        except (BrokenPipeError, ConnectionResetError):  # dictee a déjà répondu et fermé : la réponse est à lire
             pass
+        except TimeoutError:
+            self.sock.close()
+            raise Failure(
+                f"envoi de {len(body) / 1024**2:.0f} Mo non terminé en {send_timeout:.0f} s "
+                f"(débit minimal {SEND_MIN_RATE / 1024**2:.0f} Mo/s)"
+            ) from None
         self.sent_at = time.monotonic()
 
     def read_until(self, marker: bytes, timeout: float) -> bool:
@@ -351,10 +371,14 @@ def check_compose(state: State) -> str:
         if memory_limit(service) != memory:
             problems.append(f"{name} : limite de mémoire {memory_limit(service)} octets au lieu de {memory}")
     versions: dict[str, object] = {}
+    vague = []
     for name in ("models", "nemo"):
         versions[name] = services[name].get("build", {}).get("args", {}).get("NEMO_VERSION")
         if not isinstance(versions[name], str) or not re.fullmatch(EXPLICIT_VERSION, versions[name]):
+            vague.append(name)
             problems.append(f"{name} : NEMO_VERSION {versions[name]!r} n'est pas une version explicite (x.y.z)")
+    if not vague and len(set(versions.values())) > 1:
+        problems.append(f"NEMO_VERSION différente entre models et nemo : {versions}")
     info("NEMO_VERSION lue dans compose.yaml : " + ", ".join(f"{name} {version}" for name, version in versions.items()))
     volumes = declared_volumes()
     if volumes != sorted(volumes):
@@ -363,7 +387,8 @@ def check_compose(state: State) -> str:
         problems.append(f"volumes lus dans le fichier {volumes} différents de ceux de `config`")
     expect(not problems, " ; ".join(problems))
     return (
-        f"{len(services)} services, restart, env_file, ports, mémoire, version explicite de NeMo et volumes conformes"
+        f"{len(services)} services, restart, env_file, ports, mémoire, même version explicite de NeMo et volumes "
+        "conformes"
     )
 
 
@@ -536,7 +561,9 @@ def check_hangup(state: State) -> str:
 
     dictee relaie les deltas de NeMo : le premier arrive peu après l'envoi, bien avant la fin de la session, quand
     NeMo est en plein travail sur les 11 minutes d'audio. Le contrôle échoue si ce premier delta n'arrive pas en
-    FIRST_DELTA_TIMEOUT secondes : le flux ne progresserait pas.
+    FIRST_DELTA_TIMEOUT secondes : le flux ne progresserait pas. Le socket se ferme dès ce delta, avant tout relevé
+    de CPU : `docker stats` met une à deux secondes à répondre, et le CPU n'est lu qu'après le raccroché. Que nemo
+    travaillait à ce moment-là, le delta le dit (NeMo n'en émet que pendant la session), et le flux n'avait pas fini.
     """
     wait_idle(state.nemo)
     stream = RawStream(state.long_wav(), state.key)
@@ -544,7 +571,7 @@ def check_hangup(state: State) -> str:
         got_delta = stream.read_until(DELTA, FIRST_DELTA_TIMEOUT)
         first_delta = time.monotonic()
         status = stream.status
-        busy = cpu_percent(state.nemo)
+        finished = b"transcript.text.done" in stream.buffer
     finally:
         stream.close()
     hung_up = time.monotonic()
@@ -554,16 +581,19 @@ def check_hangup(state: State) -> str:
         "le flux ne progresse pas",
     )
     expect(status == 200, f"le flux a répondu HTTP {status}")
+    expect(not finished, "le flux avait déjà fini au premier delta : le contrôle ne raccroche pas en plein travail")
     delay = f"premier delta {first_delta - stream.sent_at:.1f} s après la fin de l'envoi"
-    info(f"audio long de {LONG_SECONDS / 60:.0f} min : {delay} ({first_delta - stream.started:.1f} s après le début)")
-    expect(busy >= BUSY_CPU, f"nemo à {busy:.0f} % de CPU au moment de raccrocher : le contrôle ne prouve rien")
+    info(
+        f"audio long de {LONG_SECONDS / 60:.0f} min : {delay} ({first_delta - stream.started:.1f} s après le début), "
+        f"socket fermé {(hung_up - first_delta) * 1000:.0f} ms après"
+    )
     cpu: list[float] = []
     while time.monotonic() - hung_up < HANGUP_WINDOW:
         cpu.append(cpu_percent(state.nemo))
-    # `docker stats` donne le CPU de la seconde qui précède chaque relevé : le premier couvre encore le raccroché.
+    # `docker stats` donne le CPU de la seconde qui précède chaque relevé : le premier couvre l'instant du raccroché.
     info(
-        f"CPU de nemo : {busy:.0f} % au raccroché, puis {HANGUP_WINDOW:.0f} s de relevés "
-        f"{[round(value) for value in cpu]} % (le premier couvre l'instant du raccroché)"
+        f"CPU de nemo après le raccroché, pendant {HANGUP_WINDOW:.0f} s : {[round(value) for value in cpu]} % "
+        "(le premier couvre l'instant du raccroché)"
     )
     # Sur cette machine la courte reste sous la limite ci-dessous même quand NeMo traite encore une longue (4 s contre
     # 2 s au repos, mesuré en concurrence) : seul le CPU prouve que la session abandonnée est fermée.
@@ -580,7 +610,10 @@ def check_hangup(state: State) -> str:
 
 
 def check_queued(state: State) -> str:
-    """Mesure le délai avant les en-têtes d'un flux long qui attend derrière une transcription longue."""
+    """Mesure le délai avant les en-têtes d'un flux long qui attend derrière une transcription longue.
+
+    Mesure sans verdict sur les délais : le contrôle n'échoue que si une requête échoue (statut HTTP, texte vide).
+    """
     wait_idle(state.nemo)
     long_wav = state.long_wav()
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -595,35 +628,41 @@ def check_queued(state: State) -> str:
         finally:
             stream.close()
         first = running.result()
-    expect(got_headers, "aucun en-tête reçu du flux long en attente")
-    return (
+    expect(first.status == 200 and first.text, f"la longue qui tournait : HTTP {first.status} {first.body}")
+    expect(status in (None, 200), f"le flux long en attente a répondu HTTP {status}")
+    headers = (
         f"en-têtes {headers_at - stream.sent_at:.1f} s après la fin de l'envoi (HTTP {status}, premier delta "
-        f"{'reçu' if got_delta else 'non reçu'}) ; la longue qui tournait (HTTP {first.status}) a fini "
+        f"{'reçu' if got_delta else 'non reçu'})"
+        if got_headers
+        else "aucun en-tête reçu en 900 s"
+    )
+    return (
+        f"{headers} ; la longue qui tournait (HTTP {first.status}) a fini "
         f"{first.ended_at - stream.sent_at:.1f} s après cet envoi"
     )
 
 
 def check_long_stream(state: State) -> str:
-    """Mesure un flux de l'audio long lu jusqu'au bout : premier delta, nombre de deltas, concaténation contre `done`.
+    """Lit un flux de l'audio long jusqu'au bout : plus d'un delta, et leur concaténation égale le texte de `done`.
 
-    Sans verdict sur la concaténation : le texte de `done` fait foi, et un écart est une information à rapporter.
+    Une seule phrase finale couvre les 11 minutes : c'est le cas où le texte relayé est le plus long avant son `Final`.
     """
     wait_idle(state.nemo)
     streamed = stream_events(state, ("long.wav", state.long_wav(), "audio/wav"))
     expect(streamed.done is not None, "aucun événement transcript.text.done")
     expect(streamed.first_delta is not None, "aucun événement transcript.text.delta")
+    expect(len(streamed.deltas) > 1, f"{len(streamed.deltas)} delta seulement : dictee ne relaie pas ceux de NeMo")
     joined, done = streamed.joined, streamed.done
-    if joined == done:
-        same = "égale"
-    else:
+    if joined != done:
         common = next((i for i, (a, b) in enumerate(zip(joined, done)) if a != b), min(len(joined), len(done)))
-        same = (
-            f"DIFFÈRE à partir du caractère {common} (deltas {len(joined)} caractères, done {len(done)}) : "
-            f"deltas {joined[common : common + 40]!r}, done {done[common : common + 40]!r}"
+        raise Failure(
+            f"les deltas mis bout à bout diffèrent du texte de done à partir du caractère {common} "
+            f"(deltas {len(joined)} caractères, done {len(done)}) : deltas {joined[common : common + 40]!r}, "
+            f"done {done[common : common + 40]!r}"
         )
     return (
-        f"{len(streamed.deltas)} deltas, premier delta {streamed.first_delta:.1f} s après le début de la requête "
-        f"(envoi compris), fin après {streamed.seconds:.1f} s ; la concaténation {same} le texte de done"
+        f"{len(streamed.deltas)} deltas dont la concaténation égale le texte de done ; premier delta "
+        f"{streamed.first_delta:.1f} s après le début de la requête (envoi compris), fin après {streamed.seconds:.1f} s"
     )
 
 
@@ -639,8 +678,8 @@ CHECKS: list[tuple[str, str, Callable[[State], str], tuple[str, ...], bool]] = [
     ("formats", "Synthèse en mp3, opus, aac, flac et pcm", check_formats, ("health",), False),
     ("concurrency", "Concurrence", check_concurrency, ("synthesis",), False),
     ("hangup", "Raccroché en plein flux", check_hangup, ("transcription",), False),
+    ("longstream", "Flux de l'audio long jusqu'au bout", check_long_stream, ("synthesis",), False),
     ("queued", "En-tête d'un flux long en attente", check_queued, ("synthesis",), True),
-    ("longstream", "Flux de l'audio long jusqu'au bout", check_long_stream, ("synthesis",), True),
 ]
 
 
@@ -680,7 +719,12 @@ def peaks(state: State) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     names = ", ".join(check[0] for check in CHECKS)
-    parser.add_argument("--only", default="", help=f"contrôles à lancer, avec ceux dont ils dépendent : {names}")
+    parser.add_argument(
+        "--only",
+        default="",
+        help=f"rejoue seulement ces contrôles (séparés par des virgules), avec ceux dont ils dépendent, sur la stack "
+        f"déjà démarrée. Contrôles : {names}",
+    )
     args = parser.parse_args()
     only = {part.strip() for part in args.only.split(",") if part.strip()}
     unknown = only - {check[0] for check in CHECKS}

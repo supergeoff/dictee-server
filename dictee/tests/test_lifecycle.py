@@ -34,18 +34,27 @@ def lines(caplog) -> list[str]:
 def test_trace_line_names_the_route_and_leaves_unknown_fields_as_dashes(caplog):
     caplog.set_level(logging.INFO, logger="dictee")
     Trace(route="speech").log()
-    assert lines(caplog) == ["user=- route=speech model=- mode=- audio_s=- nemo_ms=- llm_ms=- decision=- status=500"]
+    assert lines(caplog) == [
+        "user=- route=speech model=- mode=- audio_s=- nemo_ms=- llm_ms=- decision=- mismatch=- status=500"
+    ]
 
 
 def test_trace_line_writes_each_field(caplog):
     caplog.set_level(logging.INFO, logger="dictee")
     trace = Trace(route="transcriptions", user="7", model="dictee", mode="clean", audio_s=3.04, nemo_ms=120)
-    trace.llm_ms, trace.decision, trace.status = 45, "cleaned", 200
+    trace.llm_ms, trace.decision, trace.mismatch, trace.status = 45, "cleaned", 2, 200
     trace.log()
     assert lines(caplog) == [
         "user=7 route=transcriptions model=dictee mode=clean audio_s=3.0 nemo_ms=120 llm_ms=45"
-        " decision=cleaned status=200"
+        " decision=cleaned mismatch=2 status=200"
     ]
+
+
+def test_trace_line_writes_a_mismatch_count_of_zero(caplog):
+    caplog.set_level(logging.INFO, logger="dictee")
+    trace = Trace(route="transcriptions", mismatch=0)
+    trace.log()
+    assert "mismatch=0 status=500" in lines(caplog)[0]
 
 
 def test_trace_writes_its_line_once(caplog):

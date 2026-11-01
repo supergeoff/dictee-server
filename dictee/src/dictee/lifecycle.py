@@ -28,7 +28,9 @@ class Trace:
     """Ce que la ligne de journal d'une requête dit d'elle ; un champ resté inconnu s'écrit `-`.
 
     `route` nomme la route (`transcriptions`, par exemple). Le statut d'une requête qui s'arrête sur une erreur
-    imprévue reste 500. `log` n'écrit la ligne qu'une fois : la première qui l'appelle la fixe.
+    imprévue reste 500. `mismatch` compte, dans une réponse en continu, les items dont la phrase finale ne prolonge
+    pas les morceaux déjà envoyés : un nombre sans contenu, `-` hors réponse en continu. `log` n'écrit la ligne
+    qu'une fois : la première qui l'appelle la fixe.
     """
 
     route: str
@@ -39,6 +41,7 @@ class Trace:
     nemo_ms: int | None = None
     llm_ms: int | None = None
     decision: str = "-"
+    mismatch: int | None = None
     status: int = 500
     logged: bool = False
 
@@ -51,7 +54,7 @@ class Trace:
             return "-" if value is None else template.format(value)
 
         logger.info(
-            "user=%s route=%s model=%s mode=%s audio_s=%s nemo_ms=%s llm_ms=%s decision=%s status=%d",
+            "user=%s route=%s model=%s mode=%s audio_s=%s nemo_ms=%s llm_ms=%s decision=%s mismatch=%s status=%d",
             self.user,
             self.route,
             self.model,
@@ -60,6 +63,7 @@ class Trace:
             show(self.nemo_ms),
             show(self.llm_ms),
             self.decision,
+            show(self.mismatch),
             self.status,
         )
 

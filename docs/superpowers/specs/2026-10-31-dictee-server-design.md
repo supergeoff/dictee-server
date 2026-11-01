@@ -236,7 +236,7 @@ Après le tronc commun, dictee envoie le WAV entier à la route `/v1/audio/diari
 
 ### 6.4 Streaming
 
-Avec `stream=true`, dictee envoie un `transcript.text.delta` à chaque morceau de texte que NeMo produit en cours de route, puis le reste du texte final. En mode locuteurs, les segments arrivent à la fin, après la passe de locuteurs qui a besoin du fichier entier. Avec `dictee-clean`, le texte reformulé part en un seul `transcript.text.delta`, puisque le LLM travaille sur le texte complet.
+Avec `stream=true`, dictee envoie un `transcript.text.delta` à chaque morceau de texte que NeMo produit en cours de route, puis le reste du texte final. Quand le texte final ne prolonge pas les morceaux déjà envoyés, dictee n'envoie rien de plus pour ce passage et le texte de `transcript.text.done` fait foi. En mode locuteurs, les segments arrivent à la fin, après la passe de locuteurs qui a besoin du fichier entier. Avec `dictee-clean`, le texte reformulé part en un seul `transcript.text.delta`, puisque le LLM travaille sur le texte complet.
 
 ### 6.5 Synthèse vocale
 
@@ -247,7 +247,7 @@ Avec `stream=true`, dictee envoie un `transcript.text.delta` à chaque morceau d
 
 ### 6.6 Journaux
 
-dictee écrit une ligne par requête. Elle donne l'identifiant de l'utilisateur, la route, le modèle, la durée de l'audio, les temps de NeMo et du LLM, la décision de reformulation et le code de réponse. Les journaux ne contiennent jamais le texte ni l'audio, et dictee ne stocke ni l'un ni l'autre.
+dictee écrit une ligne par requête. Elle donne l'identifiant de l'utilisateur, la route, le modèle, la durée de l'audio, les temps de NeMo et du LLM, la décision de reformulation, le nombre de passages d'une réponse en continu dont le texte final ne prolonge pas les morceaux déjà envoyés (un nombre, sans le texte) et le code de réponse. Les journaux ne contiennent jamais le texte ni l'audio, et dictee ne stocke ni l'un ni l'autre.
 
 ## 7. Espace utilisateur et page de configuration
 

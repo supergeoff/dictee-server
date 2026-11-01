@@ -24,6 +24,7 @@ test:
 
 # Lance la stack complète avec les vrais modèles, attend /health (300 s au plus), puis joue integration/run.py.
 # La stack reste démarrée à la fin : `make down` l'arrête. Le script reçoit le binaire compose du Makefile.
+# Pour rejouer un seul contrôle sur la stack démarrée : uv run --script integration/run.py --only hangup (--help).
 integration: .env network
 	$(COMPOSE) $(COMPOSE_FILES) up -d --build
 	@echo "Attente de dictee sur /health (300 s au plus)..."
