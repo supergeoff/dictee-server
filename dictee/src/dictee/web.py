@@ -4,7 +4,8 @@ Chacun se connecte avec PocketID (OIDC, code d'autorisation avec PKCE), puis rè
 son glossaire, ses consignes de reformulation et sa voix. La page n'a pas de JavaScript : chaque action est un
 formulaire, et l'écoute d'une voix passe par un élément `<audio>`.
 
-La session est le cookie signé de `SessionMiddleware` ; elle ne garde que `user_id` et `csrf`. Chaque `POST` exige une
+La session est le cookie signé de `SessionMiddleware` ; elle ne garde que `user_id`, le `sub` PocketID du compte (qui
+distingue deux comptes ayant porté le même numéro après une remise à zéro de la base) et `csrf`. Chaque `POST` exige une
 session et le jeton anti-CSRF, présent dans chaque formulaire. Une clé nouvelle n'existe en clair que dans la réponse
 au `POST /keys` : elle n'est ni rangée dans la session, ni journalisée. Les réponses HTML ne sont jamais mises en
 cache et portent une politique de sécurité qui n'autorise ni script, ni image, ni ressource d'un autre site.
@@ -132,13 +133,16 @@ def build_oauth(settings: Settings) -> OAuth:
 def _session_user(request: Request) -> int | None:
     """Compte de la session, ou `None` sans session.
 
-    Si le compte n'existe plus (base remise à zéro, compte supprimé), la session est vidée et traitée comme absente :
-    aucune route ne travaille pour un compte fantôme.
+    La session porte le numéro du compte et le `sub` PocketID avec lequel il s'est connecté. Si le compte n'existe plus
+    (base remise à zéro, compte supprimé), ou si le numéro appartient désormais à un autre `sub` (un nouveau compte a
+    repris le numéro), ou si la session ne dit pas son `sub` (cookie d'avant cette règle), elle est vidée et traitée
+    comme absente : aucune route ne travaille pour un compte fantôme ni pour celui d'un autre.
     """
     user_id = request.session.get("user_id")
     if type(user_id) is not int:
         return None
-    if not request.app.state.db.user_exists(user_id):
+    sub = request.session.get("sub")
+    if type(sub) is not str or request.app.state.db.user_sub(user_id) != sub:
         request.session.clear()
         return None
     return user_id
@@ -327,6 +331,7 @@ async def callback(request: Request) -> Response:
     # Session vidée avant d'être remplie : un cookie déposé avant la connexion ne devient pas celui du compte.
     request.session.clear()
     request.session["user_id"] = user_id
+    request.session["sub"] = sub
     request.session["csrf"] = secrets.token_urlsafe(32)
     logger.info("login user=%d", user_id)
     return RedirectResponse("/", status_code=303)

@@ -93,17 +93,17 @@ def test_email_lookup_ignores_case(db):
     assert db.user_by_email("ada@example.ORG") == uid
 
 
-def test_user_exists_tells_a_known_account_from_an_unknown_one(db, db_path):
+def test_user_sub_gives_the_sub_of_an_account_and_none_for_an_unknown_one(db, db_path):
     uid = db.upsert_user("sub-1", "a@example.org", "A")
-    assert db.user_exists(uid) is True
-    assert db.user_exists(uid + 1) is False
+    assert db.user_sub(uid) == "sub-1"
+    assert db.user_sub(uid + 1) is None
     conn = sqlite3.connect(db_path)
     try:
         with conn:
             conn.execute("delete from users where id = ?", (uid,))
     finally:
         conn.close()
-    assert db.user_exists(uid) is False
+    assert db.user_sub(uid) is None
 
 
 def test_unknown_email_has_no_user(db):
@@ -140,6 +140,40 @@ def test_settings_belong_to_one_user(db):
 def test_reopening_the_database_keeps_its_data(db, db_path):
     uid = db.upsert_user("sub-1", "a@example.org", "A")
     assert Database(db_path).user_by_email("a@example.org") == uid
+
+
+def user_version(db_path) -> int:
+    conn = sqlite3.connect(db_path)
+    try:
+        return conn.execute("pragma user_version").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def set_user_version(db_path, version: int) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(f"pragma user_version = {version}")
+    finally:
+        conn.close()
+
+
+def test_the_schema_is_created_at_version_1(db, db_path):
+    assert user_version(db_path) == 1
+
+
+def test_a_database_created_before_the_versioning_gets_its_version_when_opened(db, db_path):
+    uid = db.upsert_user("sub-1", "a@example.org", "A")
+    set_user_version(db_path, 0)
+    reopened = Database(db_path)
+    assert user_version(db_path) == 1
+    assert reopened.user_by_email("a@example.org") == uid
+
+
+def test_a_newer_version_is_left_as_it_is(db, db_path):
+    set_user_version(db_path, 7)
+    Database(db_path)
+    assert user_version(db_path) == 7
 
 
 def test_database_creates_its_parent_directory(tmp_path):

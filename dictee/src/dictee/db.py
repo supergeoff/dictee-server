@@ -13,6 +13,9 @@ KEY_PREFIX = "dk_"
 # Nombre de caractères de la clé que la page affiche pour la reconnaître.
 SHOWN_PREFIX_LENGTH = 10
 
+# Version du schéma, rangée dans `pragma user_version` : une migration future s'y repérera pour savoir d'où elle part.
+SCHEMA_VERSION = 1
+
 _SCHEMA = """
 create table if not exists users (
     id integer primary key,
@@ -90,6 +93,9 @@ class Database:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            # Une base neuve, ou créée avant le versionnement, est à 0 ; une version plus récente n'est pas touchée.
+            if conn.execute("pragma user_version").fetchone()[0] == 0:
+                conn.execute(f"pragma user_version = {SCHEMA_VERSION}")
 
     @contextlib.contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -120,10 +126,15 @@ class Database:
             row = conn.execute("select id from users where email = ?", (_normalize_email(email),)).fetchone()
         return None if row is None else row[0]
 
-    def user_exists(self, user_id: int) -> bool:
-        """Dit si ce compte existe encore : une session peut en citer un que la base n'a plus."""
+    def user_sub(self, user_id: int) -> str | None:
+        """`sub` PocketID du compte ; `None` si le compte n'existe plus.
+
+        Une session cite un numéro de compte et son `sub` : si la base a été remise à zéro, un autre compte peut avoir
+        repris ce numéro, et seul le `sub` dit que la session n'est plus la sienne.
+        """
         with self._connect() as conn:
-            return conn.execute("select 1 from users where id = ?", (user_id,)).fetchone() is not None
+            row = conn.execute("select sub from users where id = ?", (user_id,)).fetchone()
+        return None if row is None else row[0]
 
     def create_key(self, user_id: int, label: str) -> str:
         """Crée une clé et la renvoie en clair : c'est la seule fois, la base n'en garde que le hachage."""

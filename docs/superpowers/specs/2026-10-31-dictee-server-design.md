@@ -257,7 +257,7 @@ dictee écrit une ligne par requête. Elle donne l'identifiant de l'utilisateur,
 
 ### 7.1 Connexion
 
-La page se connecte à PocketID en OpenID Connect (code d'autorisation avec PKCE, portées `openid email profile`). Tout compte PocketID peut se connecter. Le compte dictee se crée à la première connexion et se rattache au `sub` de PocketID. L'email est mis à jour à chaque connexion, car c'est lui qui relie un appel d'Open WebUI à son compte. La session tient dans un cookie signé par `SESSION_SECRET`, avec les attributs `Secure`, `HttpOnly` et `SameSite=Lax`.
+La page se connecte à PocketID en OpenID Connect (code d'autorisation avec PKCE, portées `openid email profile`). Tout compte PocketID peut se connecter. Le compte dictee se crée à la première connexion et se rattache au `sub` de PocketID. L'email est mis à jour à chaque connexion, car c'est lui qui relie un appel d'Open WebUI à son compte. La session tient dans un cookie signé par `SESSION_SECRET`, avec les attributs `Secure`, `HttpOnly` et `SameSite=Lax`. Elle garde le numéro du compte et son `sub`, et chaque requête compare ce `sub` à celui du compte : une session dont le compte a disparu, ou dont le numéro a été repris par un autre `sub` après une remise à zéro de la base, est vidée comme une session absente.
 
 Le client OIDC se crée dans PocketID avec l'adresse de retour `https://dictee.supergeoff.top/auth/callback`.
 
@@ -283,6 +283,8 @@ La base SQLite vit dans le volume `dictee-data` et compte trois tables.
 | `users` | `id`, `sub` (unique), `email` (unique), `name`, `created_at`, `last_login_at` |
 | `api_keys` | `id`, `user_id`, `label`, `prefix`, `hash` (unique), `created_at`, `last_used_at`, `revoked_at` |
 | `settings` | `user_id`, `glossary`, `instructions` (vide pour les consignes par défaut), `voice` (vide pour `DEFAULT_VOICE`) |
+
+Le schéma porte sa version dans `pragma user_version` (1 aujourd'hui) : une base neuve, ou créée avant le versionnement, passe à 1 à l'ouverture, et une version plus récente reste telle quelle. Une migration future partira de ce numéro.
 
 Une valeur vide dans `settings` renvoie au défaut au lieu de le recopier. Quand les consignes par défaut changent dans le dépôt, tous ceux qui ne les ont pas modifiées en profitent.
 

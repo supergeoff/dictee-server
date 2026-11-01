@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import anyio
 import httpx
+import itsdangerous
 import pytest
 from authlib.integrations.starlette_client import OAuthError
 from starlette.requests import Request
@@ -213,7 +214,8 @@ def test_callback_starts_a_fresh_session(settings, pocketid):
 
         sign_in(client)
         first = session_payload(client)
-        assert set(first) == {"user_id", "csrf"}
+        assert set(first) == {"user_id", "sub", "csrf"}
+        assert first["sub"] == USERINFO["sub"]
         sign_in(client)
         assert session_payload(client)["csrf"] != first["csrf"]
 
@@ -355,6 +357,59 @@ def test_a_post_with_a_session_whose_account_is_gone_is_a_403_page(logged_in, db
     assert 'href="/login"' in r.text
     assert logged_in.client.cookies.get("session") is None
     assert user_rows(db_path) == []  # rien n'a recréé le compte ni rangé quoi que ce soit pour lui
+
+
+def reset_database_and_sign_up(db, db_path, logged_in):
+    """Base remise à zéro, puis un autre compte (autre `sub`) qui reprend le numéro de l'ancien."""
+    delete_account(db_path, logged_in.user_id)
+    newcomer = db.upsert_user("sub-2", "b@example.org", "B")
+    assert newcomer == logged_in.user_id
+    return newcomer
+
+
+def test_a_page_asked_with_a_session_whose_account_number_now_belongs_to_another_sub_goes_to_login(
+    logged_in, db, db_path
+):
+    reset_database_and_sign_up(db, db_path, logged_in)
+    r = logged_in.client.get("/", follow_redirects=False)
+    assert r.status_code == 302 and r.headers["location"] == "/login"
+    assert logged_in.client.cookies.get("session") is None  # la session est vidée, pas seulement refusée
+
+
+@pytest.mark.parametrize(("path", "data"), POSTS)
+def test_a_post_with_a_session_whose_account_number_now_belongs_to_another_sub_is_a_403_page(
+    logged_in, db, db_path, path, data
+):
+    newcomer = reset_database_and_sign_up(db, db_path, logged_in)
+    r = logged_in.post(path, data)
+    assert r.status_code == 403 and r.headers["content-type"].startswith("text/html")
+    assert 'href="/login"' in r.text
+    assert logged_in.client.cookies.get("session") is None
+    # Rien n'a été rangé au nom du nouveau compte.
+    assert db.list_keys(newcomer) == []
+    assert db.get_settings(newcomer) == StoredSettings("", "", "")
+
+
+def test_the_preview_with_a_session_whose_account_number_now_belongs_to_another_sub_is_a_401_page(
+    logged_in, db, db_path, fake_nemo
+):
+    reset_database_and_sign_up(db, db_path, logged_in)
+    r = logged_in.client.get("/voice/preview", params={"voice": "Leo"})
+    assert r.status_code == 401 and r.headers["content-type"].startswith("text/html")
+    assert logged_in.client.cookies.get("session") is None
+    assert fake_nemo.speak_calls == []
+
+
+def test_a_session_that_names_no_sub_is_refused(settings, logged_in):
+    # Cookie signé comme le fait SessionMiddleware, d'avant que la session garde le `sub` : il ne vaut plus rien.
+    payload = {"user_id": logged_in.user_id, "csrf": logged_in.csrf}
+    data = base64.b64encode(json.dumps(payload).encode("utf-8"))
+    cookie = itsdangerous.TimestampSigner(settings.session_secret).sign(data).decode("utf-8")
+    logged_in.client.cookies.clear()
+    logged_in.client.cookies.set("session", cookie, domain="testserver.local")  # celui où le client range le sien
+    r = logged_in.client.get("/", follow_redirects=False)
+    assert r.status_code == 302 and r.headers["location"] == "/login"
+    assert logged_in.client.cookies.get("session") is None
 
 
 def test_the_preview_with_a_session_whose_account_is_gone_is_a_401_page(logged_in, fake_nemo, db_path):
