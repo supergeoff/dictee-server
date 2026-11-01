@@ -54,15 +54,17 @@ SPEED_TOLERANCE = 0.10
 LONG_SECONDS = 11 * 60
 # Avance de la transcription longue sur la requête qui la suit, en secondes.
 LONG_HEADSTART = 5.0
-# Raccroché en plein flux : attente d'un delta après l'envoi de l'audio, puis fenêtre de relevé du CPU de nemo.
-HANGUP_AFTER = 20.0
+# Raccroché en plein flux : attente maximale du premier delta après l'envoi de l'audio, puis fenêtre de relevé du CPU
+# de nemo après le raccroché.
+FIRST_DELTA_TIMEOUT = 30.0
 HANGUP_WINDOW = 15.0
 # CPU de nemo (en pourcents d'un cœur) au-dessus duquel il travaille, et au-dessous duquel il est au repos.
 BUSY_CPU = 50.0
 IDLE_CPU = 10.0
 NEMO_MEMORY_LIMIT = 3 * 1024**3
 DICTEE_MEMORY_LIMIT = 512 * 1024**2
-NEMO_VERSION = "0.3.0"
+# Version de NeMo-Speech.cpp dans compose.yaml : un tag explicite x.y.z (AGENTS.md), sans la répéter ici.
+EXPLICIT_VERSION = r"\d+\.\d+\.\d+"
 # Règles de compose.yaml : service -> (restart, limite de mémoire en octets).
 COMPOSE_RULES = {
     "models": ("no", 512 * 1024**2),
@@ -348,17 +350,21 @@ def check_compose(state: State) -> str:
             problems.append(f"{name} : publie des ports")
         if memory_limit(service) != memory:
             problems.append(f"{name} : limite de mémoire {memory_limit(service)} octets au lieu de {memory}")
+    versions: dict[str, object] = {}
     for name in ("models", "nemo"):
-        version = services[name].get("build", {}).get("args", {}).get("NEMO_VERSION")
-        if version != NEMO_VERSION:
-            problems.append(f"{name} : NEMO_VERSION {version!r} au lieu de {NEMO_VERSION!r}")
+        versions[name] = services[name].get("build", {}).get("args", {}).get("NEMO_VERSION")
+        if not isinstance(versions[name], str) or not re.fullmatch(EXPLICIT_VERSION, versions[name]):
+            problems.append(f"{name} : NEMO_VERSION {versions[name]!r} n'est pas une version explicite (x.y.z)")
+    info("NEMO_VERSION lue dans compose.yaml : " + ", ".join(f"{name} {version}" for name, version in versions.items()))
     volumes = declared_volumes()
     if volumes != sorted(volumes):
         problems.append(f"volumes {volumes} pas dans l'ordre alphabétique")
     if set(volumes) != set(config.get("volumes", {})):
         problems.append(f"volumes lus dans le fichier {volumes} différents de ceux de `config`")
     expect(not problems, " ; ".join(problems))
-    return f"{len(services)} services, restart, env_file, ports, mémoire, NEMO_VERSION et volumes conformes"
+    return (
+        f"{len(services)} services, restart, env_file, ports, mémoire, version explicite de NeMo et volumes conformes"
+    )
 
 
 def check_health(state: State) -> str:
@@ -422,22 +428,53 @@ def check_diarize(state: State) -> str:
     return f"{len(segments)} segments, locuteurs A et B, VTT avec <v A> et <v B>, SRT qui commence par 1"
 
 
-def check_stream(state: State) -> str:
-    stream = state.ai.audio.transcriptions.create(
-        model="dictee", file=state.upload(), response_format="json", stream=True
-    )
+@dataclass
+class Streamed:
+    """Ce qu'un flux `stream=true` a rendu : les deltas, le texte de `done` et les délais depuis la requête."""
+
+    deltas: list[str]
+    done: str | None
+    first_delta: float | None
+    seconds: float
+
+    @property
+    def joined(self) -> str:
+        return "".join(self.deltas)
+
+
+def stream_events(state: State, upload: tuple[str, bytes, str]) -> Streamed:
+    """Lit un flux `stream=true` jusqu'au bout avec le SDK d'OpenAI, en notant le délai du premier delta."""
+    started = time.monotonic()
+    stream = state.ai.audio.transcriptions.create(model="dictee", file=upload, response_format="json", stream=True)
     deltas: list[str] = []
     done: str | None = None
+    first: float | None = None
     for event in stream:
         if event.type == "transcript.text.delta":
+            if first is None:
+                first = time.monotonic() - started
             deltas.append(event.delta)
         elif event.type == "transcript.text.done":
             done = event.text
-    expect(done is not None, "aucun événement transcript.text.done")
-    expect(deltas, "aucun événement transcript.text.delta")
-    joined = "".join(deltas)
-    expect(joined == done, f"les deltas mis bout à bout {joined!r} diffèrent du texte final {done!r}")
-    return f"{len(deltas)} delta(s) dont la concaténation égale le texte de transcript.text.done"
+    return Streamed(deltas, done, first, time.monotonic() - started)
+
+
+def check_stream(state: State) -> str:
+    streamed = stream_events(state, state.upload())
+    expect(streamed.done is not None, "aucun événement transcript.text.done")
+    expect(streamed.first_delta is not None, "aucun événement transcript.text.delta")
+    note(f"deltas : {streamed.deltas}")
+    # NeMo émet un delta tous les 1,12 s d'audio : le dialogue en donne plusieurs si dictee les relaie.
+    expect(len(streamed.deltas) > 1, f"{len(streamed.deltas)} delta seulement : dictee ne relaie pas ceux de NeMo")
+    expect(
+        streamed.joined == streamed.done,
+        f"les deltas mis bout à bout {streamed.joined!r} diffèrent du texte final {streamed.done!r}",
+    )
+    return (
+        f"{len(streamed.deltas)} deltas dont la concaténation égale le texte de transcript.text.done ; premier delta "
+        f"après {streamed.first_delta:.1f} s, fin après {streamed.seconds:.1f} s "
+        f"({state.rest_seconds:.1f} s sans flux)"
+    )
 
 
 def check_clean(state: State) -> str:
@@ -495,23 +532,30 @@ def check_concurrency(state: State) -> str:
 
 
 def check_hangup(state: State) -> str:
-    """Raccroche pendant que NeMo traite un flux long, puis vérifie qu'une transcription courte n'en souffre pas.
+    """Raccroche au premier delta d'un flux long, puis vérifie que nemo s'arrête et qu'une courte n'en souffre pas.
 
-    NeMo ne rend son premier texte final qu'à la fin de la session quand l'audio n'a pas de coupure de phrase :
-    dictee n'envoie alors son premier delta qu'à la fin. Le script raccroche donc au premier delta s'il arrive, sinon
-    HANGUP_AFTER secondes après l'envoi de l'audio, quand NeMo est au travail.
+    dictee relaie les deltas de NeMo : le premier arrive peu après l'envoi, bien avant la fin de la session, quand
+    NeMo est en plein travail sur les 11 minutes d'audio. Le contrôle échoue si ce premier delta n'arrive pas en
+    FIRST_DELTA_TIMEOUT secondes : le flux ne progresserait pas.
     """
     wait_idle(state.nemo)
     stream = RawStream(state.long_wav(), state.key)
     try:
-        got_delta = stream.read_until(DELTA, HANGUP_AFTER)
+        got_delta = stream.read_until(DELTA, FIRST_DELTA_TIMEOUT)
+        first_delta = time.monotonic()
         status = stream.status
         busy = cpu_percent(state.nemo)
     finally:
         stream.close()
     hung_up = time.monotonic()
-    when = "au premier delta" if got_delta else f"{HANGUP_AFTER:.0f} s après l'envoi de l'audio, sans delta reçu"
-    expect(status in (None, 200), f"le flux a répondu HTTP {status}")
+    expect(
+        got_delta,
+        f"aucun delta dans les {FIRST_DELTA_TIMEOUT:.0f} s qui suivent l'envoi de l'audio (HTTP {status}) : "
+        "le flux ne progresse pas",
+    )
+    expect(status == 200, f"le flux a répondu HTTP {status}")
+    delay = f"premier delta {first_delta - stream.sent_at:.1f} s après la fin de l'envoi"
+    info(f"audio long de {LONG_SECONDS / 60:.0f} min : {delay} ({first_delta - stream.started:.1f} s après le début)")
     expect(busy >= BUSY_CPU, f"nemo à {busy:.0f} % de CPU au moment de raccrocher : le contrôle ne prouve rien")
     cpu: list[float] = []
     while time.monotonic() - hung_up < HANGUP_WINDOW:
@@ -532,7 +576,7 @@ def check_hangup(state: State) -> str:
         f"limite {limit:.1f} s (2 x {state.rest_seconds:.1f} s au repos + 5 s)"
     )
     expect(short.seconds < limit, detail)
-    return f"raccroché {when} ; {detail}"
+    return f"raccroché au premier delta ({delay}) ; {detail}"
 
 
 def check_queued(state: State) -> str:
@@ -559,6 +603,30 @@ def check_queued(state: State) -> str:
     )
 
 
+def check_long_stream(state: State) -> str:
+    """Mesure un flux de l'audio long lu jusqu'au bout : premier delta, nombre de deltas, concaténation contre `done`.
+
+    Sans verdict sur la concaténation : le texte de `done` fait foi, et un écart est une information à rapporter.
+    """
+    wait_idle(state.nemo)
+    streamed = stream_events(state, ("long.wav", state.long_wav(), "audio/wav"))
+    expect(streamed.done is not None, "aucun événement transcript.text.done")
+    expect(streamed.first_delta is not None, "aucun événement transcript.text.delta")
+    joined, done = streamed.joined, streamed.done
+    if joined == done:
+        same = "égale"
+    else:
+        common = next((i for i, (a, b) in enumerate(zip(joined, done)) if a != b), min(len(joined), len(done)))
+        same = (
+            f"DIFFÈRE à partir du caractère {common} (deltas {len(joined)} caractères, done {len(done)}) : "
+            f"deltas {joined[common : common + 40]!r}, done {done[common : common + 40]!r}"
+        )
+    return (
+        f"{len(streamed.deltas)} deltas, premier delta {streamed.first_delta:.1f} s après le début de la requête "
+        f"(envoi compris), fin après {streamed.seconds:.1f} s ; la concaténation {same} le texte de done"
+    )
+
+
 # (clé, titre, fonction, contrôles requis avant, mesure sans échec). Les contrôles longs sont à la fin.
 CHECKS: list[tuple[str, str, Callable[[State], str], tuple[str, ...], bool]] = [
     ("compose", "Conventions du compose", check_compose, (), False),
@@ -572,6 +640,7 @@ CHECKS: list[tuple[str, str, Callable[[State], str], tuple[str, ...], bool]] = [
     ("concurrency", "Concurrence", check_concurrency, ("synthesis",), False),
     ("hangup", "Raccroché en plein flux", check_hangup, ("transcription",), False),
     ("queued", "En-tête d'un flux long en attente", check_queued, ("synthesis",), True),
+    ("longstream", "Flux de l'audio long jusqu'au bout", check_long_stream, ("synthesis",), True),
 ]
 
 
