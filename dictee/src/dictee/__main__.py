@@ -12,11 +12,13 @@ from dictee.settings import Settings
 def configure_logging() -> None:
     """Journal de dictee à INFO, sur la sortie d'erreur ; uvicorn règle déjà les siens.
 
-    httpx écrit à INFO l'adresse de chaque appel : sa sortie est réduite aux avertissements, car la ligne de dictee
-    dit déjà ce qu'il faut sur chaque requête.
+    httpx écrit à INFO l'adresse de chaque appel, et httpx2, le client qu'Authlib charge à sa place, fait de même sous
+    son propre nom : la sortie des deux est réduite aux avertissements, car la ligne de dictee dit déjà ce qu'il faut
+    sur chaque requête.
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    for client in ("httpx", "httpx2"):
+        logging.getLogger(client).setLevel(logging.WARNING)
 
 
 def main() -> None:

@@ -27,6 +27,7 @@ from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 from starlette.templating import Jinja2Templates
+from starlette.types import Message
 
 from dictee.audio import OUTPUT_FORMATS, encode_stream
 from dictee.auth import Caller
@@ -43,6 +44,8 @@ MAX_GLOSSARY_CHARS = 20_000
 MAX_GLOSSARY_LINES = 500
 MAX_INSTRUCTIONS_CHARS = 20_000
 MAX_LABEL_CHARS = 100
+# Un formulaire de la page tient dans quelques dizaines de Ko : au-delà, le corps n'est pas lu.
+MAX_FORM_BYTES = 256 * 1024
 # Plus grand entier que SQLite range : un identifiant de clé au-delà ne peut désigner aucune clé.
 MAX_KEY_ID = 2**63 - 1
 
@@ -59,8 +62,9 @@ LOGIN_LINK = ("/login", "Se connecter")
 LOGIN_FAILED = "La connexion avec PocketID a échoué."
 
 # Une seule plage d'octets : `bytes=a-b`, `bytes=a-` ou `bytes=-n`. Les nombres sont bornés, car `int` refuse les très
-# longues suites de chiffres.
-_BYTE_RANGE = re.compile(r"\s*bytes\s*=\s*(\d{1,15})?\s*-\s*(\d{1,15})?\s*", re.IGNORECASE)
+# longues suites de chiffres. Les espaces suivent le nombre qu'ils accompagnent : deux `\s*` voisins, séparés d'un
+# groupe facultatif, se disputeraient une longue suite d'espaces en temps quadratique.
+_BYTE_RANGE = re.compile(r"\s*bytes\s*=\s*(?:(\d{1,15})\s*)?-\s*(?:(\d{1,15})\s*)?", re.IGNORECASE)
 
 _templates = Jinja2Templates(
     env=Environment(
@@ -90,12 +94,12 @@ class PreviewCache:
         self._mp3: dict[str, bytes] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
-    async def get(self, voice: str, synthesize: Callable[[], Awaitable[bytes]]) -> bytes:
-        """Mp3 de `voice` ; `synthesize` le fabrique si la voix n'est pas encore gardée."""
+    async def get(self, voice: str, synthesize: Callable[[str], Awaitable[bytes]]) -> bytes:
+        """Mp3 de `voice` ; `synthesize(voice)` le fabrique si la voix n'est pas encore gardée."""
         if voice not in self._mp3:
             async with self._locks.setdefault(voice, asyncio.Lock()):
                 if voice not in self._mp3:
-                    self._mp3[voice] = await synthesize()
+                    self._mp3[voice] = await synthesize(voice)
         return self._mp3[voice]
 
 
@@ -126,8 +130,18 @@ def build_oauth(settings: Settings) -> OAuth:
 
 
 def _session_user(request: Request) -> int | None:
+    """Compte de la session, ou `None` sans session.
+
+    Si le compte n'existe plus (base remise à zéro, compte supprimé), la session est vidée et traitée comme absente :
+    aucune route ne travaille pour un compte fantôme.
+    """
     user_id = request.session.get("user_id")
-    return user_id if type(user_id) is int else None
+    if type(user_id) is not int:
+        return None
+    if not request.app.state.db.user_exists(user_id):
+        request.session.clear()
+        return None
+    return user_id
 
 
 def _clean(text: str) -> str:
@@ -135,17 +149,47 @@ def _clean(text: str) -> str:
     return text.replace("\r\n", "\n").strip()
 
 
+def _too_big() -> WebError:
+    return WebError(413, "Le formulaire est trop volumineux.")
+
+
+def _bounded(request: Request) -> Request:
+    """Requête de même corps que `request`, dont la lecture lève 413 dès que `MAX_FORM_BYTES` octets sont dépassés.
+
+    `Content-Length` ne dit rien d'un corps envoyé par morceaux : seule la lecture sait combien il en vient.
+    """
+    received = 0
+
+    async def receive() -> Message:
+        nonlocal received
+        message = await request.receive()
+        received += len(message.get("body", b""))
+        if received > MAX_FORM_BYTES:
+            raise _too_big()
+        return message
+
+    return Request(request.scope, receive)
+
+
 async def _read_post(request: Request) -> tuple[int, dict[str, str]]:
     """Compte de la session et champs textuels d'un `POST` ; 403 sans session ou sans jeton anti-CSRF valide.
 
-    La session se vérifie avant de lire le corps : sans session, le corps n'est pas lu.
+    La session se vérifie avant de lire le corps : sans session, le corps n'est pas lu. Un corps de plus de
+    `MAX_FORM_BYTES` octets est refusé (413), sur la foi de `Content-Length` avant d'en lire un octet, ou pendant la
+    lecture s'il n'annonce pas sa taille.
     """
     user_id = _session_user(request)
     expected = request.session.get("csrf")
     if user_id is None or not isinstance(expected, str):
         raise WebError(403, "Votre session a expiré. Connectez-vous de nouveau.", LOGIN_LINK)
     try:
-        async with request.form() as form:
+        declared = int(request.headers.get("content-length", "0"))
+    except ValueError:
+        declared = 0  # taille illisible : la lecture bornée y pourvoit
+    if declared > MAX_FORM_BYTES:
+        raise _too_big()
+    try:
+        async with _bounded(request).form() as form:
             fields = {name: value for name, value in form.items() if isinstance(value, str)}
     except HTTPException:
         raise WebError(400, "Le formulaire n'a pas pu être lu.") from None
@@ -316,7 +360,8 @@ async def revoke_key(request: Request) -> Response:
 async def update_settings(request: Request) -> Response:
     """Enregistre les champs reçus, parmi `glossary`, `instructions` et `voice` ; un champ absent garde sa valeur.
 
-    Tout est validé avant d'enregistrer quoi que ce soit : un champ refusé n'en laisse aucun autre enregistré.
+    Tout est validé avant d'enregistrer quoi que ce soit : un champ refusé n'en laisse aucun autre enregistré. Un
+    formulaire qui n'en porte aucun est refusé (400) plutôt que d'annoncer un enregistrement qui n'a pas eu lieu.
     """
     user_id, fields = await _read_post(request)
     changes: dict[str, str] = {}
@@ -331,6 +376,8 @@ async def update_settings(request: Request) -> Response:
             logger.warning("voices unavailable class=%s", type(error).__name__)
             message = "Le moteur vocal ne répond pas, la liste des voix est indisponible. Rien n'a été enregistré."
             raise WebError(502, message) from None
+    if not changes:
+        raise WebError(400, "Aucune modification : le formulaire ne contient ni glossaire, ni consignes, ni voix.")
     request.app.state.db.save_settings(user_id, **changes)
     return RedirectResponse("/?saved=1", status_code=303)
 
@@ -386,7 +433,7 @@ async def voice_preview(request: Request) -> Response:
         raise WebError(401, "Connectez-vous pour écouter les voix.", LOGIN_LINK)
     state = request.app.state
 
-    async def synthesize() -> bytes:
+    async def synthesize(voice: str) -> bytes:
         pcm = await state.nemo.speak(PREVIEW_TEXT, voice=voice, language=LANGUAGE)
         return await _mp3(pcm)
 

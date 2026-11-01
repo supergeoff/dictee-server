@@ -10,6 +10,7 @@ import re
 import socket
 import sqlite3
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -19,13 +20,14 @@ import anyio
 import httpx
 import pytest
 from authlib.integrations.starlette_client import OAuthError
+from starlette.requests import Request
 from starlette.testclient import TestClient
 
 from dictee.app import create_app
 from dictee.db import StoredSettings
 from dictee.nemo import TTS_SAMPLE_RATE, NemoOverloaded, NemoUnavailable
 from dictee.profile import DEFAULT_INSTRUCTIONS
-from dictee.web import PREVIEW_TEXT, PreviewCache, build_oauth
+from dictee.web import MAX_FORM_BYTES, PREVIEW_TEXT, PreviewCache, _mp3_response, build_oauth
 
 USERINFO = {"sub": "sub-1", "email": "a@example.org", "name": "A"}
 MP3_MAGIC = (b"ID3", b"\xff\xfb", b"\xff\xf3")
@@ -118,6 +120,16 @@ def user_rows(db_path):
     conn = sqlite3.connect(db_path)
     try:
         return conn.execute("select id, sub, name from users order by id").fetchall()
+    finally:
+        conn.close()
+
+
+def delete_account(db_path, user_id):
+    """Efface le compte comme le ferait une base remise à zéro, sans toucher au cookie de session."""
+    conn = sqlite3.connect(db_path)
+    try:
+        with conn:
+            conn.execute("delete from users where id = ?", (user_id,))
     finally:
         conn.close()
 
@@ -312,6 +324,45 @@ def test_logout_clears_the_session(logged_in):
     assert r.status_code == 200 and "déconnecté" in r.text and 'href="/login"' in r.text
     assert logged_in.client.get("/", follow_redirects=False).status_code == 302
     assert logged_in.post("/keys", {"label": "x"}).status_code == 403
+
+
+def test_repeated_logins_keep_one_pending_state_in_the_session(settings, pocketid):
+    # Authlib range un état par tentative de connexion et efface les précédents : le cookie ne grossit pas.
+    settings = dataclasses.replace(settings, oidc_issuer=pocketid.url)
+    with TestClient(create_app(settings), base_url="https://testserver") as client:
+        for _ in range(30):
+            assert client.get("/login", follow_redirects=False).status_code == 302
+        pending = [key for key in session_payload(client) if key.startswith("_state_pocketid_")]
+        assert len(pending) == 1
+        assert len(client.cookies["session"]) < 4096  # au-delà, le navigateur refuse le cookie
+
+
+# --- Session dont le compte n'existe plus ---
+
+
+def test_a_page_asked_with_a_session_whose_account_is_gone_goes_to_login(logged_in, db_path):
+    delete_account(db_path, logged_in.user_id)
+    r = logged_in.client.get("/", follow_redirects=False)
+    assert r.status_code == 302 and r.headers["location"] == "/login"
+    assert logged_in.client.cookies.get("session") is None  # la session est vidée, pas seulement refusée
+
+
+@pytest.mark.parametrize(("path", "data"), POSTS)
+def test_a_post_with_a_session_whose_account_is_gone_is_a_403_page(logged_in, db_path, path, data):
+    delete_account(db_path, logged_in.user_id)
+    r = logged_in.post(path, data)
+    assert r.status_code == 403 and r.headers["content-type"].startswith("text/html")
+    assert 'href="/login"' in r.text
+    assert logged_in.client.cookies.get("session") is None
+    assert user_rows(db_path) == []  # rien n'a recréé le compte ni rangé quoi que ce soit pour lui
+
+
+def test_the_preview_with_a_session_whose_account_is_gone_is_a_401_page(logged_in, fake_nemo, db_path):
+    delete_account(db_path, logged_in.user_id)
+    r = logged_in.client.get("/voice/preview", params={"voice": "Leo"})
+    assert r.status_code == 401 and r.headers["content-type"].startswith("text/html")
+    assert logged_in.client.cookies.get("session") is None
+    assert fake_nemo.speak_calls == []
 
 
 # --- La page ---
@@ -510,10 +561,55 @@ def test_settings_at_the_bounds_are_accepted(logged_in, data):
     assert logged_in.post("/settings", data, follow_redirects=False).status_code == 303
 
 
-def test_a_form_too_big_for_starlette_is_a_400_page(logged_in, db):
-    fields = {"csrf": logged_in.csrf, "glossary": "x" * (1024 * 1024 + 1)}
-    r = logged_in.client.post("/settings", data=fields, files={"extra": ("a.txt", b"x")})  # `files` impose multipart
+def test_a_multipart_form_without_boundary_is_a_400_page(logged_in, db):
+    r = logged_in.client.post("/settings", content=b"x", headers={"Content-Type": "multipart/form-data"})
     assert r.status_code == 400 and r.headers["content-type"].startswith("text/html")
+    assert db.get_settings(logged_in.user_id) == StoredSettings("", "", "")
+
+
+def test_a_form_that_declares_more_than_the_limit_is_refused_before_it_is_read(logged_in, db, monkeypatch):
+    def refuse_to_read(self, *args, **kwargs):
+        raise AssertionError("the body must not be read")
+
+    monkeypatch.setattr(Request, "form", refuse_to_read)
+    fields = {"csrf": logged_in.csrf, "glossary": "x" * MAX_FORM_BYTES}
+    r = logged_in.client.post("/settings", data=fields)
+    assert r.status_code == 413 and r.headers["content-type"].startswith("text/html")
+    assert db.get_settings(logged_in.user_id) == StoredSettings("", "", "")
+
+
+def test_a_form_of_exactly_the_limit_is_still_read(logged_in, db):
+    prefix = f"csrf={logged_in.csrf}&padding="
+    body = prefix + "x" * (MAX_FORM_BYTES - len(prefix))
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    r = logged_in.client.post("/settings", content=body, headers=headers)
+    assert r.request.headers["content-length"] == str(MAX_FORM_BYTES)
+    assert r.status_code == 400 and "Aucune modification" in r.text  # lu jusqu'au bout, sans champ connu : pas un 413
+
+
+def test_a_chunked_form_is_cut_when_it_passes_the_limit(logged_in, db):
+    def body():
+        yield f"csrf={logged_in.csrf}&glossary=".encode()
+        for _ in range(MAX_FORM_BYTES // 1024 + 1):
+            yield b"x" * 1024
+
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    r = logged_in.client.post("/settings", content=body(), headers=headers)
+    assert "content-length" not in r.request.headers  # aucune taille annoncée : seule la lecture peut la borner
+    assert r.status_code == 413 and r.headers["content-type"].startswith("text/html")
+    assert db.get_settings(logged_in.user_id) == StoredSettings("", "", "")
+
+
+def test_a_form_without_session_is_not_read_even_when_it_is_small(transcriptions_client, monkeypatch):
+    monkeypatch.setattr(Request, "form", lambda self, *args, **kwargs: pytest.fail("the body must not be read"))
+    assert transcriptions_client.post("/settings", data={"csrf": "x"}).status_code == 403
+
+
+def test_a_settings_form_without_any_known_field_is_a_400_page(logged_in, db):
+    for data in ({}, {"unknown": "x"}):
+        r = logged_in.post("/settings", data)
+        assert r.status_code == 400 and r.headers["content-type"].startswith("text/html")
+        assert "enregistrées" not in r.text
     assert db.get_settings(logged_in.user_id) == StoredSettings("", "", "")
 
 
@@ -586,13 +682,14 @@ async def test_preview_cache_synthesizes_once_when_requests_overlap():
     cache = PreviewCache()
     calls = []
 
-    async def synthesize():
-        calls.append(1)
+    async def synthesize(voice):
+        calls.append(voice)
         await anyio.sleep(0.01)
-        return b"mp3"
+        return b"mp3 of " + voice.encode()
 
-    assert await asyncio.gather(cache.get("Leo", synthesize), cache.get("Leo", synthesize)) == [b"mp3", b"mp3"]
-    assert len(calls) == 1
+    answers = await asyncio.gather(cache.get("Leo", synthesize), cache.get("Leo", synthesize))
+    assert answers == [b"mp3 of Leo", b"mp3 of Leo"]
+    assert calls == ["Leo"]
 
 
 @pytest.fixture
@@ -651,6 +748,23 @@ def test_voice_preview_sends_the_whole_file_for_a_range_it_does_not_follow(previ
     assert r.status_code == 200 and r.content == preview_mp3.content and "content-range" not in r.headers
 
 
+@pytest.mark.parametrize(
+    "header",
+    [
+        pytest.param("bytes=" + " " * 16_000, id="spaces-after-the-equal-sign"),
+        pytest.param("bytes=1" + " " * 16_000 + "x", id="spaces-after-the-first-number"),
+        pytest.param("bytes=-" + " " * 16_000 + "x", id="spaces-after-the-dash"),
+        pytest.param(" " * 16_000 + "x", id="spaces-before-everything"),
+    ],
+)
+def test_a_range_header_made_of_spaces_is_read_in_linear_time(header):
+    # Une expression régulière qui laisse deux `\s*` voisins se disputer les espaces y passe un temps quadratique.
+    started = time.perf_counter()
+    response = _mp3_response(b"mp3", header)
+    assert time.perf_counter() - started < 0.05
+    assert response.status_code == 200 and response.body == b"mp3"
+
+
 def test_voice_preview_requires_a_session(client):
     r = client.get("/voice/preview", params={"voice": "Leo"})
     assert r.status_code == 401 and r.headers["content-type"].startswith("text/html")
@@ -676,3 +790,9 @@ def test_voice_preview_reports_a_nemo_failure(logged_in, fake_nemo, error, statu
 def test_v1_routes_do_not_depend_on_the_session(transcriptions_client, service_headers):
     r = transcriptions_client.get("/v1/models", headers=service_headers)
     assert r.status_code == 200 and "set-cookie" not in r.headers
+
+
+def test_a_session_cookie_alone_does_not_open_v1(logged_in):
+    assert "session" in logged_in.client.cookies
+    r = logged_in.client.get("/v1/models")  # sans en-tête Authorization
+    assert r.status_code == 401

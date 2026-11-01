@@ -120,6 +120,11 @@ class Database:
             row = conn.execute("select id from users where email = ?", (_normalize_email(email),)).fetchone()
         return None if row is None else row[0]
 
+    def user_exists(self, user_id: int) -> bool:
+        """Dit si ce compte existe encore : une session peut en citer un que la base n'a plus."""
+        with self._connect() as conn:
+            return conn.execute("select 1 from users where id = ?", (user_id,)).fetchone() is not None
+
     def create_key(self, user_id: int, label: str) -> str:
         """Crée une clé et la renvoie en clair : c'est la seule fois, la base n'en garde que le hachage."""
         key = KEY_PREFIX + secrets.token_urlsafe(32)

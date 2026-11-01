@@ -93,6 +93,19 @@ def test_email_lookup_ignores_case(db):
     assert db.user_by_email("ada@example.ORG") == uid
 
 
+def test_user_exists_tells_a_known_account_from_an_unknown_one(db, db_path):
+    uid = db.upsert_user("sub-1", "a@example.org", "A")
+    assert db.user_exists(uid) is True
+    assert db.user_exists(uid + 1) is False
+    conn = sqlite3.connect(db_path)
+    try:
+        with conn:
+            conn.execute("delete from users where id = ?", (uid,))
+    finally:
+        conn.close()
+    assert db.user_exists(uid) is False
+
+
 def test_unknown_email_has_no_user(db):
     db.upsert_user("s", "a@example.org", "A")
     assert db.user_by_email("nobody@example.org") is None
