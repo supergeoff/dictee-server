@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>dictee</title>
+<style>
+  :root { --fond: #fafafa; --texte: #1d1d1f; --discret: #5f6368; --trait: #d0d0d5; --accent: #0b57d0; --alerte: #fff4ce; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fond: #1b1b1d; --texte: #ececec; --discret: #a0a4a8; --trait: #3b3b40; --accent: #8ab4f8; --alerte: #4a3d12; }
+  }
+  body { background: var(--fond); color: var(--texte); font: 16px/1.5 system-ui, sans-serif; margin: 0; }
+  main { max-width: 46rem; margin: 0 auto; padding: 1rem; }
+  header { align-items: center; display: flex; justify-content: space-between; }
+  h1 { font-size: 1.5rem; }
+  h2 { border-top: 1px solid var(--trait); font-size: 1.2rem; margin-top: 2rem; padding-top: 1rem; }
+  a { color: var(--accent); }
+  code { overflow-wrap: anywhere; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border-bottom: 1px solid var(--trait); padding: 0.4rem; text-align: left; }
+  textarea, input[type="text"] { background: var(--fond); border: 1px solid var(--trait); box-sizing: border-box; color: inherit; font: inherit; padding: 0.4rem; width: 100%; }
+  textarea { font-family: ui-monospace, monospace; font-size: 0.9rem; }
+  button { font: inherit; padding: 0.3rem 0.8rem; }
+  .discret { color: var(--discret); }
+  .notice { background: var(--alerte); border-radius: 4px; padding: 0.6rem 0.8rem; }
+  .voice { align-items: center; display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; padding: 0.3rem 0; }
+  .voice label { min-width: 6rem; }
+</style>
+</head>
+<body>
+<main>
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

@@ -1,0 +1,543 @@
+"""Page de configuration : connexion PocketID, clés, réglages de chacun et aperçu des voix."""
+
+import base64
+import dataclasses
+import html
+import json
+import logging
+import re
+import socket
+import sqlite3
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from urllib.parse import parse_qs, urlsplit
+
+import httpx
+import pytest
+from authlib.integrations.starlette_client import OAuthError
+from starlette.testclient import TestClient
+
+from dictee.app import create_app
+from dictee.db import StoredSettings
+from dictee.nemo import TTS_SAMPLE_RATE, NemoOverloaded, NemoUnavailable
+from dictee.profile import DEFAULT_INSTRUCTIONS
+from dictee.web import PREVIEW_TEXT, build_oauth
+
+USERINFO = {"sub": "sub-1", "email": "a@example.org", "name": "A"}
+MP3_MAGIC = (b"ID3", b"\xff\xfb", b"\xff\xf3")
+CONTENT_SECURITY_POLICY = (
+    "default-src 'none'; style-src 'unsafe-inline'; media-src 'self'; form-action 'self'; "
+    "frame-ancestors 'none'; base-uri 'none'"
+)
+# Chaque route POST de la page, avec de quoi la soumettre : la garde du dernier test de ce fichier les compte.
+POSTS = [
+    ("/keys", {"label": "Android"}),
+    ("/keys/1/revoke", {}),
+    ("/settings", {"glossary": "Nemotron"}),
+    ("/settings/reset-instructions", {}),
+    ("/logout", {}),
+]
+POST_ROUTES = {"/keys", "/keys/{key_id:int}/revoke", "/settings", "/settings/reset-instructions", "/logout"}
+
+
+def sign_in(client, userinfo=USERINFO):
+    """Fait revenir PocketID : seul l'échange du code est remplacé, le reste de la route est réel."""
+    client.app.state.oauth.pocketid.authorize_access_token = AsyncMock(return_value={"userinfo": userinfo})
+    return client.get("/auth/callback", params={"code": "c", "state": "s"}, follow_redirects=False)
+
+
+@pytest.fixture
+def pocketid(monkeypatch):
+    """Faux PocketID sur le port local : il sert ses métadonnées par HTTP et note les chemins demandés.
+
+    Un vrai serveur plutôt qu'un faux transport : Authlib choisit lui-même son client HTTP (httpx2 ou httpx).
+    """
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    asked = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            asked.append(self.path)
+            base = f"http://127.0.0.1:{self.server.server_port}"
+            body = json.dumps(
+                {
+                    "issuer": base,
+                    "authorization_endpoint": f"{base}/authorize",
+                    "token_endpoint": f"{base}/token",
+                    "jwks_uri": f"{base}/jwks",
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield SimpleNamespace(url=f"http://127.0.0.1:{server.server_port}", asked=asked)
+    server.shutdown()
+    server.server_close()
+    thread.join()
+
+
+def free_port() -> int:
+    """Un port local où rien n'écoute."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def csrf_of(page: str) -> str:
+    return re.search(r'name="csrf" value="([^"]+)"', page).group(1)
+
+
+def session_payload(client) -> dict:
+    """Contenu du cookie de session : un objet JSON signé, dont la signature suit la première partie."""
+    return json.loads(base64.b64decode(client.cookies["session"].split(".")[0]))
+
+
+def user_rows(db_path):
+    conn = sqlite3.connect(db_path)
+    try:
+        return conn.execute("select id, sub, name from users order by id").fetchall()
+    finally:
+        conn.close()
+
+
+class LoggedIn:
+    """Un compte connecté : `client` garde le cookie de session, `post` ajoute le jeton anti-CSRF au formulaire."""
+
+    def __init__(self, client, user_id):
+        self.client = client
+        self.user_id = user_id
+        self.csrf = csrf_of(client.get("/").text)
+
+    def post(self, path, data=None, **kwargs):
+        return self.client.post(path, data={"csrf": self.csrf, **(data or {})}, **kwargs)
+
+
+@pytest.fixture
+def logged_in(transcriptions_client, db):
+    assert sign_in(transcriptions_client).status_code == 303
+    return LoggedIn(transcriptions_client, db.user_by_email("a@example.org"))
+
+
+# --- Connexion ---
+
+
+def test_page_redirects_to_login_without_a_session(client):
+    r = client.get("/", follow_redirects=False)
+    assert r.status_code == 302 and r.headers["location"] == "/login"
+
+
+def test_build_oauth_registers_pocketid(settings):
+    pocketid = build_oauth(settings).pocketid
+    assert pocketid.client_id == "dictee" and pocketid.client_secret == "test-oidc-secret"
+    assert pocketid.client_kwargs == {"scope": "openid email profile", "code_challenge_method": "S256"}
+    assert create_app(settings).state.oauth.pocketid is not None
+
+
+@pytest.mark.parametrize("slash", ["", "/"])
+def test_login_redirects_to_pocketid_with_pkce(settings, pocketid, slash):
+    # Une barre oblique finale dans PUBLIC_URL ou OIDC_ISSUER ne double pas celle de l'adresse construite.
+    settings = dataclasses.replace(settings, public_url="https://dictee.test" + slash, oidc_issuer=pocketid.url + slash)
+    with TestClient(create_app(settings), base_url="https://testserver") as client:
+        r = client.get("/login", follow_redirects=False)
+    assert r.status_code == 302
+    assert pocketid.asked == ["/.well-known/openid-configuration"]
+    target = urlsplit(r.headers["location"])
+    assert f"{target.scheme}://{target.netloc}{target.path}" == f"{pocketid.url}/authorize"
+    query = {key: values[0] for key, values in parse_qs(target.query).items()}
+    assert query["client_id"] == "dictee" and query["response_type"] == "code"
+    assert query["scope"] == "openid email profile"
+    assert query["redirect_uri"] == "https://dictee.test/auth/callback"
+    assert query["code_challenge_method"] == "S256" and query["code_challenge"] and query["state"]
+
+
+def test_login_says_so_when_pocketid_is_unreachable(settings, caplog):
+    settings = dataclasses.replace(settings, oidc_issuer=f"http://127.0.0.1:{free_port()}")
+    with TestClient(create_app(settings), base_url="https://testserver") as client, caplog.at_level(logging.INFO):
+        r = client.get("/login", follow_redirects=False)
+    assert r.status_code == 502 and r.headers["content-type"].startswith("text/html")
+    assert "connexion" in r.text and 'href="/login"' in r.text
+    assert "login unavailable class=" in caplog.text
+
+
+def test_callback_creates_the_account_then_updates_its_email(transcriptions_client, db):
+    assert db.user_by_email("a@example.org") is None
+    r = sign_in(transcriptions_client)
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    user_id = db.user_by_email("a@example.org")
+    assert user_id is not None
+
+    sign_in(transcriptions_client, {**USERINFO, "email": "A2@Example.org", "name": "A2"})
+    assert db.user_by_email("a2@example.org") == user_id
+    assert db.user_by_email("a@example.org") is None
+
+
+def test_callback_starts_a_fresh_session(settings, pocketid):
+    settings = dataclasses.replace(settings, oidc_issuer=pocketid.url)
+    with TestClient(create_app(settings), base_url="https://testserver") as client:
+        client.get("/login", follow_redirects=False)  # laisse l'état de l'échange OAuth dans la session
+        assert any(key.startswith("_state_pocketid") for key in session_payload(client))
+
+        sign_in(client)
+        first = session_payload(client)
+        assert set(first) == {"user_id", "csrf"}
+        sign_in(client)
+        assert session_payload(client)["csrf"] != first["csrf"]
+
+
+def test_callback_refuses_an_email_taken_by_another_account(transcriptions_client, db, db_path, caplog):
+    owner = db.upsert_user("sub-owner", "a@example.org", "Owner")
+    with caplog.at_level(logging.INFO, logger="dictee"):
+        r = sign_in(transcriptions_client, {"sub": "sub-2", "email": "A@Example.org", "name": "Intruder"})
+    assert r.status_code == 409 and r.headers["content-type"].startswith("text/html")
+    assert "autre compte" in r.text and "administrateur" in r.text
+    assert "set-cookie" not in r.headers
+    assert transcriptions_client.get("/", follow_redirects=False).status_code == 302
+    assert user_rows(db_path) == [(owner, "sub-owner", "Owner")]
+    assert "example.org" not in caplog.text.lower() and "Intruder" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "userinfo",
+    [
+        None,
+        {},
+        {"email": "a@example.org"},
+        {"sub": "sub-1"},
+        {"sub": "sub-1", "email": "   "},
+        {"sub": "", "email": "a@example.org"},
+        {"sub": 12, "email": "a@example.org"},
+    ],
+)
+def test_callback_refuses_an_answer_without_sub_or_email(transcriptions_client, db_path, userinfo):
+    r = sign_in(transcriptions_client, userinfo)
+    assert r.status_code == 400 and r.headers["content-type"].startswith("text/html")
+    assert "set-cookie" not in r.headers
+    assert user_rows(db_path) == []
+
+
+@pytest.mark.parametrize(
+    "error", [OAuthError(description="secret-detail"), httpx.ConnectError("secret-detail"), ValueError("secret-detail")]
+)
+def test_callback_oauth_error_is_a_400_with_a_login_link(transcriptions_client, caplog, error):
+    transcriptions_client.app.state.oauth.pocketid.authorize_access_token = AsyncMock(side_effect=error)
+    with caplog.at_level(logging.INFO, logger="dictee"):
+        r = transcriptions_client.get("/auth/callback", params={"code": "c", "state": "s"}, follow_redirects=False)
+    assert r.status_code == 400 and 'href="/login"' in r.text
+    assert "set-cookie" not in r.headers
+    assert type(error).__name__ in caplog.text
+    assert "secret-detail" not in r.text + caplog.text
+
+
+def test_callback_refuses_a_state_that_login_never_issued(transcriptions_client, caplog):
+    # Authlib réel, sans remplacement : l'état est comparé à celui que `/login` a rangé dans la session.
+    with caplog.at_level(logging.INFO, logger="dictee"):
+        r = transcriptions_client.get("/auth/callback", params={"code": "c", "state": "forged"}, follow_redirects=False)
+    assert r.status_code == 400 and 'href="/login"' in r.text
+    assert "MismatchingStateError" in caplog.text
+
+
+def test_login_logs_the_account_number_only(transcriptions_client, db, caplog):
+    with caplog.at_level(logging.INFO, logger="dictee"):
+        sign_in(transcriptions_client)
+    user_id = db.user_by_email("a@example.org")
+    assert f"user={user_id}" in caplog.text
+    assert "example.org" not in caplog.text and "sub-1" not in caplog.text
+
+
+def test_session_cookie_is_secure(transcriptions_client):
+    r = sign_in(transcriptions_client)
+    cookie = r.headers["set-cookie"].lower()
+    attributes = {part.strip().split("=")[0] for part in cookie.split(";")}
+    assert cookie.startswith("session=")
+    assert {"secure", "httponly"} <= attributes and "samesite=lax" in cookie
+
+
+def test_logout_clears_the_session(logged_in):
+    r = logged_in.post("/logout")
+    assert r.status_code == 200 and "déconnecté" in r.text and 'href="/login"' in r.text
+    assert logged_in.client.get("/", follow_redirects=False).status_code == 302
+    assert logged_in.post("/keys", {"label": "x"}).status_code == 403
+
+
+# --- La page ---
+
+
+def test_page_shows_the_four_blocks_and_the_default_instructions(logged_in):
+    page = html.unescape(logged_in.client.get("/").text)
+    for title in ("Clés", "Glossaire", "Consignes de reformulation", "Voix"):
+        assert title in page
+    assert DEFAULT_INSTRUCTIONS in page
+    assert "https://dictee.test/v1" in page
+
+
+def test_page_shows_the_saved_settings_and_the_chosen_voice(logged_in):
+    assert re.search(r'value="Sofia" checked', logged_in.client.get("/").text)  # la voix par défaut avant tout choix
+    logged_in.post(
+        "/settings",
+        {
+            "glossary": "Nemotron (souvent entendu : némo tronc)",
+            "instructions": "Corrige la ponctuation.",
+            "voice": "Leo",
+        },
+    )
+    page = html.unescape(logged_in.client.get("/").text)
+    assert "Nemotron (souvent entendu : némo tronc)" in page and "Corrige la ponctuation." in page
+    assert DEFAULT_INSTRUCTIONS not in page
+    assert re.search(r'value="Leo" checked', page) and not re.search(r'value="Sofia" checked', page)
+    assert '/voice/preview?voice=Leo"' in page
+
+
+def test_page_tells_when_a_change_was_saved(logged_in):
+    r = logged_in.post("/settings", {"glossary": "Nemotron"}, follow_redirects=False)
+    assert r.headers["location"] == "/?saved=1"
+    assert "Modifications enregistrées" in logged_in.client.get("/?saved=1").text
+    assert "Modifications enregistrées" not in logged_in.client.get("/").text
+
+
+def test_page_still_renders_when_nemo_is_down(logged_in, fake_nemo):
+    logged_in.client.app.state.voices = None
+    fake_nemo.error = NemoUnavailable("down")
+    r = logged_in.client.get("/")
+    assert r.status_code == 200
+    assert "indisponible" in r.text and "<audio" not in r.text
+    assert DEFAULT_INSTRUCTIONS in html.unescape(r.text)
+
+
+def test_page_escapes_what_users_write(logged_in):
+    logged_in.post("/settings", {"glossary": "</textarea><script>alert(1)</script>"})
+    logged_in.post("/keys", {"label": "<b>x</b>"})
+    page = logged_in.client.get("/").text
+    assert "<script>" not in page and "<b>x</b>" not in page
+    assert "&lt;/textarea&gt;&lt;script&gt;alert(1)&lt;/script&gt;" in page and "&lt;b&gt;x&lt;/b&gt;" in page
+
+
+def test_html_responses_are_not_cached_and_carry_a_content_security_policy(logged_in):
+    key_page = logged_in.post("/keys", {"label": "Android"})  # contient une clé en clair
+    pages = [
+        logged_in.client.get("/"),
+        key_page,
+        logged_in.client.post("/keys", data={"label": "x"}),  # refus : pas de jeton
+        logged_in.post("/logout"),
+    ]
+    assert [page.status_code for page in pages] == [200, 200, 403, 200]
+    for page in pages:
+        assert page.headers["content-security-policy"] == CONTENT_SECURITY_POLICY
+        assert page.headers["cache-control"] == "no-store"
+
+
+# --- Garde anti-CSRF ---
+
+
+@pytest.mark.parametrize(("path", "data"), POSTS)
+def test_forms_require_the_csrf_token(logged_in, db, path, data):
+    assert logged_in.client.post(path, data=data).status_code == 403
+    assert logged_in.client.post(path, data={**data, "csrf": "wrong"}).status_code == 403
+    assert db.list_keys(logged_in.user_id) == []
+    assert db.get_settings(logged_in.user_id) == StoredSettings("", "", "")
+    assert logged_in.client.get("/", follow_redirects=False).status_code == 200  # la session est restée ouverte
+
+
+@pytest.mark.parametrize(("path", "data"), POSTS)
+def test_forms_require_a_session(transcriptions_client, db, path, data):
+    r = transcriptions_client.post(path, data={**data, "csrf": "anything"})
+    assert r.status_code == 403 and r.headers["content-type"].startswith("text/html")
+
+
+def test_every_post_route_of_the_page_is_covered_by_the_csrf_tests(client):
+    posts = {route.path for route in client.app.routes if "POST" in route.methods and not route.path.startswith("/v1/")}
+    assert posts == POST_ROUTES
+
+
+# --- Clés ---
+
+
+def test_new_key_is_shown_once(logged_in):
+    page = logged_in.post("/keys", {"label": "Android"}).text
+    key = re.search(r"dk_[\w-]{40,}", page).group(0)
+    assert "Android" in page
+    assert key not in logged_in.client.get("/").text
+    assert key not in json.dumps(session_payload(logged_in.client))
+    assert logged_in.client.get("/v1/models", headers={"Authorization": f"Bearer {key}"}).status_code == 200
+    assert key[:10] in logged_in.client.get("/").text  # la page garde de quoi la reconnaître
+
+
+@pytest.mark.parametrize(
+    ("label", "status", "stored"),
+    [
+        ("", 400, None),
+        ("   ", 400, None),
+        ("x" * 101, 400, None),
+        (" Android ", 200, "Android"),
+        ("x" * 100, 200, "x" * 100),
+    ],
+)
+def test_key_label_is_bounded(logged_in, db, label, status, stored):
+    assert logged_in.post("/keys", {"label": label}).status_code == status
+    assert [key.label for key in db.list_keys(logged_in.user_id)] == ([] if stored is None else [stored])
+
+
+def test_revoked_key_stops_working(logged_in, db):
+    key = re.search(r"dk_[\w-]{40,}", logged_in.post("/keys", {"label": "Android"}).text).group(0)
+    spare = db.create_key(logged_in.user_id, "spare")  # une clé qui reste, pour voir que seule la bonne est révoquée
+    key_id = db.list_keys(logged_in.user_id)[0].id
+
+    def models_status(token):
+        return logged_in.client.get("/v1/models", headers={"Authorization": f"Bearer {token}"}).status_code
+
+    assert models_status(key) == 200
+    r = logged_in.post(f"/keys/{key_id}/revoke", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/?saved=1"
+    assert models_status(key) == 401 and models_status(spare) == 200
+    page = logged_in.client.get("/").text
+    assert "révoquée" in page and f"/keys/{key_id}/revoke" not in page
+
+
+def test_cannot_revoke_someone_elses_key(logged_in, db):
+    other = db.upsert_user("sub-2", "b@example.org", "B")
+    key = db.create_key(other, "theirs")
+    key_id = db.list_keys(other)[0].id
+    assert logged_in.post(f"/keys/{key_id}/revoke").status_code == 404
+    assert db.key_owner(key) == other
+
+
+@pytest.mark.parametrize("key_id", ["999", str(2**70)])
+def test_revoking_an_unknown_key_is_a_404_page(logged_in, key_id):
+    r = logged_in.post(f"/keys/{key_id}/revoke")
+    assert r.status_code == 404 and r.headers["content-type"].startswith("text/html")
+
+
+# --- Réglages ---
+
+
+def test_settings_are_saved_and_default_instructions_stay_empty(logged_in, db):
+    data = {"glossary": "Nemotron", "instructions": f"  {DEFAULT_INSTRUCTIONS}  \r\n", "voice": "Leo"}
+    r = logged_in.post("/settings", data, follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/?saved=1"
+    assert db.get_settings(logged_in.user_id) == StoredSettings("Nemotron", "", "Leo")
+
+
+def test_settings_normalize_line_endings_and_edges(logged_in, db):
+    glossary = "  Nemotron\r\nSortformer (souvent entendu : sort former)\r\n\r\n"
+    logged_in.post("/settings", {"glossary": glossary, "instructions": "\r\nSois bref.\r\nSans fioriture.  "})
+    stored = db.get_settings(logged_in.user_id)
+    assert stored.glossary == "Nemotron\nSortformer (souvent entendu : sort former)"
+    assert stored.instructions == "Sois bref.\nSans fioriture."
+
+
+def test_settings_accept_any_subset_of_the_fields(logged_in, db):
+    logged_in.post("/settings", {"glossary": "Nemotron", "instructions": "Sois bref.", "voice": "Leo"})
+    logged_in.post("/settings", {"voice": "aria"})  # sans distinction de casse, rangée sous le nom de NeMo
+    assert db.get_settings(logged_in.user_id) == StoredSettings("Nemotron", "Sois bref.", "Aria")
+    logged_in.post("/settings", {"glossary": ""})
+    assert db.get_settings(logged_in.user_id) == StoredSettings("", "Sois bref.", "Aria")
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"glossary": "x" * 20001},
+        {"glossary": "\n".join(["Nemotron"] * 501)},
+        {"instructions": "x" * 20001},
+        {"glossary": "Nemotron", "voice": "alloy"},
+        {"glossary": "Nemotron", "voice": ""},
+    ],
+)
+def test_settings_out_of_bounds_are_refused_and_nothing_is_saved(logged_in, db, data):
+    r = logged_in.post("/settings", data)
+    assert r.status_code == 400 and r.headers["content-type"].startswith("text/html")
+    assert db.get_settings(logged_in.user_id) == StoredSettings("", "", "")
+
+
+@pytest.mark.parametrize(
+    "data", [{"glossary": "x" * 20000}, {"glossary": "\n".join(["Nemotron"] * 500)}, {"instructions": "x" * 20000}]
+)
+def test_settings_at_the_bounds_are_accepted(logged_in, data):
+    assert logged_in.post("/settings", data, follow_redirects=False).status_code == 303
+
+
+def test_a_form_too_big_for_starlette_is_a_400_page(logged_in, db):
+    fields = {"csrf": logged_in.csrf, "glossary": "x" * (1024 * 1024 + 1)}
+    r = logged_in.client.post("/settings", data=fields, files={"extra": ("a.txt", b"x")})  # `files` impose multipart
+    assert r.status_code == 400 and r.headers["content-type"].startswith("text/html")
+    assert db.get_settings(logged_in.user_id) == StoredSettings("", "", "")
+
+
+def test_unknown_voice_is_refused(logged_in, db):
+    assert logged_in.post("/settings", {"voice": "alloy"}).status_code == 400
+    assert db.get_settings(logged_in.user_id).voice == ""
+
+
+def test_settings_when_nemo_is_down_save_nothing_that_needs_it(logged_in, db, fake_nemo):
+    logged_in.client.app.state.voices = None
+    fake_nemo.error = NemoUnavailable("down")
+    r = logged_in.post("/settings", {"glossary": "Nemotron", "voice": "Leo"})
+    assert r.status_code == 502 and "voix" in r.text
+    assert db.get_settings(logged_in.user_id) == StoredSettings("", "", "")
+    # Sans voix dans le formulaire, NeMo n'est pas consulté.
+    assert logged_in.post("/settings", {"glossary": "Nemotron"}, follow_redirects=False).status_code == 303
+    assert db.get_settings(logged_in.user_id).glossary == "Nemotron"
+
+
+def test_reset_instructions(logged_in, db):
+    logged_in.post("/settings", {"glossary": "Nemotron", "instructions": "Sois bref.", "voice": "Leo"})
+    r = logged_in.post("/settings/reset-instructions", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/?saved=1"
+    assert db.get_settings(logged_in.user_id) == StoredSettings("Nemotron", "", "Leo")
+    assert DEFAULT_INSTRUCTIONS in html.unescape(logged_in.client.get("/").text)
+
+
+# --- Aperçu d'une voix ---
+
+
+def test_voice_preview_returns_mp3(logged_in, fake_nemo, caplog):
+    fake_nemo.pcm = bytes(2 * TTS_SAMPLE_RATE)
+    with caplog.at_level(logging.INFO, logger="dictee"):
+        r = logged_in.client.get("/voice/preview", params={"voice": "Leo"})
+    assert r.status_code == 200 and r.headers["content-type"] == "audio/mpeg"
+    assert r.content.startswith(MP3_MAGIC)
+    assert fake_nemo.speak_calls[-1] == {"text": PREVIEW_TEXT, "voice": "Leo", "language": "fr-FR"}
+    assert PREVIEW_TEXT not in caplog.text
+
+
+def test_voice_preview_accepts_any_casing_and_speaks_with_the_nemo_name(logged_in, fake_nemo):
+    fake_nemo.pcm = bytes(2 * TTS_SAMPLE_RATE)
+    assert logged_in.client.get("/voice/preview", params={"voice": "aRIA"}).status_code == 200
+    assert fake_nemo.speak_calls[-1]["voice"] == "Aria"
+
+
+def test_voice_preview_requires_a_session(client):
+    r = client.get("/voice/preview", params={"voice": "Leo"})
+    assert r.status_code == 401 and r.headers["content-type"].startswith("text/html")
+
+
+@pytest.mark.parametrize("params", [{"voice": "alloy"}, {"voice": ""}, {}])
+def test_voice_preview_refuses_an_unknown_voice_without_calling_nemo(logged_in, fake_nemo, params):
+    assert logged_in.client.get("/voice/preview", params=params).status_code == 400
+    assert fake_nemo.speak_calls == []
+
+
+@pytest.mark.parametrize(("error", "status"), [(NemoOverloaded("busy"), 429), (NemoUnavailable("down"), 502)])
+def test_voice_preview_reports_a_nemo_failure(logged_in, fake_nemo, error, status):
+    fake_nemo.error = error
+    assert logged_in.client.get("/voice/preview", params={"voice": "Leo"}).status_code == status
+    logged_in.client.app.state.voices = None  # la lecture des voix échoue de même
+    assert logged_in.client.get("/voice/preview", params={"voice": "Leo"}).status_code == status
+
+
+# --- Garde ---
+
+
+def test_v1_routes_do_not_depend_on_the_session(transcriptions_client, service_headers):
+    r = transcriptions_client.get("/v1/models", headers=service_headers)
+    assert r.status_code == 200 and "set-cookie" not in r.headers

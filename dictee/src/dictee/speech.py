@@ -240,8 +240,11 @@ def _parse_params(body: dict[str, Any], trace: _Trace) -> _Params:
     return _Params(text, voice if isinstance(voice, str) else None, response_format, float(speed))
 
 
-async def _voices(state: State) -> tuple[str, ...]:
-    """Les voix de NeMo, lues une fois puis gardées dans `state.voices` ; un échec de la lecture n'est pas gardé."""
+async def list_voices(state: State) -> tuple[str, ...]:
+    """Les voix de NeMo, lues une fois puis gardées dans `state.voices` ; un échec de la lecture n'est pas gardé.
+
+    La page de configuration s'en sert aussi, pour la liste des voix et pour valider celle qu'on choisit.
+    """
     if state.voices is None:
         state.voices = tuple(await state.nemo.voices())
     return state.voices
@@ -249,7 +252,7 @@ async def _voices(state: State) -> tuple[str, ...]:
 
 async def _open(state: State, params: _Params, profile_voice: str, sentence: str, trace: _Trace) -> tuple[str, bytes]:
     """Choisit la voix et fait synthétiser la première phrase ; rend la voix et le PCM de cette phrase."""
-    voice = resolve_voice(params.voice, profile_voice, await _voices(state))
+    voice = resolve_voice(params.voice, profile_voice, await list_voices(state))
     trace.voice = loggable(voice)
     return voice, await state.nemo.speak(sentence, voice=voice, language=LANGUAGE)
 
