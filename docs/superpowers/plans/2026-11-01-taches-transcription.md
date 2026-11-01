@@ -2,6 +2,8 @@
 
 > **Pour les agents :** sous-skill requis : `superpowers:subagent-driven-development` (recommandé) ou `superpowers:executing-plans`, tâche par tâche. Les étapes se cochent (`- [ ]`).
 
+**Ordre d'exécution :** tâches 1 à 14, puis 16, puis 15.
+
 **Objectif :** faire de chaque transcription de fichier sans `stream` une tâche enregistrée qui survit aux coupures, traiter les fichiers par morceaux sur la route REST de NeMo et les réunions de 2 heures sur sa route temps réel, puis ajouter la dictée en direct au format du Realtime d'OpenAI.
 
 **Architecture :** dictee range chaque tâche dans sa base SQLite (schéma 2) et son audio décodé sur le volume `dictee-data`. Une boucle de travail, dans le processus de dictee, fait avancer les tâches (une longue à la fois, les courtes tout de suite) et reprend les inachevées au démarrage. La route de transcription crée ou rejoint une tâche, puis attend sa fin ou rend son identifiant ; deux routes lisent et annulent une tâche, et une route WebSocket traduit le Realtime d'OpenAI vers la route temps réel de NeMo.
@@ -65,6 +67,7 @@ La spec laisse ces points au constructeur (section 13) ou ne les tranche pas. Le
 | `integration/boost.py` | Mesure de la force du glossaire selon la section 7.6 |
 | `integration/run.py` | Intégration de bout en bout, tâches et dictée en direct comprises |
 | `Makefile` | `make test ARGS=…` |
+| `nemo/pull-models.sh`, `compose.yaml`, `dictee/src/dictee/__main__.py` | Taille des modèles contrôlée hors réseau, arrêt propre de dictee (tâche 16) |
 | `dictee/src/dictee/audio.py` | Décodage en WAV sur le disque, tranche et trames d'un WAV |
 | `dictee/src/dictee/cuts.py` | Silences repérés par ffmpeg et points de coupe |
 | `dictee/src/dictee/db.py` | Schéma 2 et sa migration |
@@ -92,7 +95,7 @@ La spec laisse ces points au constructeur (section 13) ou ne les tranche pas. Le
 Cette tâche passe en premier : ses relevés figent les formats que les tâches 6, 7 et 12 lisent, et ses mesures disent si une réunion de 2 heures tient sur la route temps réel. Elle tourne sur le VPS contre un NeMo jetable : l'image `nemo` de production, ses modèles en lecture seule, les réglages de fils de la production relus sans être affichés, et une clé d'API tirée au hasard pour l'occasion.
 
 **Fichiers :**
-- Modifier : `integration/check_nemo.py` (contrôles `h`, `i`, `j` et option `--note`)
+- Modifier : `integration/check_nemo.py` (contrôles `h`, `i`, `j` et option `--note`), `integration/nemo_rt.py` (clé lue d'abord dans l'environnement)
 - Créer, à partir de phrases de synthèse : `dictee/tests/fixtures/nemo/rest_transcription.json`, `realtime_speakers_events.jsonl`, `realtime_multiturn_events.jsonl`, `realtime_endpointing_events.jsonl`
 - Modifier : ce plan, section « Résultats » de la tâche
 
@@ -105,7 +108,7 @@ Copier le Call et la Note du dossier Meets de Geoff (Google Drive, par le serveu
 
 - [ ] **Étape 2 : écrire le contrôle `h`, un morceau sur la route REST**
 
-`check_nemo.py --only h` envoie à `POST /v1/audio/transcriptions` le dialogue de synthèse (`prepare_audio()`) répété jusqu'à 30 s, avec `language=fr-FR`, `response_format=verbose_json`, `timestamp_granularities[]=word` et `speech_contexts=[{"phrases": ["Nemotron", "Sortformer"], "boost": 1.0}]`. Il écrit la réponse dans `rest_transcription.json` et rend `OK` quand `words` est non vide et que chaque mot porte `word`, `start` et `end`. Il envoie ensuite trois fois les 30 premières secondes de `--note` et affiche la durée de chaque requête, sans garder ni afficher le texte. Il lance enfin 16 requêtes simultanées sur ce morceau et affiche les statuts, ainsi que le corps de la première réponse qui n'est pas 200.
+`nemo_rt.api_key()` lit d'abord `NEMO_API_KEY` dans l'environnement, puis le `.env` comme aujourd'hui : le conteneur client du VPS n'a pas de `.env`. `check_nemo.py --only h` envoie à `POST /v1/audio/transcriptions` le dialogue de synthèse (`prepare_audio()`) répété jusqu'à 30 s, avec `language=fr-FR`, `response_format=verbose_json`, `timestamp_granularities[]=word` et `speech_contexts=[{"phrases": ["Nemotron", "Sortformer"], "boost": 1.0}]`. Il écrit la réponse dans `rest_transcription.json` et rend `OK` quand `words` est non vide et que chaque mot porte `word`, `start` et `end`. Il envoie ensuite trois fois les 30 premières secondes de `--note` et affiche la durée de chaque requête, sans garder ni afficher le texte. Il lance enfin 16 requêtes simultanées sur ce morceau et affiche les statuts, ainsi que le corps de la première réponse qui n'est pas 200.
 
 - [ ] **Étape 3 : écrire le contrôle `i`, une réunion de 2 heures**
 
@@ -129,7 +132,7 @@ Le travail s'arrête et Geoff est prévenu si `h` ne rend aucun mot horodaté, s
 Supprimer `verif-nemo`, `verif-client`, `verif-net` et les fichiers copiés sur le VPS ; les copies du Mac restent dans `.integration/verif-taches/` jusqu'à la tâche 15.
 
 ```bash
-git add integration/check_nemo.py dictee/tests/fixtures/nemo docs/superpowers/plans/2026-11-01-taches-transcription.md
+git add integration/check_nemo.py integration/nemo_rt.py dictee/tests/fixtures/nemo docs/superpowers/plans/2026-11-01-taches-transcription.md
 git commit -m "Vérifie la route REST de NeMo, une réunion de 2 heures et les prises de parole multiples"
 ```
 
@@ -1565,3 +1568,86 @@ Effacer `.integration/verif-taches/` sur le Mac (Call, Note, glossaire, enregist
 - Contrôles locaux.
 - Scénarios longs : temps, pics mémoire de NeMo et de dictee, personnes, `starts`, morceaux.
 - Vérifications après déploiement.
+
+### Tâche 16 : restes de la revue du premier plan (carte STK-50)
+
+Cette tâche s'exécute après la tâche 14 et avant la tâche 15, pour que la mise en service porte aussi ces corrections. Le premier point de la carte (libérer le WAV avant la reformulation) n'a plus lieu d'être : le WAV est sur le disque depuis la tâche 6.
+
+**Fichiers :**
+- Modifier : `nemo/pull-models.sh`, `compose.yaml`, `dictee/src/dictee/__main__.py`, `dictee/src/dictee/lifecycle.py`, `dictee/src/dictee/transcribe.py`, `dictee/src/dictee/speech.py`, `dictee/src/dictee/web.py`, `dictee/src/dictee/upload.py`, `integration/nemo_rt.py`, `integration/run.py`, `integration/voices.py`, `integration/check_nemo.py`, `integration/boost.py`
+- Tester : `dictee/tests/test_lifecycle.py`, `dictee/tests/test_main.py`, `dictee/tests/test_transcriptions.py`
+
+**Interfaces :**
+- Produit :
+  - `lifecycle.abandon_stream(task: asyncio.Task, trace: RequestTrace) -> None` : le filet de fin d'une réponse en continu, qui remplace les deux `_abandon` de `transcribe.py` et de `speech.py`.
+  - `lifecycle.RequestTrace` : base des traces de requête, avec `status`, `logged` et `log()`, qui n'écrit la ligne qu'une fois ; `Trace` et la trace de la synthèse en héritent et gardent chacune exactement leur format de ligne.
+  - `upload.bounded_request(request: Request, limit_bytes: int, too_big: Callable[[], Exception]) -> Request` : une requête de même corps dont la lecture lève `too_big()` dès que `limit_bytes` octets sont dépassés ; la synthèse (corps JSON), la page (formulaire) et `read_upload` la partagent.
+  - `nemo_rt.env_value(name: str) -> str` : la variable d'environnement si elle existe, sinon la valeur du `.env` du dépôt, jamais affichée ; seule lecture du `.env` des scripts d'intégration.
+  - `pull-models.sh` écrit la taille de chaque fichier lié dans `pins.txt`, et `models_in_place` compare aussi cette taille à celle du fichier en place.
+  - `compose.yaml` donne `stop_grace_period: 30s` à `dictee` ; `__main__.main()` passe `timeout_graceful_shutdown=20` à uvicorn, pour que l'arrêt de la boucle de travail passe avant le SIGKILL de Docker.
+
+- [ ] **Étape 1 : écrire les tests qui échouent**
+
+```python
+async def test_a_bounded_request_refuses_a_body_past_its_limit_without_content_length():
+    request = request_with_chunks([b"a" * 600, b"b" * 600])  # sans Content-Length
+    with pytest.raises(TooBig):
+        await bounded_request(request, 1000, TooBig).body()
+
+async def test_abandon_stream_cancels_the_task_and_writes_the_line_once(caplog):
+    task, trace = asyncio.create_task(asyncio.sleep(60)), Trace(route="transcriptions")
+    await abandon_stream(task, trace)
+    await abandon_stream(task, trace)
+    assert task.cancelling() and trace.status == CLIENT_CLOSED
+    assert len([record for record in caplog.records if "route=transcriptions" in record.getMessage()]) == 1
+
+def test_uvicorn_stops_before_docker_kills_the_container(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: seen.update(kwargs))
+    main_with_test_env(monkeypatch)
+    assert seen["timeout_graceful_shutdown"] == 20
+
+def test_unreadable_audio_is_422_and_leaves_neither_task_nor_folder(transcriptions_client, service_headers):
+    response = post(transcriptions_client, service_headers, b"not audio", model="dictee")
+    assert (response.status_code, response.json()["error"]["code"]) == (422, "invalid_audio")
+    assert tasks_of(transcriptions_client) == []
+    assert not any(transcriptions_client.app.state.settings.tasks_dir.iterdir())
+
+async def test_a_client_hanging_up_during_the_decoding_leaves_neither_task_nor_folder_nor_place(settings, fake_nemo, fake_llm, service_headers, tmp_path, monkeypatch):
+    app = app_with(settings, fake_nemo, fake_llm, long_audio_seconds=1.0)
+    slow_decoding(monkeypatch)  # le décodage attend un événement avant de finir
+    async with app_running(app):
+        assert await call_app(app, service_headers, tone_wav(tmp_path), hang_up_during_decoding=True) == 499
+        assert app.state.store.unfinished() == [] and not app.state.lane.full
+        assert not any(settings.tasks_dir.iterdir())
+```
+
+`request_with_chunks`, `main_with_test_env` et `slow_decoding` sont des aides de test écrites dans le fichier qui les utilise. Les tests de journal existants des deux routes passent sans changement : ils figent les formats de ligne.
+
+- [ ] **Étape 2 : vérifier l'échec**
+
+Run : `make test ARGS="tests/test_lifecycle.py tests/test_main.py tests/test_transcriptions.py"`
+Attendu : échec sur `abandon_stream`, `bounded_request` et `timeout_graceful_shutdown` introuvables, et sur le dossier laissé par une coupure pendant le décodage s'il en reste un.
+
+- [ ] **Étape 3 : écrire les changements de dictee**
+
+- [ ] **Étape 4 : vérifier le succès**
+
+Run : `make test`
+Attendu : toute la suite passe.
+
+- [ ] **Étape 5 : contrôler la taille des modèles hors réseau**
+
+Sur le volume de modèles de `make nemo-up` : lancer le service `models` deux fois, la seconde avec `--network none` (attendu : sortie 0 et la ligne « aucun appel réseau ») ; raccourcir d'un octet une copie de travail du fichier lié par `asr.gguf` (`truncate -s -1`), relancer sans réseau (attendu : sortie non nulle et nom du fichier dans le message) ; relancer avec le réseau (attendu : le fichier est retéléchargé et vérifié, sortie 0).
+
+- [ ] **Étape 6 : vérifier les scripts d'intégration**
+
+Run : `grep -n "\.env" integration/*.py`
+Attendu : seule `nemo_rt.env_value` lit le `.env`. Puis `uv run --script integration/boost.py --self-test` et `uv run --script integration/check_nemo.py --help` s'exécutent sans erreur.
+
+- [ ] **Étape 7 : commiter**
+
+```bash
+git add nemo/pull-models.sh compose.yaml dictee/src/dictee dictee/tests integration
+git commit -m "Traite les restes de la revue du premier plan : arrêt propre, taille des modèles, code partagé"
+```
