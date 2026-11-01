@@ -4,7 +4,7 @@ import asyncio
 import io
 import json
 import wave
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 
 import httpx
@@ -52,8 +52,14 @@ class FakeNemo:
 
     `chunks` sont rendus tour à tour par `transcribe_chunk` : un `Final` est rendu, une exception est levée, et le
     dernier élément se répète une fois la liste épuisée. Par défaut, `chunks` ne contient que `CHUNK`. `error` ne
-    touche pas `transcribe_chunk` : une panne s'y donne par une exception dans `chunks`. De même, `ready` rend tour à
+    touche pas `transcribe_chunk` : une panne s'y donne par une exception dans `chunks`. `on_chunk`, s'il est donné,
+    est appelé sans argument au début de chaque `transcribe_chunk`, avant tout le reste. De même, `ready` rend tour à
     tour les éléments de `ready_answers` (par défaut `[True]`, le dernier se répète) et ne lève jamais `error`.
+
+    `transcribe_errors` donne une panne par appel de `transcribe`, dans l'ordre : la panne du rang de l'appel est
+    levée (`None` pour un appel sans panne), au même endroit que `error` (après les `after` premiers éléments). Une
+    fois la liste épuisée, c'est `error` qui vaut, comme avant : sans `transcribe_errors`, rien ne change. Un
+    élément `None` l'emporte sur `error` pour son appel.
 
     Chaque appel est noté dans `calls`, sous forme de dict : `language`, `phrases`, `boost`, `speakers`, `partials`,
     `wav_rate` et `seconds` (lus dans le fichier WAV) pour `transcribe` ; `chunk` (toujours vrai), `language`,
@@ -74,6 +80,8 @@ class FakeNemo:
         after: int = 0,
         chunks: Sequence[Final | Exception] | None = None,
         ready_answers: Sequence[bool] | None = None,
+        transcribe_errors: Sequence[Exception | None] = (),
+        on_chunk: Callable[[], None] | None = None,
     ) -> None:
         self.finals = tuple(finals)
         self.pcm = pcm
@@ -82,8 +90,14 @@ class FakeNemo:
         self.after = after
         self.chunks = (CHUNK,) if chunks is None else tuple(chunks)
         self.ready_answers = (True,) if ready_answers is None else tuple(ready_answers)
+        self.transcribe_errors = list(transcribe_errors)
+        self.on_chunk = on_chunk
         self.calls: list[dict] = []
         self.sessions_closed = 0
+
+    @property
+    def transcribe_calls(self) -> list[dict]:
+        return [call for call in self.calls if "speakers" in call]
 
     @property
     def speak_calls(self) -> list[dict]:
@@ -120,6 +134,9 @@ class FakeNemo:
                 "seconds": seconds,
             }
         )
+        # La panne de cet appel est celle de son rang dans `transcribe_errors` tant qu'il en reste, sinon `error`.
+        turn = len(self.transcribe_calls) - 1
+        error = self.transcribe_errors[turn] if turn < len(self.transcribe_errors) else self.error
         if on_progress is not None:
             on_progress(seconds)
         # Comme `NemoClient`, les `Partial` ne sortent que si on les demande, les personnes que si on les demande aussi.
@@ -134,8 +151,8 @@ class FakeNemo:
         try:
             for event in events[: self.after]:
                 yield event
-            if self.error is not None:
-                raise self.error
+            if error is not None:
+                raise error
             await self._hold()
             for event in events[self.after :]:
                 yield event
@@ -144,6 +161,8 @@ class FakeNemo:
             self.sessions_closed += 1
 
     async def transcribe_chunk(self, wav: bytes, *, language, phrases, boost) -> Final:
+        if self.on_chunk is not None:
+            self.on_chunk()
         _, seconds = _wav_info(io.BytesIO(wav))
         self.calls.append(
             {"chunk": True, "language": language, "phrases": list(phrases), "boost": boost, "seconds": seconds}

@@ -98,3 +98,48 @@ async def test_ready_is_noted_and_true_by_default():
 async def test_the_ready_answers_come_in_turn_and_the_last_one_repeats():
     nemo = FakeNemo(ready_answers=[False, False, True])
     assert [await nemo.ready() for _ in range(4)] == [False, False, True, True]
+
+
+async def session(nemo: FakeNemo, path) -> list:
+    """Les événements d'une session de `transcribe` sur le WAV `path`."""
+    return [event async for event in nemo.transcribe(path, language="fr-FR", phrases=[], boost=1.0)]
+
+
+@pytest.fixture
+def wav_path(tmp_path):
+    path = tmp_path / "audio.wav"
+    path.write_bytes(wav_of(1.0))
+    return path
+
+
+async def test_the_transcribe_errors_come_one_per_call_and_none_is_a_call_without_error(wav_path):
+    nemo = FakeNemo(finals=FINALS, transcribe_errors=[NemoUnavailable("lost"), None])
+    with pytest.raises(NemoUnavailable, match="lost"):
+        await session(nemo, wav_path)
+    assert len(await session(nemo, wav_path)) == len(FINALS)
+    assert len(await session(nemo, wav_path)) == len(FINALS)
+    assert len(nemo.transcribe_calls) == 3
+    assert nemo.sessions_closed == 3
+
+
+async def test_the_error_applies_again_once_the_transcribe_errors_are_used_up(wav_path):
+    nemo = FakeNemo(finals=FINALS, error=NemoUnavailable("down"), transcribe_errors=[None])
+    assert len(await session(nemo, wav_path)) == len(FINALS)
+    with pytest.raises(NemoUnavailable, match="down"):
+        await session(nemo, wav_path)
+
+
+async def test_the_error_alone_still_fails_every_session(wav_path):
+    nemo = FakeNemo(finals=FINALS, error=NemoUnavailable("down"))
+    for _ in range(2):
+        with pytest.raises(NemoUnavailable, match="down"):
+            await session(nemo, wav_path)
+
+
+async def test_on_chunk_is_called_first_in_every_chunk():
+    seen = []
+    nemo = FakeNemo()
+    nemo.on_chunk = lambda: seen.append(len(nemo.chunk_calls))
+    await chunk(nemo)
+    await chunk(nemo)
+    assert seen == [0, 1]

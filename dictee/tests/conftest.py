@@ -7,6 +7,7 @@ from fakes import FINALS, FakeLlm, FakeNemo
 from openai import OpenAI
 from starlette.testclient import TestClient
 
+from dictee import processing
 from dictee.app import create_app
 from dictee.db import Database
 from dictee.settings import Settings
@@ -87,6 +88,16 @@ def db(db_path):
 def store(db):
     """Registre des tâches sur la base du test."""
     return TaskStore(db)
+
+
+@pytest.fixture
+def no_retry_delays(monkeypatch):
+    """Retire les pauses des reprises auprès de NeMo : ni attente entre deux essais, ni attente de son retour.
+
+    Sans `autouse` : un fichier de tests l'applique à tous ses tests par `pytestmark`, un test seul par son argument.
+    """
+    monkeypatch.setattr(processing, "RETRY_DELAYS_S", (0, 0, 0))
+    monkeypatch.setattr(processing, "READY_POLL_S", 0)
 
 
 @pytest.fixture
