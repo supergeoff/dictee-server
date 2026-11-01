@@ -1,9 +1,13 @@
 import asyncio
+import hashlib
 import io
 import json
 import logging
+import os
+import re
 import socket
 import struct
+import tracemalloc
 import wave
 from contextlib import aclosing
 from http import HTTPStatus
@@ -29,6 +33,7 @@ from dictee.types import Final, Partial, Turn, Word
 pytestmark = pytest.mark.anyio
 
 FIXTURES = Path(__file__).parent / "fixtures" / "nemo"
+MIB = 1024 * 1024
 
 
 def make_wav(seconds: float) -> bytes:
@@ -479,6 +484,88 @@ async def test_diarize_accepts_a_bytearray(http_nemo):
     recorder = Recorder()
     await http_nemo(recorder).diarize(bytearray(WAV_1S))
     assert WAV_1S in recorder.requests[0].content
+
+
+EDGE = 1024
+
+
+class Sink(httpx.AsyncBaseTransport):
+    """Faux transport qui lit le corps d'une requête par morceaux sans le garder.
+
+    Il n'en retient que la taille, l'empreinte SHA-256, les `EDGE` premiers et derniers octets : un test de mémoire
+    ne doit pas compter ce que le faux transport accumulerait lui-même.
+    """
+
+    def __init__(self) -> None:
+        self.headers = httpx.Headers()
+        self.size = 0
+        self.digest = hashlib.sha256()
+        self.head = b""
+        self.tail = b""
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.headers = request.headers
+        async for chunk in request.stream:
+            self.size += len(chunk)
+            self.digest.update(chunk)
+            self.head += chunk[: EDGE - len(self.head)]
+            self.tail = chunk[-EDGE:] if len(chunk) >= EDGE else (self.tail + chunk)[-EDGE:]
+        return httpx.Response(200, json=json.loads((FIXTURES / "diarization.json").read_text()))
+
+
+def diarize_body(boundary: str, wav: bytes) -> bytes:
+    """Le corps que NeMo reçoit : le champ `mode`, puis le fichier, sous la frontière `boundary`."""
+    head = (
+        f'--{boundary}\r\nContent-Disposition: form-data; name="mode"\r\n\r\nstreaming\r\n'
+        f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.wav"\r\n'
+        "Content-Type: audio/wav\r\n\r\n"
+    )
+    return head.encode() + wav + f"\r\n--{boundary}--\r\n".encode()
+
+
+def boundary_of(headers: httpx.Headers) -> str:
+    match = re.fullmatch(r"multipart/form-data; boundary=(\w+)", headers["content-type"])
+    assert match, headers["content-type"]
+    return match.group(1)
+
+
+async def test_diarize_sends_the_wav_in_blocks_without_copying_it():
+    # 4 Mio de WAV, soit environ deux minutes : le décodage d'une heure en pèse 110.
+    wav = bytearray(b"RIFF" + os.urandom(4 * MIB))
+    sink = Sink()
+    async with httpx.AsyncClient(transport=sink) as http:
+        nemo = NemoClient("http://nemo.test", "test-nemo-key", http)
+        tracemalloc.start()
+        try:
+            turns = await nemo.diarize(wav)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+    assert peak < MIB, f"{peak} octets alloués pendant l'envoi d'un WAV de {len(wav)} octets"
+    assert [turn.speaker for turn in turns] == [1, 2]
+    expected = diarize_body(boundary_of(sink.headers), bytes(wav))
+    assert sink.size == len(expected)
+    assert sink.digest.digest() == hashlib.sha256(expected).digest()
+
+
+async def test_diarize_announces_the_exact_length_of_its_body():
+    # NeMo n'accepte peut-être pas l'encodage par morceaux : le corps annonce sa taille, sans `Transfer-Encoding`.
+    sink = Sink()
+    async with httpx.AsyncClient(transport=sink) as http:
+        await NemoClient("http://nemo.test", "test-nemo-key", http).diarize(WAV_1S)
+    assert sink.headers["content-length"] == str(sink.size)
+    assert "transfer-encoding" not in sink.headers
+    assert sink.headers["authorization"] == "Bearer test-nemo-key"
+
+
+@pytest.mark.parametrize("container", [bytes, bytearray, memoryview], ids=lambda kind: kind.__name__)
+async def test_diarize_body_is_the_same_multipart_form_whatever_the_buffer(container):
+    sink = Sink()
+    async with httpx.AsyncClient(transport=sink) as http:
+        await NemoClient("http://nemo.test", "test-nemo-key", http).diarize(container(WAV_1S))
+    expected = diarize_body(boundary_of(sink.headers), WAV_1S)
+    assert sink.head == expected[:EDGE] and sink.tail == expected[-EDGE:]
+    assert sink.digest.digest() == hashlib.sha256(expected).digest()
 
 
 @pytest.mark.parametrize("call", CALLS.values(), ids=CALLS.keys())

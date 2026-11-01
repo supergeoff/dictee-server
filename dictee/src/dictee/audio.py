@@ -2,7 +2,7 @@
 
 import asyncio
 import struct
-from collections.abc import AsyncIterator, Buffer
+from collections.abc import AsyncIterator, Buffer, Callable
 from pathlib import Path
 
 # NeMo transcrit du PCM16 mono à 16 kHz.
@@ -85,7 +85,14 @@ async def _reap(process: asyncio.subprocess.Process, *tasks: asyncio.Task) -> No
     await process.wait()
 
 
-async def to_wav16k(src: Path, *, max_seconds: float = 7200.0, timeout_s: float = 600.0) -> bytearray:
+async def to_wav16k(
+    src: Path,
+    *,
+    max_seconds: float,
+    timeout_s: float = 600.0,
+    long_seconds: float | None = None,
+    on_long: Callable[[], None] | None = None,
+) -> bytearray:
     """Décode n'importe quel audio en WAV PCM16 mono 16 kHz, dans un seul tampon.
 
     ffmpeg lit le chemin et non un tube : un m4a d'Android range souvent son index en fin de fichier, que ffmpeg
@@ -95,12 +102,21 @@ async def to_wav16k(src: Path, *, max_seconds: float = 7200.0, timeout_s: float 
     quelques centaines de Ko et décode en 115 Mo), donc la taille décodée est bornée ici et nulle part ailleurs :
     au-delà de `max_seconds` d'audio, ffmpeg est tué et `AudioTooLong` est levée, après avoir lu au plus
     `DECODE_READ_SIZE` octets de plus que le plafond ; après `timeout_s` secondes, ffmpeg est tué et
-    `AudioDecodeError` est levée.
+    `AudioDecodeError` est levée. Le plafond n'a pas de valeur par défaut : chaque appelant a le sien.
+
+    `long_seconds` et `on_long` vont ensemble. `on_long()` est appelé une fois, de façon synchrone, juste après la
+    lecture qui fait passer l'audio décodé au-dessus de `long_seconds`, donc après au plus `DECODE_READ_SIZE` octets
+    de plus que le seuil. Il sert à réserver une ressource rare avant de continuer : s'il lève une exception, ffmpeg
+    est tué et l'exception remonte telle quelle, sans que le reste de l'audio soit décodé. Un audio qui n'atteint
+    pas le seuil n'appelle rien. Si la même lecture dépasse aussi `max_seconds`, `AudioTooLong` passe d'abord.
 
     Un fichier dont le format n'est pas dans `INPUT_DEMUXERS` lève `AudioDecodeError`, comme un fichier illisible. Les
     messages ne contiennent ni le contenu du fichier ni son chemin.
     """
+    if (long_seconds is None) != (on_long is None):
+        raise ValueError("long_seconds and on_long go together: give both or neither")
     max_pcm = int(max_seconds * TRANSCRIPTION_RATE * SAMPLE_WIDTH)
+    long_pcm = None if long_seconds is None else int(long_seconds * TRANSCRIPTION_RATE * SAMPLE_WIDTH)
     wav = bytearray(WAV_HEADER_SIZE)
     process = None
     stderr_tail = None
@@ -133,8 +149,12 @@ async def to_wav16k(src: Path, *, max_seconds: float = 7200.0, timeout_s: float 
             stderr_tail = asyncio.create_task(_drain(process.stderr))
             while chunk := await process.stdout.read(DECODE_READ_SIZE):
                 wav += chunk
-                if len(wav) - WAV_HEADER_SIZE > max_pcm:
+                pcm_size = len(wav) - WAV_HEADER_SIZE
+                if pcm_size > max_pcm:
                     raise AudioTooLong(f"the audio is longer than {max_seconds:g} seconds")
+                if on_long is not None and pcm_size > long_pcm:
+                    on_long()
+                    on_long = None  # un seul appel
             returncode = await process.wait()
             stderr = await stderr_tail
     except TimeoutError:

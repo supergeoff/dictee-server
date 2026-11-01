@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from conftest import make_audio
 
+from dictee import audio
 from dictee.audio import (
     OUTPUT_FORMATS,
     AudioDecodeError,
@@ -64,8 +65,18 @@ def spawned(monkeypatch):
     return processes
 
 
+async def decode(src: Path, **options) -> bytearray:
+    """`to_wav16k` avec un plafond de deux heures, que le test remplace par son propre `max_seconds` au besoin."""
+    return await to_wav16k(src, **{"max_seconds": 7200.0, **options})
+
+
+async def test_the_duration_limit_has_no_default(tmp_path):
+    with pytest.raises(TypeError, match="max_seconds"):
+        await to_wav16k(make_audio(tmp_path, "tone.wav", seconds=0.5))
+
+
 async def test_converts_any_input_to_mono_16k_wav(tmp_path):
-    wav = await to_wav16k(make_audio(tmp_path, "tone.mp3", seconds=1.0, rate=48000, channels=2))
+    wav = await decode(make_audio(tmp_path, "tone.mp3", seconds=1.0, rate=48000, channels=2))
     with wave.open(io.BytesIO(wav)) as w:
         assert (w.getnchannels(), w.getframerate(), w.getsampwidth()) == (1, 16000, 2)
     assert abs(wav_duration(wav) - 1.0) < 0.05
@@ -75,12 +86,12 @@ async def test_reads_an_m4a_whose_index_is_at_the_end(tmp_path):
     src = make_audio(tmp_path, "tone.m4a", seconds=2.0)  # mp4 sans +faststart
     content = src.read_bytes()
     assert content.find(b"moov") > content.find(b"mdat"), "the test file must keep its index after the data"
-    wav = await to_wav16k(src)
+    wav = await decode(src)
     assert abs(wav_duration(wav) - 2.0) < 0.1
 
 
 async def test_wav_pcm_returns_the_samples_without_the_header(tmp_path):
-    wav = await to_wav16k(make_audio(tmp_path, "tone.wav", seconds=1.0))
+    wav = await decode(make_audio(tmp_path, "tone.wav", seconds=1.0))
     assert len(wav_pcm(wav)) == round(wav_duration(wav) * 16000) * 2
     assert len(wav) == len(wav_pcm(wav)) + 44
 
@@ -89,7 +100,7 @@ async def test_wav_pcm_returns_the_samples_without_the_header(tmp_path):
 async def test_unreadable_input_raises(tmp_path, content):
     (tmp_path / "bad").write_bytes(content)
     with pytest.raises(AudioDecodeError) as error:
-        await to_wav16k(tmp_path / "bad")
+        await decode(tmp_path / "bad")
     message = str(error.value)
     assert str(tmp_path) not in message
     if content:
@@ -103,11 +114,11 @@ async def test_input_without_any_sample_raises(tmp_path):
         w.setsampwidth(2)
         w.setframerate(16000)
     with pytest.raises(AudioDecodeError):
-        await to_wav16k(empty)
+        await decode(empty)
 
 
 async def test_wav_header_is_the_one_the_wave_module_writes(tmp_path):
-    wav = await to_wav16k(make_audio(tmp_path, "tone.wav", seconds=0.5))
+    wav = await decode(make_audio(tmp_path, "tone.wav", seconds=0.5))
     expected = io.BytesIO()
     with wave.open(expected, "wb") as w:
         w.setnchannels(1)
@@ -137,9 +148,9 @@ def test_wav_helpers_read_a_wav_with_an_extra_chunk_without_copying_it(container
 
 async def test_audio_at_the_limit_is_accepted_and_just_over_it_is_refused(tmp_path):
     src = make_audio(tmp_path, "two_seconds.wav", seconds=2.0)
-    assert abs(wav_duration(await to_wav16k(src, max_seconds=2.0)) - 2.0) < 0.01
+    assert abs(wav_duration(await decode(src, max_seconds=2.0)) - 2.0) < 0.01
     with pytest.raises(AudioTooLong):
-        await to_wav16k(src, max_seconds=1.9)
+        await decode(src, max_seconds=1.9)
 
 
 async def test_audio_over_the_limit_is_refused_without_being_buffered(tmp_path, spawned):
@@ -148,7 +159,7 @@ async def test_audio_over_the_limit_is_refused_without_being_buffered(tmp_path, 
     tracemalloc.start()
     try:
         with pytest.raises(AudioTooLong) as error:
-            await to_wav16k(src, max_seconds=5.0)
+            await decode(src, max_seconds=5.0)
         peak = tracemalloc.get_traced_memory()[1]
     finally:
         tracemalloc.stop()
@@ -158,12 +169,80 @@ async def test_audio_over_the_limit_is_refused_without_being_buffered(tmp_path, 
     assert str(tmp_path) not in str(error.value)
 
 
+async def test_on_long_is_called_once_when_the_decoded_audio_passes_the_threshold(tmp_path):
+    src = make_audio(tmp_path, "two_seconds.wav", seconds=2.0)
+    calls = []
+    wav = await decode(src, long_seconds=1.0, on_long=lambda: calls.append(1))
+    assert calls == [1]
+    assert abs(wav_duration(wav) - 2.0) < 0.01  # le rappel n'arrête pas le décodage
+
+
+@pytest.mark.parametrize(("seconds", "threshold"), [(2.0, 2.5), (0.5, 1.0)])
+async def test_on_long_is_not_called_for_audio_under_the_threshold(tmp_path, seconds, threshold):
+    src = make_audio(tmp_path, "short.wav", seconds=seconds)
+    calls = []
+    await decode(src, long_seconds=threshold, on_long=lambda: calls.append(1))
+    assert calls == []
+
+
+async def test_on_long_is_called_right_after_the_read_that_passes_the_threshold(tmp_path, monkeypatch):
+    # Lectures de 4 Kio : le rappel part après la première qui dépasse 32 000 octets de PCM, soit une seconde d'audio.
+    monkeypatch.setattr(audio, "DECODE_READ_SIZE", 4096)
+    decoded = []  # octets rendus par chaque lecture du décodage, relevés sur le tube de ffmpeg
+    real = asyncio.create_subprocess_exec
+
+    async def spy(*args, **kwargs):
+        process = await real(*args, **kwargs)
+        read = process.stdout.read
+
+        async def counting(size=-1):
+            data = await read(size)
+            decoded.append(len(data))
+            return data
+
+        process.stdout.read = counting
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spy)
+    decoded_at_the_call = []
+    src = make_audio(tmp_path, "two_seconds.wav", seconds=2.0)
+    await decode(src, long_seconds=1.0, on_long=lambda: decoded_at_the_call.append(sum(decoded)))
+    assert len(decoded_at_the_call) == 1
+    assert 32000 < decoded_at_the_call[0] <= 32000 + 4096
+
+
+async def test_on_long_that_raises_stops_the_decoding_without_buffering_the_rest(tmp_path, spawned):
+    # Deux minutes de son (3,84 Mo de PCM décodé) contre un seuil de cinq secondes (160 Ko) : le rappel refuse.
+    src = make_audio(tmp_path, "long.flac", seconds=120.0)
+
+    def refuse():
+        raise RuntimeError("no place left")
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(RuntimeError, match="no place left"):
+            await decode(src, long_seconds=5.0, on_long=refuse)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 1_000_000
+    assert [process.returncode is not None for process in spawned] == [True]
+
+
+async def test_the_threshold_and_its_callback_go_together(tmp_path):
+    src = make_audio(tmp_path, "tone.wav", seconds=0.5)
+    with pytest.raises(ValueError, match="on_long"):
+        await decode(src, long_seconds=1.0)
+    with pytest.raises(ValueError, match="on_long"):
+        await decode(src, on_long=lambda: None)
+
+
 async def test_decoding_that_never_ends_times_out(tmp_path, spawned):
     stuck = tmp_path / "stuck"
     os.mkfifo(stuck)  # ffmpeg attend indéfiniment qu'un écrivain ouvre le tube
     async with asyncio.timeout(30):
         with pytest.raises(AudioDecodeError, match="longer than") as error:
-            await to_wav16k(stuck, timeout_s=0.5)
+            await decode(stuck, timeout_s=0.5)
     assert [process.returncode is not None for process in spawned] == [True]
     assert str(tmp_path) not in str(error.value)
 
@@ -171,7 +250,7 @@ async def test_decoding_that_never_ends_times_out(tmp_path, spawned):
 async def test_cancelling_the_decoding_kills_ffmpeg(tmp_path, spawned):
     stuck = tmp_path / "stuck"
     os.mkfifo(stuck)
-    decoding = asyncio.create_task(to_wav16k(stuck))
+    decoding = asyncio.create_task(decode(stuck))
     async with asyncio.timeout(30):
         while not spawned:
             await asyncio.sleep(0.01)
@@ -202,7 +281,7 @@ async def test_refuses_an_hls_playlist_that_points_to_a_local_file(tmp_path, seg
     playlist.write_text(f"{header}#EXTINF:1.0,\n{segment}\n#EXT-X-ENDLIST\n")
     assert decoded_without_restrictions(playlist) > 30000
     with pytest.raises(AudioDecodeError, match="not on whitelist"):
-        await to_wav16k(playlist)
+        await decode(playlist)
 
 
 async def test_refuses_a_concat_list_that_points_to_a_local_file(tmp_path):
@@ -211,7 +290,7 @@ async def test_refuses_a_concat_list_that_points_to_a_local_file(tmp_path):
     listing.write_text("ffconcat version 1.0\nfile segment.wav\n")
     assert decoded_without_restrictions(listing) > 30000
     with pytest.raises(AudioDecodeError, match="not on whitelist"):
-        await to_wav16k(listing)
+        await decode(listing)
 
 
 @pytest.mark.parametrize(
@@ -232,7 +311,7 @@ async def test_refuses_a_concat_list_that_points_to_a_local_file(tmp_path):
     ],
 )
 async def test_decodes_every_container_the_service_accepts(tmp_path, name, codec):
-    wav = await to_wav16k(make_audio(tmp_path, name, seconds=1.0, codec=codec))
+    wav = await decode(make_audio(tmp_path, name, seconds=1.0, codec=codec))
     assert abs(wav_duration(wav) - 1.0) < 0.15
 
 
@@ -241,7 +320,7 @@ async def test_decodes_an_amr_file(tmp_path):
     # à 4,75 kbit/s (cinquante trames de vingt millisecondes, un octet d'en-tête et douze octets de données).
     amr = tmp_path / "voice.amr"
     amr.write_bytes(b"#!AMR\n" + (b"\x04" + bytes(12)) * 50)
-    wav = await to_wav16k(amr)
+    wav = await decode(amr)
     assert abs(wav_duration(wav) - 1.0) < 0.15
 
 

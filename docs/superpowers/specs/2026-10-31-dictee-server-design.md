@@ -127,6 +127,8 @@ Sur le banc (60 s d'audio, 2 threads), la transcription en streaming a pris 0,96
 
 NeMo traite les requêtes avec un pool de workers borné et une file d'attente, et répond 429 quand la file est pleine. dictee ne lance qu'une transcription longue à la fois : au-delà de `LONG_AUDIO_SECONDS` d'audio, une requête attend son tour, et les requêtes courtes passent pendant ce temps.
 
+Une transcription longue réserve sa place pendant le décodage, dès que l'audio dépasse `LONG_AUDIO_SECONDS` : une place pour celle qui tourne, une pour celle qui attend. Un troisième envoi long reçoit l'erreur 429 `long_audio_busy`, et dictee n'a pas décodé plus que ce seuil. La place se rend à la fin de la requête, quelle que soit la sortie. Cette borne tient la mémoire de dictee sous sa limite de 512 Mo. Un WAV décodé pèse 32 000 octets par seconde, soit 165 Mio pour les 90 minutes que dictee accepte. Le socle mesuré du conteneur (101 Mio), deux WAV de 90 minutes et le troisième envoi arrêté au seuil (18 Mio) font environ 450 Mio. En mode locuteurs, le décodage s'arrête à 59 minutes, et le WAV part vers NeMo par morceaux, sans seconde copie en mémoire.
+
 ## 5. API
 
 ### 5.1 Routes

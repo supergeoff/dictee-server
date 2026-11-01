@@ -8,6 +8,7 @@ elle est réduite au silence en DEBUG (voir `_WEBSOCKETS_LOGGER`).
 import asyncio
 import json
 import logging
+import secrets
 from collections.abc import AsyncIterator, Buffer
 
 import httpx
@@ -33,6 +34,8 @@ CLOSE_TIMEOUT = 1.0
 DIARIZE_TIMEOUT = 1200.0
 SPEECH_TIMEOUT = 120.0
 MODELS_TIMEOUT = 10.0
+# Taille des morceaux d'un WAV envoyé à la diarisation : la mémoire de l'envoi ne dépend pas de la durée de l'audio.
+UPLOAD_CHUNK_SIZE = 64 * 1024
 
 _DELTA = "conversation.item.input_audio_transcription.delta"
 _COMPLETED = "conversation.item.input_audio_transcription.completed"
@@ -102,6 +105,14 @@ def _final(event: dict) -> Final:
         Word(text=word["word"], start=float(word["start"]), end=float(word["end"])) for word in event.get("words") or ()
     )
     return Final(text=event["transcript"], words=words)
+
+
+async def _blocks(head: bytes, wav: memoryview, tail: bytes) -> AsyncIterator[bytes]:
+    """Le corps d'un envoi : `head`, le WAV par morceaux de `UPLOAD_CHUNK_SIZE` octets, puis `tail`."""
+    yield head
+    for start in range(0, len(wav), UPLOAD_CHUNK_SIZE):
+        yield bytes(wav[start : start + UPLOAD_CHUNK_SIZE])
+    yield tail
 
 
 def _error_message(response: httpx.Response) -> str:
@@ -200,13 +211,18 @@ class NemoClient:
                 await asyncio.gather(sender, return_exceptions=True)
             await ws.close()
 
-    async def _request(self, method: str, path: str, *, timeout: float, **kwargs) -> httpx.Response:
-        """Appel d'une route HTTP de NeMo : 429 donne `NemoOverloaded`, un échec de transport `NemoUnavailable`."""
+    async def _request(
+        self, method: str, path: str, *, timeout: float, headers: dict[str, str] | None = None, **kwargs
+    ) -> httpx.Response:
+        """Appel d'une route HTTP de NeMo : 429 donne `NemoOverloaded`, un échec de transport `NemoUnavailable`.
+
+        `headers` s'ajoute à l'en-tête d'authentification.
+        """
         try:
             response = await self._http.request(
                 method,
                 self._base_url + path,
-                headers=self._headers,
+                headers={**self._headers, **(headers or {})},
                 timeout=httpx.Timeout(timeout, connect=OPEN_TIMEOUT),
                 **kwargs,
             )
@@ -221,16 +237,29 @@ class NemoClient:
     async def diarize(self, wav: Buffer) -> list[Turn]:
         """Tours de parole d'un WAV, en mode `streaming`, adapté aux longs fichiers.
 
-        Un `bytearray` (le décodage de `to_wav16k`) est copié en `bytes` avant l'envoi, car le formulaire multipart
-        de `httpx` n'accepte pas les `bytearray`. Passer des `bytes` évite la copie.
+        Le formulaire multipart est écrit ici et non par `httpx` : celui-ci n'accepte pas un `bytearray` (le décodage
+        de `to_wav16k`) et en ferait une copie en `bytes`, soit 110 Mio de plus pour une heure d'audio, pendant que
+        dictee en garde déjà un exemplaire. Le WAV part en morceaux de `UPLOAD_CHUNK_SIZE` octets pris dans une vue
+        du tampon, sans autre copie que celle du morceau en cours. Le corps annonce sa taille exacte
+        (`Content-Length`) au lieu de passer par l'encodage `chunked`.
         """
-        payload = wav if isinstance(wav, bytes) else bytes(wav)
+        boundary = secrets.token_hex(16)
+        head = (
+            f'--{boundary}\r\nContent-Disposition: form-data; name="mode"\r\n\r\nstreaming\r\n'
+            f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.wav"\r\n'
+            "Content-Type: audio/wav\r\n\r\n"
+        ).encode()
+        tail = f"\r\n--{boundary}--\r\n".encode()
+        view = memoryview(wav).cast("B")
         response = await self._request(
             "POST",
             "/v1/audio/diarizations",
             timeout=DIARIZE_TIMEOUT,
-            files={"file": ("audio.wav", payload, "audio/wav")},
-            data={"mode": "streaming"},
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Content-Length": str(len(head) + len(view) + len(tail)),
+            },
+            content=_blocks(head, view, tail),
         )
         return [
             Turn(start=float(segment["start"]), end=float(segment["end"]), speaker=int(segment["speaker"]))

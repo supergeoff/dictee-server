@@ -1,3 +1,4 @@
+import contextlib
 import dataclasses
 import functools
 import json
@@ -12,6 +13,7 @@ from conftest import make_audio, wait_until
 from fakes import FINALS, FakeNemo
 from starlette.testclient import TestClient
 
+from dictee import audio as audio_module
 from dictee import transcribe
 from dictee.app import create_app
 from dictee.errors import ApiError
@@ -513,12 +515,13 @@ def test_audio_over_the_duration_limit_is_400(ask, fake_nemo, monkeypatch):
     assert fake_nemo.calls == []
 
 
-def test_speaker_separation_has_its_own_duration_limit(ask, monkeypatch):
+def test_speaker_separation_has_its_own_duration_limit(ask, fake_nemo, monkeypatch):
     monkeypatch.setattr(transcribe, "MAX_DIARIZE_SECONDS", 1.0)
     assert ask().status_code == 200
     r = ask(model="dictee-diarize")
     assert r.status_code == 400 and r.json()["error"]["code"] == "audio_too_long"
     assert ask(response_format="diarized_json").status_code == 400
+    assert len(fake_nemo.calls) == 1  # seul le premier envoi a atteint NeMo
 
 
 def test_each_upload_lives_alone_in_a_directory_removed_afterwards(
@@ -701,18 +704,82 @@ def test_model_name_cannot_forge_a_log_line(caplog, ask):
     assert "\n" not in line and len(line) < 250
 
 
+@contextlib.asynccontextmanager
+async def slot(gate: LongAudioGate, duration_s: float):
+    """Le passage d'un audio de `duration_s` secondes par la porte, comme la route le fait.
+
+    Un audio court ne passe pas par la porte. Un audio long réserve sa place, attend son tour, et la rend à la sortie.
+    """
+    if duration_s <= gate.threshold_s:
+        yield
+        return
+    async with gate.reserve().turn():
+        yield
+
+
+async def assert_gate_is_free(gate: LongAudioGate) -> None:
+    """Aucune place réservée et aucun tour tenu : deux audios longs sont admis, et le tour est libre."""
+    places = [gate.reserve(), gate.reserve()]  # lève `long_audio_busy` si une place est restée prise
+    for place in places:
+        place.release()
+    with anyio.fail_after(0.5):
+        async with slot(gate, gate.threshold_s + 1):
+            pass
+
+
+def test_the_gate_admits_two_reservations_and_refuses_a_third_until_one_is_released():
+    gate = LongAudioGate(1.0)
+    first, second = gate.reserve(), gate.reserve()
+    assert gate.full
+    with pytest.raises(ApiError) as refused:
+        gate.reserve()
+    assert_long_audio_busy(refused.value)
+    first.release()
+    assert not gate.full
+    third = gate.reserve()
+    assert gate.full
+    second.release()
+    third.release()
+    assert not gate.full
+
+
+def test_releasing_a_place_twice_frees_one_place_only():
+    gate = LongAudioGate(1.0)
+    first, _second = gate.reserve(), gate.reserve()
+    first.release()
+    first.release()
+    gate.reserve()
+    assert gate.full  # la seconde libération de `first` n'a pas rendu la place d'une autre
+
+
+@pytest.mark.anyio
+async def test_a_place_is_given_back_when_its_turn_ends_on_an_error():
+    gate = LongAudioGate(1.0)
+    with pytest.raises(RuntimeError):
+        async with gate.reserve().turn():
+            raise RuntimeError("the recognition failed")
+    await assert_gate_is_free(gate)
+
+
+@pytest.mark.anyio
+async def test_a_place_that_never_took_its_turn_is_given_back_by_release():
+    gate = LongAudioGate(1.0)
+    gate.reserve().release()
+    await assert_gate_is_free(gate)
+
+
 @pytest.mark.anyio
 async def test_gate_lets_short_audio_through_and_serializes_long_audio():
     gate = LongAudioGate(1.0)
-    async with gate.slot(5.0):
+    async with slot(gate, 5.0):
         with anyio.fail_after(0.5):
-            async with gate.slot(1.0):  # pile au seuil : l'audio est court
+            async with slot(gate, 1.0):  # pile au seuil : l'audio est court
                 pass
         with pytest.raises(TimeoutError), anyio.fail_after(0.1):
-            async with gate.slot(5.0):
+            async with slot(gate, 5.0):
                 pass
     with anyio.fail_after(0.5):
-        async with gate.slot(5.0):
+        async with slot(gate, 5.0):
             pass
 
 
@@ -722,7 +789,7 @@ async def test_cancelled_long_request_frees_the_slot():
     holding = anyio.Event()
 
     async def hold():
-        async with gate.slot(5.0):
+        async with slot(gate, 5.0):
             holding.set()
             await anyio.sleep_forever()
 
@@ -731,19 +798,19 @@ async def test_cancelled_long_request_frees_the_slot():
         await holding.wait()
         tg.cancel_scope.cancel()
     with anyio.fail_after(0.5):
-        async with gate.slot(5.0):
+        async with slot(gate, 5.0):
             pass
 
 
 @pytest.mark.anyio
 async def test_waiting_for_the_slot_can_be_cancelled():
     gate = LongAudioGate(1.0)
-    async with gate.slot(5.0):
+    async with slot(gate, 5.0):
         with anyio.move_on_after(0.1):
-            async with gate.slot(5.0):
+            async with slot(gate, 5.0):
                 pytest.fail("the slot is taken")
     with anyio.fail_after(0.5):
-        async with gate.slot(5.0):
+        async with slot(gate, 5.0):
             pass
 
 
@@ -757,18 +824,18 @@ async def test_third_long_request_is_refused_at_once_and_the_waiter_goes_on_afte
     waiter_ran = anyio.Event()
 
     async def wait_for_the_slot():
-        async with gate.slot(5.0):
+        async with slot(gate, 5.0):
             waiter_ran.set()
 
     async with anyio.create_task_group() as tg:
-        async with gate.slot(5.0):
+        async with slot(gate, 5.0):
             tg.start_soon(wait_for_the_slot)
             await wait_until(lambda: gate.full)
             with anyio.fail_after(0.5), pytest.raises(ApiError) as refused:
-                async with gate.slot(5.0):
+                async with slot(gate, 5.0):
                     pytest.fail("a third long request must not be admitted")
             assert_long_audio_busy(refused.value)
-            async with gate.slot(1.0):  # un audio court passe, même quand les places des longs sont prises
+            async with slot(gate, 1.0):  # un audio court passe, même quand les places des longs sont prises
                 pass
             assert not waiter_ran.is_set()
         with anyio.fail_after(0.5):
@@ -781,10 +848,10 @@ async def test_cancelled_waiter_frees_its_waiting_place():
     gate = LongAudioGate(1.0)
 
     async def wait_for_the_slot():
-        async with gate.slot(5.0):
+        async with slot(gate, 5.0):
             pytest.fail("the slot is taken")
 
-    async with gate.slot(5.0):
+    async with slot(gate, 5.0):
         async with anyio.create_task_group() as tg:
             tg.start_soon(wait_for_the_slot)
             await wait_until(lambda: gate.full)
@@ -792,7 +859,7 @@ async def test_cancelled_waiter_frees_its_waiting_place():
         assert not gate.full
         # La place d'attente est libre : un autre audio long l'obtient, il n'est pas refusé.
         with anyio.move_on_after(0.1) as waiting:
-            async with gate.slot(5.0):
+            async with slot(gate, 5.0):
                 pytest.fail("the slot is taken")
         assert waiting.cancelled_caught
     assert not gate.full
@@ -915,9 +982,7 @@ async def test_client_hanging_up_closes_the_session_and_frees_the_slot(
         await wait_until(lambda: nemo.calls)
         hung_up.set()
         await wait_until(lambda: nemo.sessions_closed == 1)
-    with anyio.fail_after(0.5):
-        async with app.state.gate.slot(3.0):
-            pass
+    await assert_gate_is_free(app.state.gate)
     lines = [record.getMessage() for record in caplog.records if record.name == "dictee"]
     assert len(lines) == 1 and lines[0].endswith("status=499")
 
@@ -963,9 +1028,7 @@ async def test_client_hanging_up_mid_stream_closes_the_session_and_frees_the_slo
         assert sent[0]["type"] == "http.response.start" and sent[0]["status"] == 200
         hung_up.set()
         await wait_until(lambda: nemo.sessions_closed == 1)
-    with anyio.fail_after(0.5):
-        async with app.state.gate.slot(3.0):
-            pass
+    await assert_gate_is_free(app.state.gate)
     lines = [record.getMessage() for record in caplog.records if record.name == "dictee"]
     assert len(lines) == 1 and lines[0].endswith("status=499")
 
@@ -995,32 +1058,38 @@ async def test_client_hanging_up_before_the_stream_starts_still_ends_the_recogni
         tg.start_soon(functools.partial(call_app, app, headers, body, hung_up, sent=sent, on_send=hang_up_at_the_start))
         await wait_until(lambda: nemo.sessions_closed == 1)
     assert [message["type"] for message in sent] == ["http.response.start"]
-    with anyio.fail_after(0.5):
-        async with app.state.gate.slot(3.0):
-            pass
+    await assert_gate_is_free(app.state.gate)
     lines = [record.getMessage() for record in caplog.records if record.name == "dictee"]
     assert len(lines) == 1 and lines[0].endswith("status=499")
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("stream", ["false", "true"])
-@pytest.mark.parametrize("while_decoding", [True, False], ids=["refused-while-decoding", "refused-at-the-gate"])
-async def test_third_concurrent_long_request_is_429_at_once(
-    stream, while_decoding, caplog, settings, fake_llm, service_headers, tmp_path, monkeypatch
+async def test_third_concurrent_long_request_is_429_while_decoding_and_decodes_no_further(
+    stream, caplog, settings, fake_llm, service_headers, tmp_path, monkeypatch
 ):
     release = anyio.Event()
     nemo = FakeNemo(finals=FINALS, release=release)
     app = app_with(settings, nemo, fake_llm, long_audio_seconds=1.0)
     audio = make_audio(tmp_path, "long.mp3", seconds=3.0).read_bytes()
-    limits = []
+    decodes = []
     convert = transcribe.to_wav16k
 
     async def spy(path, **kwargs):
-        limits.append(kwargs["max_seconds"])
-        if not while_decoding:
-            # Le décodage ne bornerait plus rien : le refus vient alors de la porte, à l'entrée de NeMo.
-            kwargs["max_seconds"] = transcribe.MAX_AUDIO_SECONDS
-        return await convert(path, **kwargs)
+        decode = {"max_seconds": kwargs["max_seconds"], "long_seconds": kwargs["long_seconds"], "past": None}
+        decodes.append(decode)
+        reserve = kwargs["on_long"]
+
+        def on_long():
+            # Le rappel est celui de la route : il réserve la place, ou refuse, et le décodage s'arrête alors.
+            try:
+                reserve()
+            except ApiError:
+                decode["past"] = False
+                raise
+            decode["past"] = True
+
+        return await convert(path, **{**kwargs, "on_long": on_long})
 
     monkeypatch.setattr(transcribe, "to_wav16k", spy)
     caplog.set_level(logging.INFO, logger="dictee")
@@ -1054,6 +1123,104 @@ async def test_third_concurrent_long_request_is_429_at_once(
     }
     assert [answers["runner"].status_code, answers["waiter"].status_code] == [200, 200]
     assert len(nemo.calls) == 2  # le refusé n'a jamais atteint NeMo
-    assert limits == [transcribe.MAX_AUDIO_SECONDS] * 2 + [1.0]
+    # Deux décodages seulement passent le seuil : le troisième est refusé à ce moment, et n'est jamais allé plus loin.
+    assert [decode["past"] for decode in decodes] == [True, True, False]
+    assert {decode["long_seconds"] for decode in decodes} == {1.0}
+    assert {decode["max_seconds"] for decode in decodes} == {transcribe.MAX_AUDIO_SECONDS}
     statuses = [record.getMessage().rsplit("status=", 1)[1] for record in caplog.records if record.name == "dictee"]
     assert sorted(statuses) == ["200", "200", "429"]
+    await assert_gate_is_free(app.state.gate)
+
+
+# Cas de sortie d'une requête longue : options du faux NeMo, champs du formulaire, plafonds remplacés, statut attendu.
+EXITS = {
+    "done": ({}, {}, {}, 200),
+    "stream": ({}, {"stream": "true"}, {}, 200),
+    "nemo-fails": ({"error": NemoUnavailable("down")}, {}, {}, 502),
+    "stream-nemo-fails": ({"error": NemoUnavailable("down")}, {"stream": "true"}, {}, 502),
+    "too-long": ({}, {}, {"MAX_AUDIO_SECONDS": 2.9}, 400),
+    "diarize-too-long": ({}, {"model": "dictee-diarize"}, {"MAX_DIARIZE_SECONDS": 2.9}, 400),
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("nemo_options", "fields", "limits", "status"), EXITS.values(), ids=EXITS.keys())
+async def test_the_place_is_given_back_whatever_the_exit(
+    nemo_options, fields, limits, status, settings, fake_llm, service_headers, tmp_path, monkeypatch
+):
+    # Lectures de 8 Kio : l'audio de 3 s passe le seuil (1 s) bien avant les plafonds de 2,9 s des cas « too-long ».
+    monkeypatch.setattr(audio_module, "DECODE_READ_SIZE", 8192)
+    for name, value in limits.items():
+        monkeypatch.setattr(transcribe, name, value)
+    app = app_with(settings, FakeNemo(finals=FINALS, **nemo_options), fake_llm, long_audio_seconds=1.0)
+    admitted = []
+    convert = transcribe.to_wav16k
+
+    async def spy(path, **kwargs):
+        reserve = kwargs["on_long"]
+
+        def on_long():
+            reserve()
+            admitted.append(True)  # le décodage a passé le seuil et réservé une place avant de sortir
+
+        return await convert(path, **{**kwargs, "on_long": on_long})
+
+    monkeypatch.setattr(transcribe, "to_wav16k", spy)
+    audio = make_audio(tmp_path, "long.mp3", seconds=3.0).read_bytes()
+    async with asgi_client(app) as client:
+        answer = await client.post(
+            URL, headers=service_headers, files={"file": ("a.mp3", audio)}, data={"model": "dictee", **fields}
+        )
+    assert answer.status_code == status
+    assert admitted == [True]
+    await assert_gate_is_free(app.state.gate)
+
+
+@pytest.fixture(scope="module")
+def long_mp3(tmp_path_factory):
+    """Deux cents secondes de sinus en MP3 : plus que les plafonds remplacés par les tests de message."""
+    return make_audio(tmp_path_factory.mktemp("long"), "long.mp3", seconds=200.0).read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("fields", "constant", "limit", "message"),
+    [
+        ({}, "MAX_AUDIO_SECONDS", 120.0, "The audio is longer than 2 minutes."),
+        (
+            {"model": "dictee-diarize"},
+            "MAX_DIARIZE_SECONDS",
+            180.0,
+            "Speaker separation accepts audio up to 3 minutes.",
+        ),
+    ],
+    ids=["transcription", "speakers"],
+)
+def test_the_duration_limit_messages_follow_the_constants(ask, long_mp3, monkeypatch, fields, constant, limit, message):
+    monkeypatch.setattr(transcribe, constant, limit)
+    r = ask(long_mp3, **fields)
+    assert r.status_code == 400
+    assert r.json()["error"]["message"] == message
+    assert r.json()["error"]["code"] == "audio_too_long"
+
+
+def test_the_decoding_is_bounded_by_the_limit_of_the_mode(
+    settings, fake_nemo, fake_llm, service_headers, tone_mp3, monkeypatch
+):
+    seen = []
+    convert = transcribe.to_wav16k
+
+    async def spy(path, **kwargs):
+        seen.append((kwargs["max_seconds"], kwargs["long_seconds"]))
+        return await convert(path, **kwargs)
+
+    monkeypatch.setattr(transcribe, "to_wav16k", spy)
+    with TestClient(app_with(settings, fake_nemo, fake_llm, long_audio_seconds=120.0)) as client:
+        for fields in (
+            {},
+            {"model": "dictee-clean"},
+            {"model": "dictee-diarize"},
+            {"response_format": "diarized_json"},
+        ):
+            assert post(client, service_headers, tone_mp3, **fields).status_code == 200
+    raw, diarize = (transcribe.MAX_AUDIO_SECONDS, 120.0), (transcribe.MAX_DIARIZE_SECONDS, 120.0)
+    assert seen == [raw, raw, diarize, diarize]
