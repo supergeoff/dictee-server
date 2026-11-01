@@ -1,9 +1,12 @@
+# Build commun de models et nemo : la même image, donc la même version de NeMo-Speech.cpp, écrite une seule fois.
+x-nemo-build: &nemo-build
+  context: https://github.com/supergeoff/dictee-server.git#main:nemo
+  args:
+    NEMO_VERSION: "0.3.0"
+
 services:
   models:
-    build:
-      context: https://github.com/supergeoff/dictee-server.git#main:nemo
-      args:
-        NEMO_VERSION: "0.3.0"
+    build: *nemo-build
     restart: "no"
     env_file: .env
     command: ["pull-models.sh"]
@@ -14,10 +17,7 @@ services:
         limits:
           memory: 512M
   nemo:
-    build:
-      context: https://github.com/supergeoff/dictee-server.git#main:nemo
-      args:
-        NEMO_VERSION: "0.3.0"
+    build: *nemo-build
     restart: unless-stopped
     env_file: .env
     command: ["serve.sh"]
