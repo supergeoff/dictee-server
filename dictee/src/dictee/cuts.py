@@ -33,7 +33,7 @@ class Silence:
 
     @property
     def middle(self) -> float:
-        """Le milieu du silence, où la coupe tombe le plus loin de ses deux bords."""
+        """Le milieu du silence : une coupe y est le plus loin possible de la parole des deux côtés."""
         return (self.start + self.end) / 2
 
 
@@ -107,8 +107,8 @@ def _next_cut(middles: Sequence[float], start: float) -> float:
     plus tôt à égalité ; sans milieu dans cette fenêtre, c'est `start` plus 30 s.
     """
 
-    # Les écarts sont comparés tels que l'appelant les calculera, par une soustraction : une coupe retenue ne donne
-    # jamais un morceau de plus de 40 s ni de moins de 20 s à un arrondi près du calcul de `start + 40`.
+    # La fenêtre se mesure par la soustraction que l'appelant fera pour la durée du morceau (`fin - début`) : une
+    # coupe retenue donne exactement un morceau de 20 à 40 s, sans l'arrondi qu'ajouterait un calcul de `start + 40`.
     def since_start(middle: float) -> float:
         return middle - start
 
@@ -123,10 +123,11 @@ def _next_cut(middles: Sequence[float], start: float) -> float:
 
 
 def plan_cuts(duration: float, silences: Sequence[Silence]) -> list[float]:
-    """Les points de coupe, en secondes, d'un audio de `duration` secondes : chaque morceau fait de 20 à 40 s.
+    """Les points de coupe, en secondes, d'un audio de `duration` secondes : aucun morceau ne dépasse 40 s.
 
     Tant que le reste de l'audio dépasse 40 s, le morceau en cours se coupe dans le silence dont le milieu est le plus
     proche de 30 s après son début, ou à 30 s sans silence entre 20 et 40 s. Un audio de 40 s ou moins n'a aucune coupe.
+    Chaque morceau fait de 20 à 40 s, sauf le dernier, qui prend ce qui reste et peut être plus court.
     """
     middles = sorted(silence.middle for silence in silences)
     cuts: list[float] = []
