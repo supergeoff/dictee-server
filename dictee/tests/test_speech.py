@@ -250,27 +250,28 @@ def test_app_starts_without_the_voices_of_nemo(settings):
 
 
 def test_voices_are_read_once_and_kept_in_the_app_state(say, fake_nemo, transcriptions_client):
-    assert say(voice="leo").status_code == 200
+    assert say(voice="aria").status_code == 200
     assert say(voice="john").status_code == 200
     assert len(fake_nemo.voices_calls) == 1
-    assert [call["voice"] for call in fake_nemo.speak_calls] == ["Leo", "John"]
+    assert [call["voice"] for call in fake_nemo.speak_calls] == ["Aria", "John"]
     assert transcriptions_client.app.state.voices == ("John", "Sofia", "Aria", "Jason", "Leo")
 
 
 @pytest.mark.parametrize("error,status", [(NemoOverloaded("busy"), 429), (NemoUnavailable("down"), 502)])
 def test_failed_voice_lookup_is_a_429_or_502_and_is_not_kept(say, fake_nemo, error, status):
     fake_nemo.error = error
-    assert say(voice="leo").status_code == status
+    assert say(voice="aria").status_code == status
     fake_nemo.error = None
-    assert say(voice="leo").status_code == 200
+    assert say(voice="aria").status_code == 200
     assert len(fake_nemo.voices_calls) == 2
-    assert [call["voice"] for call in fake_nemo.speak_calls] == ["Leo"]
+    assert [call["voice"] for call in fake_nemo.speak_calls] == ["Aria"]
 
 
 def test_requested_voice_is_matched_without_regard_to_case(say, fake_nemo):
-    for requested in ("leo", "LEO", "Leo"):
+    # Pas le défaut (Leo) : si la comparaison sans casse cassait, le repli ne masquerait pas l'échec.
+    for requested in ("aria", "ARIA", "Aria"):
         assert say(voice=requested).status_code == 200
-    assert [call["voice"] for call in fake_nemo.speak_calls] == ["Leo"] * 3
+    assert [call["voice"] for call in fake_nemo.speak_calls] == ["Aria"] * 3
 
 
 def test_unknown_or_missing_voice_takes_the_voice_of_the_profile(transcriptions_client, fake_nemo, db):

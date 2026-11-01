@@ -10,11 +10,12 @@ Usage : uv run --script integration/boost.py
 Sofia dit quatre phrases qui contiennent chacune un terme rare (Nemotron, Sortformer, Magpie, Starlette) et une phrase
 témoin qui n'en contient aucun. Chaque phrase passe seule dans une session temps réel de NeMo, par
 `integration/nemo_rt.py`, sans renforcement (force 0) puis avec chaque force de FORCES, les quatre termes formant le
-glossaire. Tout le balayage est joué PASSES fois, pour voir si le résultat est stable.
+glossaire. Tout le balayage est joué SWEEPS fois, pour voir si le résultat est stable.
 
 Pour chaque force le script affiche le nombre de termes rares reconnus sur 4, les termes apparus à tort dans la phrase
 témoin, la stabilité entre les passes et le texte transcrit de chaque phrase. Il termine par la plus petite force qui
-reconnaît les quatre termes sans rien insérer dans la phrase témoin, ou dit qu'aucune ne le fait.
+reconnaît les quatre termes sans rien insérer dans la phrase témoin, ou dit qu'aucune ne le fait. Une phrase témoin
+transcrite en texte vide compte comme un échec, pas comme une phrase sans insertion.
 
 Un terme est reconnu s'il figure comme mot, sans tenir compte de la casse ni des accents, dans la transcription de sa
 propre phrase. Un terme est inséré s'il figure, sous la même règle de casse et d'accents, n'importe où dans la
@@ -49,10 +50,10 @@ LABELS = [*TERMS, CONTROL_LABEL]
 # Force 0 : aucune liste `speech_contexts`, donc aucun renforcement. À 6 et 10 le terme renforcé remplace d'autres
 # mots (relevé de la tâche 1) : le balayage s'arrête à 6.
 FORCES = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
-PASSES = 2
+SWEEPS = 2
 COMPLETED = "conversation.item.input_audio_transcription.completed"
 
-# transcripts[passe][force][étiquette] -> texte transcrit
+# transcripts[sweep][force][étiquette] -> texte transcrit
 Transcripts = list[dict[float, dict[str, str]]]
 
 
@@ -88,24 +89,31 @@ def score(texts: dict[str, str]) -> tuple[int, list[str]]:
     return found, inserted(texts[CONTROL_LABEL])
 
 
+def control_ok(text: str) -> bool:
+    """La phrase témoin est transcrite et n'a reçu aucun terme du glossaire."""
+    return bool(text.strip()) and not inserted(text)
+
+
 def meets_criterion(texts: dict[str, str]) -> bool:
-    found, extra = score(texts)
-    return found == len(TERMS) and not extra
+    found, _ = score(texts)
+    return found == len(TERMS) and control_ok(texts[CONTROL_LABEL])
 
 
 def cell(texts: dict[str, str]) -> tuple[str, str]:
     found, extra = score(texts)
+    if not texts[CONTROL_LABEL].strip():
+        return f"{found}/{len(TERMS)}", "témoin vide"
     return f"{found}/{len(TERMS)}", f"{len(extra)} ({', '.join(extra)})" if extra else "0"
 
 
 def print_table(transcripts: Transcripts) -> None:
     print("\nTABLEAU (une colonne par passe ; stable = textes identiques sur les cinq phrases entre les passes)")
-    numbers = range(1, PASSES + 1)
+    numbers = range(1, SWEEPS + 1)
     head = ["force", *[f"reconnus p{n}" for n in numbers], *[f"insérés p{n}" for n in numbers], "stable"]
     rows = []
     for force in FORCES:
-        cells = [cell(passe[force]) for passe in transcripts]
-        stable = all(passe[force] == transcripts[0][force] for passe in transcripts)
+        cells = [cell(sweep[force]) for sweep in transcripts]
+        stable = all(sweep[force] == transcripts[0][force] for sweep in transcripts)
         rows.append([f"{force:.1f}", *[c[0] for c in cells], *[c[1] for c in cells], "oui" if stable else "NON"])
     widths = [max(len(row[i]) for row in [head, *rows]) for i in range(len(head))]
     for row in [head, *rows]:
@@ -119,11 +127,11 @@ def print_texts(transcripts: Transcripts) -> None:
         print(f"  {label:<10} {CONTROL if label == CONTROL_LABEL else SENTENCES[label]}")
     for force in FORCES:
         print(f"\nForce {force:.1f}" + (" (sans renforcement)" if force == 0 else ""))
-        for number, passe in enumerate(transcripts, start=1):
+        for number, sweep in enumerate(transcripts, start=1):
             print(f"  passe {number}")
             for label in LABELS:
-                text = passe[force][label]
-                mark = recognized(label, text) if label != CONTROL_LABEL else not inserted(text)
+                text = sweep[force][label]
+                mark = recognized(label, text) if label != CONTROL_LABEL else control_ok(text)
                 print(f"    {label:<10} {'ok ' if mark else 'KO '} {text}")
 
 
@@ -132,7 +140,7 @@ def print_differences(transcripts: Transcripts) -> None:
     differences = 0
     for force in FORCES:
         for label in LABELS:
-            variants = [passe[force][label] for passe in transcripts]
+            variants = [sweep[force][label] for sweep in transcripts]
             if len(set(variants)) > 1:
                 differences += 1
                 print(f"  force {force:.1f}, {label} :")
@@ -143,18 +151,22 @@ def print_differences(transcripts: Transcripts) -> None:
 
 
 def print_verdict(transcripts: Transcripts) -> None:
-    print("\nCRITÈRE : les quatre termes reconnus et aucun terme inséré dans la phrase témoin")
-    baseline = [meets_criterion(passe[0.0]) for passe in transcripts]
+    print("\nCRITÈRE : les quatre termes reconnus, la phrase témoin transcrite et sans terme inséré")
+    baseline = [meets_criterion(sweep[0.0]) for sweep in transcripts]
     if all(baseline):
         print("  Attention : la force 0 (sans renforcement) remplit déjà le critère dans toutes les passes.")
     elif any(baseline):
         print("  Attention : la force 0 (sans renforcement) remplit le critère dans une passe seulement.")
     smallest = None
     for force in FORCES[1:]:
-        passes = [meets_criterion(passe[force]) for passe in transcripts]
-        verdict = "toutes les passes" if all(passes) else "une passe seulement" if any(passes) else "aucune passe"
+        ok_per_sweep = [meets_criterion(sweep[force]) for sweep in transcripts]
+        verdict = "aucune passe"
+        if all(ok_per_sweep):
+            verdict = "toutes les passes"
+        elif any(ok_per_sweep):
+            verdict = "une passe seulement"
         print(f"  force {force:.1f} : critère rempli dans {verdict}")
-        if smallest is None and all(passes):
+        if smallest is None and all(ok_per_sweep):
             smallest = force
     if smallest is None:
         print("PLUS PETITE FORCE RETENUE : aucune ne remplit le critère dans toutes les passes")
@@ -170,7 +182,7 @@ def main() -> int:
         pcms[label] = nemo_rt.synth(text, VOICE, RATE)
         print(f"synthèse {label} : {len(pcms[label]) / (RATE * 2):.1f} s d'audio", flush=True)
     transcripts: Transcripts = []
-    for number in range(1, PASSES + 1):
+    for number in range(1, SWEEPS + 1):
         sweep: dict[float, dict[str, str]] = {}
         for force in FORCES:
             force_started = time.monotonic()
