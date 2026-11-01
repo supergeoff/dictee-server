@@ -142,6 +142,12 @@ def service_headers(settings):
     return {"Authorization": f"Bearer {settings.openwebui_service_key}"}
 
 
+def personal_headers(db: Database, email: str) -> tuple[dict[str, str], int]:
+    """Crée le compte de `email` avec une clé personnelle ; rend les en-têtes d'un appel à son nom et son numéro."""
+    user_id = db.upsert_user(f"sub-{email}", email, email.partition("@")[0])
+    return {"Authorization": f"Bearer {db.create_key(user_id, 'tests')}"}, user_id
+
+
 @pytest.fixture
 def client(settings):
     # Le bloc `with` déclenche le démarrage et l'arrêt de l'app (lifespan).

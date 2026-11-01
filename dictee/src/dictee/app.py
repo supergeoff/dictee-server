@@ -21,6 +21,7 @@ from dictee.processing import Services
 from dictee.runner import LongLane, TaskRunner
 from dictee.settings import Settings
 from dictee.speech import speech
+from dictee.tasks_api import cancel_task, get_task
 from dictee.taskstore import TaskStore
 from dictee.transcribe import LongAudioGate, transcriptions
 from dictee.web import (
@@ -102,6 +103,8 @@ def create_app(settings: Settings, *, nemo=None, http: httpx.AsyncClient | None 
             Route("/health", health),
             Route("/v1/models", list_models),
             Route("/v1/audio/transcriptions", transcriptions, methods=["POST"]),
+            Route("/v1/audio/transcriptions/{task_id}", get_task),
+            Route("/v1/audio/transcriptions/{task_id}/cancel", cancel_task, methods=["POST"]),
             Route("/v1/audio/speech", speech, methods=["POST"]),
         ],
         middleware=[
