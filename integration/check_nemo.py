@@ -54,15 +54,18 @@ def note(text: str) -> None:
     print(f"   {text}", flush=True)
 
 
+def compose_base() -> list[str]:
+    """Le binaire compose : `COMPOSE` s'il est fixé, sinon le plugin `docker compose`, sinon `docker-compose`."""
+    if os.environ.get("COMPOSE"):
+        return os.environ["COMPOSE"].split()
+    if subprocess.run(["docker", "compose", "version"], capture_output=True).returncode == 0:
+        return ["docker", "compose"]
+    return ["docker-compose"]
+
+
 def compose(*args: str) -> subprocess.CompletedProcess[str]:
     """Lance docker compose (plugin) ou docker-compose (binaire seul) sur les deux fichiers."""
-    if os.environ.get("COMPOSE"):
-        base = os.environ["COMPOSE"].split()
-    elif subprocess.run(["docker", "compose", "version"], capture_output=True).returncode == 0:
-        base = ["docker", "compose"]
-    else:
-        base = ["docker-compose"]
-    cmd = [*base, "-f", "compose.yaml", "-f", "compose.integration.yaml", *args]
+    cmd = [*compose_base(), "-f", "compose.yaml", "-f", "compose.integration.yaml", *args]
     return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
 
 
