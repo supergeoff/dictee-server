@@ -1,4 +1,4 @@
-"""Client de NeMo-Speech.cpp : transcription en continu, synthèse et liste des voix.
+"""Client de NeMo-Speech.cpp : transcription en continu ou par morceaux, synthèse, liste des voix et disponibilité.
 
 Rien n'est journalisé ici : ni le texte transcrit, ni le texte à dire, ni l'audio. Les messages des exceptions ne
 reprennent que ce que NeMo dit de son propre fonctionnement. La bibliothèque `websockets` journalise elle aussi, mais
@@ -39,6 +39,12 @@ SPEAKER_KEY = "speaker"
 CLOSE_TIMEOUT = 1.0
 SPEECH_TIMEOUT = 120.0
 MODELS_TIMEOUT = 10.0
+# Lecture de la réponse d'un morceau. Un morceau de 30 s prend 7,5 à 8,5 s seul chez NeMo, mais NeMo met en file les
+# requêtes simultanées : 16 requêtes envoyées ensemble finissent en 127,7 s (mesuré en tâche 1). Le délai doit couvrir
+# cette attente dans la file : une requête abandonnée avant sa réponse serait renvoyée alors que NeMo la traite
+# encore, et la file s'allongerait de doublons.
+CHUNK_TIMEOUT = 600.0
+READY_TIMEOUT = 5.0
 
 _DELTA = "conversation.item.input_audio_transcription.delta"
 _COMPLETED = "conversation.item.input_audio_transcription.completed"
@@ -156,7 +162,7 @@ def _error_message(response: httpx.Response) -> str:
 
 
 class NemoClient:
-    """Les trois appels de dictee à NeMo ; `http` est le client HTTP partagé de l'app."""
+    """Les appels de dictee à NeMo ; `http` est le client HTTP partagé de l'app."""
 
     def __init__(self, base_url: str, api_key: str, http: httpx.AsyncClient) -> None:
         self._base_url = base_url.rstrip("/")
@@ -289,3 +295,46 @@ class NemoClient:
             if model.get("capability") == "speech":
                 return list(model["voices"])
         raise NemoError("NeMo lists no speech model")
+
+    async def transcribe_chunk(self, wav: bytes, *, language: str, phrases: Sequence[str], boost: float) -> Final:
+        """Transcrit un morceau de WAV par la route REST `POST /v1/audio/transcriptions` ; rend son `Final`.
+
+        Le corps multipart est construit en mémoire : un morceau ne dépasse pas 40 s, soit 1,3 Mo. Le texte du
+        `Final` est celui de la réponse sans espaces autour, ses mots portent leurs instants et aucune personne. Un
+        morceau muet donne un `Final` au texte vide. Comme pour la session temps réel, le champ `prompt` de NeMo n'est
+        jamais transmis, et `speech_contexts` ne part que s'il y a des termes.
+
+        Lève les erreurs de `_request` (`NemoUnavailable`, `NemoOverloaded`, `NemoError`), et `NemoError` pour une
+        réponse 200 qui n'est pas une transcription lisible. L'attente de la réponse va jusqu'à `CHUNK_TIMEOUT`
+        secondes, file de NeMo comprise.
+        """
+        data = {"language": language, "response_format": "verbose_json", "timestamp_granularities[]": "word"}
+        if phrases:
+            data["speech_contexts"] = json.dumps([{"phrases": list(phrases), "boost": boost}])
+        response = await self._request(
+            "POST",
+            "/v1/audio/transcriptions",
+            timeout=CHUNK_TIMEOUT,
+            files={"file": ("audio.wav", wav, "audio/wav")},
+            data=data,
+        )
+        try:
+            body = response.json()
+            return Final(
+                text=body["text"].strip(),
+                words=tuple(_word(word) for word in body.get("words") or ()),
+            )
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise NemoError("NeMo answered with an unreadable transcription") from None
+
+    async def ready(self) -> bool:
+        """Vrai seulement si `GET /ready` répond 200 avec `ready` à `true` ; toute autre réponse ou panne rend faux.
+
+        Sert à attendre que NeMo redevienne disponible avant de renvoyer un morceau qu'il n'a pas traité.
+        """
+        try:
+            response = await self._request("GET", "/ready", timeout=READY_TIMEOUT)
+            body = response.json()
+        except (NemoUnavailable, NemoOverloaded, NemoError, ValueError):
+            return False
+        return response.status_code == 200 and isinstance(body, dict) and body.get("ready") is True

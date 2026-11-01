@@ -1,4 +1,7 @@
 import asyncio
+import email
+import email.policy
+import io
 import json
 import logging
 import socket
@@ -31,17 +34,27 @@ pytestmark = pytest.mark.anyio
 FIXTURES = Path(__file__).parent / "fixtures" / "nemo"
 
 
-def write_wav(directory: Path, seconds: float) -> Path:
-    """Écrit un WAV PCM16 mono 16 kHz aux octets variés : une trame perdue ou déplacée change le contenu relu."""
-    path = directory / f"audio-{seconds:g}s.wav"
+def wav_bytes(seconds: float) -> bytes:
+    """WAV PCM16 mono 16 kHz aux octets variés : une trame perdue ou déplacée change le contenu relu."""
     count = int(16000 * seconds)
     pcm = struct.pack(f"<{count}h", *((n * 37) % 20000 - 10000 for n in range(count)))
-    with wave.open(str(path), "wb") as out:
-        out.setnchannels(1)
-        out.setsampwidth(2)
-        out.setframerate(16000)
-        out.writeframes(pcm)
+    out = io.BytesIO()
+    with wave.open(out, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(pcm)
+    return out.getvalue()
+
+
+def write_wav(directory: Path, seconds: float) -> Path:
+    """Écrit sur le disque le WAV de `wav_bytes`."""
+    path = directory / f"audio-{seconds:g}s.wav"
+    path.write_bytes(wav_bytes(seconds))
     return path
+
+
+WAV_1S = wav_bytes(1.0)
 
 
 @pytest.fixture
@@ -489,12 +502,32 @@ def envelope(message: str, error_type: str) -> dict:
     return {"error": {"code": None, "message": message, "param": None, "type": error_type}}
 
 
+# Relevé de la route REST de la tâche 1 : la réponse de NeMo à un morceau de 30 s en `verbose_json` avec les mots.
+REST_RECORDED = json.loads((FIXTURES / "rest_transcription.json").read_text())
+
+
 def ok_response(path: str) -> httpx.Response:
     if path == "/v1/audio/speech":
         return httpx.Response(200, content=b"\x01\x00" * 100, headers={"Content-Type": "audio/pcm"})
     if path == "/v1/models":
         return httpx.Response(200, json=json.loads((FIXTURES / "models.json").read_text()))
+    if path == "/v1/audio/transcriptions":
+        return httpx.Response(200, json=REST_RECORDED)
+    if path == "/ready":
+        return httpx.Response(200, json={"ready": True})
     raise AssertionError(f"unexpected route {path}")
+
+
+def parse_form(request: httpx.Request) -> dict[str, list]:
+    """Relit le formulaire multipart d'une requête notée : le texte de chaque champ, les octets du fichier."""
+    head = f"Content-Type: {request.headers['Content-Type']}\r\n\r\n".encode()
+    message = email.message_from_bytes(head + request.content, policy=email.policy.HTTP)
+    form: dict[str, list] = {}
+    for part in message.iter_parts():
+        content = part.get_payload(decode=True)
+        value = content if part.get_filename() else content.decode()
+        form.setdefault(part.get_param("name", header="content-disposition"), []).append(value)
+    return form
 
 
 class Recorder:
@@ -529,6 +562,7 @@ async def http_nemo():
 CALLS = {
     "speak": lambda nemo: nemo.speak("Bonjour.", voice="Leo", language="fr-FR"),
     "voices": lambda nemo: nemo.voices(),
+    "transcribe_chunk": lambda nemo: nemo.transcribe_chunk(WAV_1S, language="fr-FR", phrases=[], boost=1.0),
 }
 
 
@@ -551,10 +585,11 @@ async def test_connect_error_raises_unavailable(http_nemo, call):
     [httpx.ReadTimeout("slow"), httpx.ReadError("reset"), httpx.RemoteProtocolError("disconnected")],
     ids=lambda error: type(error).__name__,
 )
-async def test_timeout_or_lost_connection_raises_unavailable(http_nemo, error):
+@pytest.mark.parametrize("call", CALLS.values(), ids=CALLS.keys())
+async def test_timeout_or_lost_connection_raises_unavailable(http_nemo, call, error):
     nemo = http_nemo(Recorder(error=error))
     with pytest.raises(NemoUnavailable):
-        await nemo.speak("Bonjour.", voice="Leo", language="fr-FR")
+        await call(nemo)
 
 
 @pytest.mark.parametrize(
@@ -568,10 +603,11 @@ async def test_timeout_or_lost_connection_raises_unavailable(http_nemo, error):
     ],
     ids=["envelope", "no envelope"],
 )
-async def test_other_error_status_raises_nemo_error(http_nemo, response, expected):
+@pytest.mark.parametrize("call", CALLS.values(), ids=CALLS.keys())
+async def test_other_error_status_raises_nemo_error(http_nemo, call, response, expected):
     nemo = http_nemo(Recorder(response))
     with pytest.raises(NemoError, match=expected):
-        await nemo.speak("Bonjour.", voice="Leo", language="fr-FR")
+        await call(nemo)
 
 
 async def test_speak_asks_for_pcm(http_nemo):
@@ -612,8 +648,15 @@ async def test_voices_without_a_speech_model_raises_nemo_error(http_nemo):
 
 @pytest.mark.parametrize(
     ("call", "read_timeout"),
-    [(CALLS["speak"], 120.0), (CALLS["voices"], 10.0)],
-    ids=CALLS.keys(),
+    [
+        (CALLS["speak"], 120.0),
+        (CALLS["voices"], 10.0),
+        # Un morceau de 30 s prend 8 s seul chez NeMo, mais 16 morceaux envoyés ensemble mettent 128 s : le délai
+        # couvre la file de NeMo (voir `CHUNK_TIMEOUT`).
+        (CALLS["transcribe_chunk"], 600.0),
+        (lambda nemo: nemo.ready(), 5.0),
+    ],
+    ids=[*CALLS, "ready"],
 )
 async def test_http_calls_set_their_own_timeout(http_nemo, call, read_timeout):
     # Le client HTTP partagé de l'app n'a pas de délai de lecture : chaque appel fixe le sien.
@@ -622,3 +665,118 @@ async def test_http_calls_set_their_own_timeout(http_nemo, call, read_timeout):
     timeout = recorder.requests[0].extensions["timeout"]
     assert timeout["read"] == read_timeout
     assert timeout["connect"] == 10.0
+
+
+# --- Morceaux sur la route REST ---
+
+
+async def test_a_chunk_goes_as_a_multipart_form_for_word_timestamps(http_nemo):
+    recorder = Recorder()
+    await http_nemo(recorder).transcribe_chunk(WAV_1S, language="fr-FR", phrases=[], boost=1.0)
+    [request] = recorder.requests
+    form = parse_form(request)
+    assert request.url.path == "/v1/audio/transcriptions"
+    assert (form["language"], form["response_format"]) == (["fr-FR"], ["verbose_json"])
+    assert form["timestamp_granularities[]"] == ["word"] and form["file"] == [WAV_1S]
+    assert "speech_contexts" not in form and "prompt" not in form
+
+
+async def test_a_chunk_is_sent_as_the_file_audio_wav_with_the_api_key(http_nemo):
+    recorder = Recorder()
+    await http_nemo(recorder).transcribe_chunk(WAV_1S, language="fr-FR", phrases=[], boost=1.0)
+    [request] = recorder.requests
+    assert request.method == "POST"
+    assert request.headers["Authorization"] == "Bearer test-nemo-key"
+    assert b'name="file"; filename="audio.wav"\r\nContent-Type: audio/wav\r\n' in request.content
+
+
+async def test_a_chunk_carries_the_glossary_as_speech_contexts(http_nemo):
+    recorder = Recorder()
+    await http_nemo(recorder).transcribe_chunk(WAV_1S, language="fr-FR", phrases=["Nemotron"], boost=1.0)
+    assert json.loads(parse_form(recorder.requests[0])["speech_contexts"][0]) == [
+        {"phrases": ["Nemotron"], "boost": 1.0}
+    ]
+
+
+async def test_a_chunk_answer_gives_the_text_and_the_timed_words(http_nemo):
+    final = await http_nemo(Recorder()).transcribe_chunk(WAV_1S, language="fr-FR", phrases=[], boost=1.0)
+    assert final.text == REST_RECORDED["text"].strip()
+    assert [(w.text, w.start, w.end) for w in final.words] == [
+        (w["word"], w["start"], w["end"]) for w in REST_RECORDED["words"]
+    ]
+    # Les mots de la route REST ne portent pas de personne.
+    assert all(word.speaker is None for word in final.words)
+
+
+async def test_a_chunk_text_loses_the_spaces_around_it(http_nemo):
+    answer = httpx.Response(200, json={**REST_RECORDED, "text": "  Bonjour à tous.\n", "words": []})
+    final = await http_nemo(Recorder(answer)).transcribe_chunk(WAV_1S, language="fr-FR", phrases=[], boost=1.0)
+    assert final == Final("Bonjour à tous.", ())
+
+
+async def test_a_silent_chunk_gives_an_empty_final(http_nemo):
+    answer = httpx.Response(200, json={"duration": 30, "language": "fr-FR", "task": "transcribe", "text": ""})
+    final = await http_nemo(Recorder(answer)).transcribe_chunk(WAV_1S, language="fr-FR", phrases=[], boost=1.0)
+    assert final == Final("", ())
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx.Response(200, text="<html>not json</html>"),
+        httpx.Response(200, json=["not", "an", "object"]),
+        httpx.Response(200, json={"language": "fr-FR"}),
+        httpx.Response(200, json={"text": None}),
+        httpx.Response(200, json={"text": "Bonjour.", "words": [{"word": "Bonjour."}]}),
+    ],
+    ids=["not json", "not an object", "no text", "null text", "word without times"],
+)
+async def test_a_chunk_answer_that_cannot_be_read_raises_nemo_error(http_nemo, answer):
+    with pytest.raises(NemoError, match="unreadable"):
+        await http_nemo(Recorder(answer)).transcribe_chunk(WAV_1S, language="fr-FR", phrases=[], boost=1.0)
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [(200, {"ready": True}, True), (200, {"ready": False}, False), (503, {"ready": False}, False)],
+)
+async def test_ready_is_true_only_when_nemo_says_so(http_nemo, status, body, expected):
+    assert await http_nemo(Recorder(httpx.Response(status, json=body))).ready() is expected
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx.Response(200, text="ready"),
+        httpx.Response(200, json=["ready"]),
+        httpx.Response(200, json={}),
+        httpx.Response(200, json={"ready": "true"}),
+        httpx.Response(429, json=envelope("queue full", "rate_limit_error")),
+        httpx.Response(500, text="<html>boom</html>"),
+    ],
+    ids=["not json", "not an object", "no key", "text instead of true", "429", "500"],
+)
+async def test_ready_is_false_for_any_other_answer(http_nemo, answer):
+    assert await http_nemo(Recorder(answer)).ready() is False
+
+
+@pytest.mark.parametrize(
+    "error",
+    [httpx.ConnectError("refused"), httpx.ReadTimeout("slow"), httpx.RemoteProtocolError("disconnected")],
+    ids=lambda error: type(error).__name__,
+)
+async def test_ready_is_false_when_the_transport_fails(http_nemo, error):
+    assert await http_nemo(Recorder(error=error)).ready() is False
+
+
+async def test_ready_is_false_when_nemo_is_unreachable():
+    async with httpx.AsyncClient() as http:
+        assert await NemoClient("http://127.0.0.1:9", "key", http).ready() is False
+
+
+async def test_ready_reads_the_ready_route_with_the_api_key(http_nemo):
+    recorder = Recorder()
+    assert await http_nemo(recorder).ready() is True
+    [request] = recorder.requests
+    assert (request.method, request.url.path) == ("GET", "/ready")
+    assert request.headers["Authorization"] == "Bearer test-nemo-key"
