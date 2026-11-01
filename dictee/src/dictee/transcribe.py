@@ -493,7 +493,11 @@ async def _handle(request: Request, trace: Trace) -> Response:
         return Response(status_code=CLIENT_CLOSED)
     if finished.status is TaskStatus.COMPLETED:
         return render(finished.result.transcript(), params.response_format, granularities=params.granularities)
-    raise task_error(finished)
+    error = task_error(finished)
+    if error.code == "server_error":
+        # La requête synchrone, comme un flux, rend une erreur imprévue sans code : le corps reste le même.
+        error = ApiError(error.status, error.message, type=error.type)
+    raise error
 
 
 async def transcriptions(request: Request) -> Response:

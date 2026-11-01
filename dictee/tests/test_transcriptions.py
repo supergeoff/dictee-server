@@ -555,13 +555,9 @@ def test_unexpected_error_is_a_500_that_leaks_nothing(ask, fake_nemo, caplog, st
         delta, event = sse_events(r)
         assert delta["type"] == "transcript.text.delta"
         assert event == {"type": "error", **UNEXPECTED_BODY}
-    elif stream == "true":
+    else:
         assert r.status_code == 500
         assert r.json() == UNEXPECTED_BODY
-    else:
-        # La tâche en échec garde le code `server_error`, que la requête qui l'attend rend (`task_error`).
-        assert r.status_code == 500
-        assert r.json() == {"error": {**UNEXPECTED_BODY["error"], "code": "server_error"}}
     assert marker not in r.text and marker not in caplog.text
     for record in caplog.records:
         assert marker not in record.getMessage()
