@@ -26,7 +26,9 @@ BASE_URL = os.environ.get("NEMO_URL", "http://127.0.0.1:18001")
 
 
 def api_key() -> str:
-    """Lit NEMO_API_KEY dans le .env du dépôt."""
+    """Lit NEMO_API_KEY dans l'environnement, sinon dans le .env du dépôt (un conteneur jetable n'a pas de .env)."""
+    if os.environ.get("NEMO_API_KEY"):
+        return os.environ["NEMO_API_KEY"]
     for line in (ROOT / ".env").read_text().splitlines():
         name, _, value = line.partition("=")
         if name.strip() == "NEMO_API_KEY":
@@ -163,3 +165,109 @@ async def realtime_async(
 def realtime(pcm: bytes, rate: int, phrases: list[str], boost: float, **options) -> list[dict]:
     """Version synchrone de `realtime_async`."""
     return asyncio.run(realtime_async(pcm, rate, phrases, boost, **options))
+
+
+async def scripted_session(
+    session: dict,
+    steps: list[tuple],
+    *,
+    idle_timeout: float = 180.0,
+    frame_seconds: float = 1.0,
+) -> tuple[list[tuple[float, dict]], dict]:
+    """Joue une session temps réel selon `steps` ; rend les événements reçus avec leur instant, et un bilan.
+
+    `session` est le contenu de `session.update` (`sample_rate` compris). Étapes :
+    `("audio", pcm, paced)` envoie le PCM par trames de `frame_seconds`, au rythme réel si `paced` ;
+    `("commit",)` envoie `input_audio_buffer.commit` ; `("wait", type)` attend un nouvel événement de ce type ;
+    `("sleep", secondes)` attend. La session finit quand les étapes sont jouées et qu'il est arrivé autant de
+    `input_audio_buffer.committed` que de commits envoyés, ou sur un `error`, une fermeture ou `idle_timeout`
+    secondes sans événement. Les instants sont comptés depuis l'ouverture. Le bilan porte `seconds`,
+    `ended_by`, `commit_times` (instants des commits envoyés) et `max_gap` (plus long silence entre deux
+    événements reçus, ou entre un commit envoyé et l'événement suivant).
+    """
+    url = BASE_URL.replace("http", "ws", 1) + "/v1/audio/transcriptions/realtime"
+    rate = int(session["sample_rate"])
+    events: list[tuple[float, dict]] = []
+    commit_times: list[float] = []
+    started = time.monotonic()
+    state = {"ended_by": "closed", "committed": 0}
+    arrived = asyncio.Condition()
+
+    def now() -> float:
+        return time.monotonic() - started
+
+    async with connect(url, additional_headers=auth_headers(), max_size=None, ping_interval=None) as ws:
+
+        async def reader() -> None:
+            try:
+                while True:
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=idle_timeout)
+                    except ConnectionClosed:
+                        return
+                    except asyncio.TimeoutError:
+                        state["ended_by"] = "idle"
+                        return
+                    event = json.loads(raw)
+                    async with arrived:
+                        events.append((now(), event))
+                        kind = event.get("type")
+                        if kind == "input_audio_buffer.committed":
+                            state["committed"] += 1
+                        arrived.notify_all()
+                    if kind == "error":
+                        state["ended_by"] = "error"
+                        return
+                    if state.get("done") and state["committed"] >= len(commit_times):
+                        state["ended_by"] = "committed"
+                        return
+            finally:
+                async with arrived:
+                    state["reader_done"] = True
+                    arrived.notify_all()
+
+        async def wait_for(kind: str) -> None:
+            seen = sum(1 for _, event in events if event.get("type") == kind)
+            async with arrived:
+                await arrived.wait_for(
+                    lambda: state.get("reader_done") or sum(1 for _, e in events if e.get("type") == kind) > seen
+                )
+
+        read_task = asyncio.create_task(reader())
+        await ws.send(json.dumps({"type": "session.update", "session": session}))
+        await wait_for("session.updated")
+        frame_bytes = int(rate * frame_seconds) * 2
+        try:
+            for step in steps:
+                if read_task.done():
+                    break
+                if step[0] == "audio":
+                    _, pcm, paced = step
+                    for start in range(0, len(pcm), frame_bytes):
+                        sent = time.monotonic()
+                        await ws.send(pcm[start : start + frame_bytes])
+                        if paced:
+                            await asyncio.sleep(max(0.0, frame_seconds - (time.monotonic() - sent)))
+                elif step[0] == "commit":
+                    commit_times.append(now())
+                    await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                elif step[0] == "wait":
+                    await wait_for(step[1])
+                elif step[0] == "sleep":
+                    await asyncio.sleep(step[1])
+        except ConnectionClosed:
+            state["ended_by"] = "closed"
+        state["done"] = True
+        if not read_task.done() and state["committed"] >= len(commit_times):
+            read_task.cancel()
+        await asyncio.gather(read_task, return_exceptions=True)
+
+    instants = sorted([t for t, _ in events] + commit_times)
+    gaps = [later - earlier for earlier, later in zip(instants, instants[1:])]
+    info = {
+        "seconds": now(),
+        "ended_by": state["ended_by"],
+        "commit_times": commit_times,
+        "max_gap": max(gaps, default=0.0),
+    }
+    return events, info
