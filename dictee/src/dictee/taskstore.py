@@ -1,8 +1,8 @@
 """Registre des tâches de transcription et de leurs morceaux, dans la base SQLite de dictee.
 
 Toutes les dates sont des secondes Unix entières. Les colonnes JSON (glossaire, points de coupe, résultat, mots) sont
-écrites avec des clés triées, donc d'une forme stable. Une tâche finie (réussie, en échec ou annulée) ne change plus :
-elle reste lisible jusqu'à son effacement, `expires_at`.
+écrites avec des clés triées, donc d'une forme stable. Une tâche finie (réussie, en échec ou annulée) garde sa première
+fin : ni `start`, ni `complete`, ni `fail`, ni `cancel` ne la modifient, et elle reste lisible jusqu'à `expires_at`.
 """
 
 import contextlib
