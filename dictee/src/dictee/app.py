@@ -17,8 +17,11 @@ from dictee.db import Database
 from dictee.errors import ApiError, handle_api_error, handle_http_exception, handle_unexpected_error
 from dictee.modes import MODELS
 from dictee.nemo import NemoClient
+from dictee.processing import Services
+from dictee.runner import LongLane, TaskRunner
 from dictee.settings import Settings
 from dictee.speech import speech
+from dictee.taskstore import TaskStore
 from dictee.transcribe import LongAudioGate, transcriptions
 from dictee.web import (
     PreviewCache,
@@ -50,11 +53,16 @@ async def list_models(request: Request) -> JSONResponse:
 def create_app(settings: Settings, *, nemo=None, http: httpx.AsyncClient | None = None) -> Starlette:
     """Construit l'application.
 
-    `settings`, `nemo`, `http`, la base de données, la place des transcriptions longues (`gate`) et les voix de la
-    synthèse (`voices`, `None` jusqu'à la première lecture) sont rangés dans `app.state`. La base s'ouvre à
-    `settings.db_path`, dossier parent créé au besoin. Sans `http`, l'app crée son client à son démarrage et le ferme
-    à son arrêt ; un client fourni reste à la charge de l'appelant. Sans `nemo`, elle crée aussi à son démarrage le
-    client de NeMo, sur ce client HTTP ; `app.state.nemo` reste `None` jusque-là.
+    `settings`, `nemo`, `http`, la base de données, la place des transcriptions longues (`gate`), le registre des tâches
+    (`store`), la file des tâches longues (`lane`) et les voix de la synthèse (`voices`, `None` jusqu'à la première
+    lecture) sont rangés dans `app.state`. La base s'ouvre à `settings.db_path`, dossier parent créé au besoin. Sans
+    `http`, l'app crée son client à son démarrage et le ferme à son arrêt ; un client fourni reste à la charge de
+    l'appelant. Sans `nemo`, elle crée aussi à son démarrage le client de NeMo, sur ce client HTTP ; `app.state.nemo`
+    reste `None` jusque-là.
+
+    Le démarrage crée `settings.tasks_dir`, range dans `app.state.runner` le `TaskRunner` qui travaille sur ces deux
+    clients, et le démarre : il reprend les tâches restées en file ou en cours. L'arrêt de l'app arrête le runner, avant
+    que le client HTTP se ferme.
 
     Chaque route `/v1` appelle `require_caller` en premier ; `/health` reste ouverte. La page de configuration
     (`dictee.web`) ouvre ses sessions par PocketID : `app.state.oauth` porte le client `pocketid`, et le cookie de
@@ -73,6 +81,11 @@ def create_app(settings: Settings, *, nemo=None, http: httpx.AsyncClient | None 
                 app.state.http = client
             if nemo is None:
                 app.state.nemo = NemoClient(settings.nemo_url, settings.nemo_api_key, app.state.http)
+            settings.tasks_dir.mkdir(parents=True, exist_ok=True)
+            services = Services(app.state.store, app.state.nemo, settings, app.state.http)
+            app.state.runner = TaskRunner(services, app.state.lane)
+            await app.state.runner.start()
+            stack.push_async_callback(app.state.runner.stop)
             yield
 
     app = Starlette(
@@ -108,6 +121,8 @@ def create_app(settings: Settings, *, nemo=None, http: httpx.AsyncClient | None 
     app.state.nemo = nemo
     app.state.http = http
     app.state.gate = LongAudioGate(settings.long_audio_seconds)
+    app.state.store = TaskStore(app.state.db)
+    app.state.lane = LongLane(settings.max_queued_long)
     app.state.voices = None
     app.state.previews = PreviewCache()
     return app

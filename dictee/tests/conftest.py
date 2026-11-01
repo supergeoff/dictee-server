@@ -1,4 +1,7 @@
+import math
+import struct
 import subprocess
+import wave
 from pathlib import Path
 
 import anyio
@@ -6,12 +9,18 @@ import pytest
 from fakes import FINALS, FakeLlm, FakeNemo
 from openai import OpenAI
 from starlette.testclient import TestClient
+from taskdata import make
 
 from dictee import processing
 from dictee.app import create_app
 from dictee.db import Database
+from dictee.modes import Mode
+from dictee.processing import Services, task_audio
+from dictee.profile import GlossaryEntry
 from dictee.settings import Settings
-from dictee.taskstore import TaskStore
+from dictee.taskstore import TaskParams, TaskStore
+
+RATE = 16000
 
 REQUIRED_ENV = {
     "NEMO_API_KEY": "test-nemo-key",
@@ -88,6 +97,34 @@ def db(db_path):
 def store(db):
     """Registre des tâches sur la base du test."""
     return TaskStore(db)
+
+
+@pytest.fixture
+def services(store, fake_nemo, settings, fake_llm):
+    """Ce que le traitement d'une tâche utilise : le registre, le faux NeMo, les réglages et le client du faux LiteLLM."""
+    return Services(store, fake_nemo, settings, fake_llm.http)
+
+
+def write_wav(path, seconds: float) -> None:
+    """WAV canonique mono 16 kHz d'un sinus à 400 Hz : sans silence, ffmpeg n'y repère aucune coupe."""
+    # 400 Hz fait un nombre entier de périodes par seconde : les secondes se mettent bout à bout sans raccord.
+    one_second = struct.pack(f"<{RATE}h", *(round(8000 * math.sin(2 * math.pi * 400 * n / RATE)) for n in range(RATE)))
+    pcm = (one_second * math.ceil(seconds))[: round(seconds * RATE) * 2]
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(RATE)
+        wav.writeframes(pcm)
+
+
+def audio_task(services, seconds: float, mode: Mode = Mode.RAW):
+    """Une tâche en file de `seconds` secondes, dont le WAV est déjà à sa place."""
+    params = TaskParams("fr-FR", mode, (GlossaryEntry("Nemotron"),), 1.0, "Corrige." if mode is Mode.CLEAN else None)
+    task = make(services.store, params=params, duration=seconds)
+    audio = task_audio(services.settings, task.id)
+    audio.parent.mkdir(parents=True)
+    write_wav(audio, seconds)
+    return task
 
 
 @pytest.fixture

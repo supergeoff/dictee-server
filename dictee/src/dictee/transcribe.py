@@ -30,6 +30,7 @@ from dictee.formats import delta_event, done_event, error_event, render, segment
 from dictee.lifecycle import CLIENT_CLOSED, Trace, cancel_once, elapsed_ms, loggable, run_unless_disconnected, spawn
 from dictee.modes import Mode, resolve_mode, to_iso_language, to_nemo_language
 from dictee.profile import Profile, glossary_terms, load_profile
+from dictee.runner import long_audio_busy
 from dictee.speakers import build_segments, label_speakers
 from dictee.types import Partial, Transcript, Word
 from dictee.upload import read_upload
@@ -38,12 +39,6 @@ from dictee.upload import read_upload
 # disque, 230 Mio à ce plafond (32 000 octets par seconde), et seule une trame d'une seconde passe en mémoire.
 MAX_AUDIO_SECONDS = 7200.0
 GRANULARITIES = frozenset({"word", "segment"})
-
-
-def long_audio_busy() -> ApiError:
-    """Erreur 429 d'un audio long refusé parce que la place et la file d'attente des audios longs sont prises."""
-    message = "Another long transcription is already waiting, try again later."
-    return ApiError(429, message, type="rate_limit_error", code="long_audio_busy")
 
 
 class LongAudioGate:

@@ -2,56 +2,23 @@
 
 import asyncio
 import logging
-import math
-import struct
 import time
-import wave
 from dataclasses import replace
 
 import pytest
+from conftest import audio_task
 from fakes import FakeNemo
-from taskdata import make
 
 from dictee import processing
 from dictee.cuts import Silence
 from dictee.modes import Mode
 from dictee.nemo import NemoError, NemoOverloaded, NemoUnavailable
-from dictee.processing import RunStats, Services, process, task_audio, wait_ready
-from dictee.profile import GlossaryEntry
-from dictee.taskstore import ChunkRecord, TaskParams
+from dictee.processing import RunStats, process, task_audio, wait_ready
+from dictee.taskstore import ChunkRecord
 from dictee.types import Final, Word
 
 # Aucune pause entre deux essais ni entre deux relevés de `/ready` : les tests ne dorment pas.
 pytestmark = [pytest.mark.anyio, pytest.mark.usefixtures("no_retry_delays")]
-
-RATE = 16000
-
-
-def write_wav(path, seconds: float) -> None:
-    """WAV canonique mono 16 kHz d'un sinus à 400 Hz : sans silence, ffmpeg n'y repère aucune coupe."""
-    # 400 Hz fait un nombre entier de périodes par seconde : les secondes se mettent bout à bout sans raccord.
-    one_second = struct.pack(f"<{RATE}h", *(round(8000 * math.sin(2 * math.pi * 400 * n / RATE)) for n in range(RATE)))
-    pcm = (one_second * math.ceil(seconds))[: round(seconds * RATE) * 2]
-    with wave.open(str(path), "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(RATE)
-        wav.writeframes(pcm)
-
-
-@pytest.fixture
-def services(store, fake_nemo, settings, fake_llm):
-    return Services(store, fake_nemo, settings, fake_llm.http)
-
-
-def audio_task(services, seconds: float, mode: Mode = Mode.RAW):
-    """Une tâche en file de `seconds` secondes, dont le WAV est déjà à sa place."""
-    params = TaskParams("fr-FR", mode, (GlossaryEntry("Nemotron"),), 1.0, "Corrige." if mode is Mode.CLEAN else None)
-    task = make(services.store, params=params, duration=seconds)
-    audio = task_audio(services.settings, task.id)
-    audio.parent.mkdir(parents=True)
-    write_wav(audio, seconds)
-    return task
 
 
 def progress_writes(services, monkeypatch) -> list[float]:
