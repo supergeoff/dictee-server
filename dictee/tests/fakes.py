@@ -6,7 +6,7 @@ import struct
 
 import httpx
 
-from dictee.types import Final, Turn, Word
+from dictee.types import Final, Partial, Turn, Word
 
 # Deux phrases finales de deux locuteurs : le texte attendu est « Bonjour à tous. Salut. ».
 FINALS = (
@@ -29,15 +29,16 @@ def _wav_rate(wav) -> int:
 class FakeNemo:
     """Faux `NemoClient` : mêmes quatre méthodes, rien d'autre.
 
-    `finals` sont rendus par `transcribe`, `turns` par `diarize`, `pcm` par `speak`. `error`, s'il est donné, est levée
-    par chacune des quatre méthodes. `release` (un `anyio.Event`) retient la première transcription : elle n'a de
-    `Final` à rendre qu'une fois l'événement posé, ce qui laisse les transcriptions suivantes passer sans attendre.
-    `after` est le nombre de `Final` que `transcribe` rend avant de lever `error` ou d'attendre `release` : avec 1, une
-    réponse en continu a déjà son premier delta quand la panne ou l'attente arrive.
+    `finals` sont rendus par `transcribe` (avec des `Partial` mêlés aux `Final`, ils ne sortent que si l'appel passe
+    `partials=True`), `turns` par `diarize`, `pcm` par `speak`. `error`, s'il est donné, est levée par chacune des quatre
+    méthodes. `release` (un `anyio.Event`) retient la première transcription : elle n'a de `Final` à rendre qu'une fois
+    l'événement posé, ce qui laisse les transcriptions suivantes passer sans attendre. `after` est le nombre
+    d'éléments (`Partial` demandés ou `Final`) que `transcribe` rend avant de lever `error` ou d'attendre `release` :
+    avec 1, une réponse en continu a déjà son premier delta quand la panne ou l'attente arrive.
 
-    Chaque appel est noté dans `calls`, sous forme de dict : `language`, `phrases`, `boost`, `prompt` et `wav_rate`
-    pour `transcribe` ; `diarize` et `wav_rate` pour `diarize` ; `text`, `voice` et `language` pour `speak` ; `voices`
-    pour `voices`. `sessions_closed` compte les sessions de transcription terminées, de quelque façon que ce soit :
+    Chaque appel est noté dans `calls`, sous forme de dict : `language`, `phrases`, `boost`, `prompt`, `partials` et
+    `wav_rate` pour `transcribe` ; `diarize` et `wav_rate` pour `diarize` ; `text`, `voice` et `language` pour `speak` ;
+    `voices` pour `voices`. `sessions_closed` compte les sessions de transcription terminées, de quelque façon que ce soit :
     `NemoClient` ferme son socket dans un `finally` qui attend, et ce nettoyage-ci attend de même.
     """
 
@@ -63,19 +64,21 @@ class FakeNemo:
     def voices_calls(self) -> list[dict]:
         return [call for call in self.calls if "voices" in call]
 
-    async def transcribe(self, wav, *, language, phrases, boost, prompt):
-        call = {"language": language, "phrases": list(phrases), "boost": boost, "prompt": prompt}
+    async def transcribe(self, wav, *, language, phrases, boost, prompt, partials=False):
+        call = {"language": language, "phrases": list(phrases), "boost": boost, "prompt": prompt, "partials": partials}
         self.calls.append({**call, "wav_rate": _wav_rate(wav)})
+        # Comme `NemoClient`, les `Partial` ne sortent que si on les demande.
+        events = [event for event in self.finals if partials or not isinstance(event, Partial)]
         try:
-            for final in self.finals[: self.after]:
-                yield final
+            for event in events[: self.after]:
+                yield event
             if self.error is not None:
                 raise self.error
             release, self.release = self.release, None
             if release is not None:
                 await release.wait()
-            for final in self.finals[self.after :]:
-                yield final
+            for event in events[self.after :]:
+                yield event
         finally:
             await asyncio.sleep(0)
             self.sessions_closed += 1

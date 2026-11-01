@@ -236,7 +236,7 @@ Après le tronc commun, dictee envoie le WAV entier à la route `/v1/audio/diari
 
 ### 6.4 Streaming
 
-Avec `stream=true`, dictee envoie un `transcript.text.delta` à chaque texte final que NeMo produit. En mode locuteurs, les segments arrivent à la fin, après la passe de locuteurs qui a besoin du fichier entier. Avec `dictee-clean`, le texte reformulé part en un seul `transcript.text.delta`, puisque le LLM travaille sur le texte complet.
+Avec `stream=true`, dictee envoie un `transcript.text.delta` à chaque morceau de texte que NeMo produit en cours de route, puis le reste du texte final. En mode locuteurs, les segments arrivent à la fin, après la passe de locuteurs qui a besoin du fichier entier. Avec `dictee-clean`, le texte reformulé part en un seul `transcript.text.delta`, puisque le LLM travaille sur le texte complet.
 
 ### 6.5 Synthèse vocale
 

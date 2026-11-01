@@ -17,7 +17,7 @@ from dictee.app import create_app
 from dictee.errors import ApiError
 from dictee.nemo import NemoError, NemoOverloaded, NemoUnavailable
 from dictee.transcribe import LongAudioGate
-from dictee.types import Final
+from dictee.types import Final, Partial
 
 URL = "/v1/audio/transcriptions"
 BOUNDARY = "dictee-test-boundary"
@@ -201,6 +201,161 @@ def test_stream_with_clean_sends_the_cleaned_text_in_one_delta(ask, fake_llm):
         {"type": "transcript.text.delta", "delta": fake_llm.reply},
         {"type": "transcript.text.done", "text": fake_llm.reply},
     ]
+
+
+# Ce que NeMo produit en cours de route (`Partial`), puis la phrase finale de chaque item : le premier item finit sur
+# « tous. » que NeMo n'avait pas encore dit, le second a été dit en entier avant sa phrase finale.
+PARTIAL_FINALS = (Partial("Bonjour"), Partial(" à"), FINALS[0], Partial("Sa"), FINALS[1])
+PARTIAL_DELTAS = ["Bonjour", " à", " tous.", " Sa", "lut."]
+
+
+def sent_events(sent: list) -> list[dict]:
+    """Événements SSE des messages `http.response.body` déjà envoyés par `call_app`."""
+    text = b"".join(message.get("body", b"") for message in sent if message["type"] == "http.response.body")
+    return [json.loads(block.removeprefix("data: ")) for block in text.decode().split("\n\n") if block]
+
+
+def deltas(events: list[dict]) -> list[str]:
+    return [event["delta"] for event in events if event["type"] == "transcript.text.delta"]
+
+
+def test_stream_sends_a_delta_per_partial_then_the_rest_of_the_final(ask, fake_nemo):
+    fake_nemo.finals = PARTIAL_FINALS
+    events = sse_events(ask(stream="true"))
+    assert deltas(events) == PARTIAL_DELTAS
+    assert events[-1] == {"type": "transcript.text.done", "text": "Bonjour à tous. Salut."}
+    assert fake_nemo.calls[0]["partials"] is True
+
+
+def test_stream_deltas_add_up_to_the_done_text_through_the_sdk(openai_client, fake_nemo, tone_mp3):
+    fake_nemo.finals = PARTIAL_FINALS
+    events = list(openai_client.audio.transcriptions.create(model="dictee", file=("a.mp3", tone_mp3), stream=True))
+    assert [e.delta for e in events if e.type == "transcript.text.delta"] == PARTIAL_DELTAS
+    assert events[-1].type == "transcript.text.done"
+    assert "".join(e.delta for e in events if e.type == "transcript.text.delta") == events[-1].text
+
+
+def test_stream_sends_nothing_more_when_the_partials_already_say_the_whole_final(ask, fake_nemo):
+    fake_nemo.finals = (Partial("Bonjour à "), Partial("tous."), FINALS[0], Partial("Salut."), FINALS[1])
+    events = sse_events(ask(stream="true"))
+    assert deltas(events) == ["Bonjour à ", "tous.", " Salut."]
+    assert events[-1]["text"] == "Bonjour à tous. Salut."
+
+
+def test_stream_sends_nothing_more_when_the_final_does_not_start_with_the_partials(ask, fake_nemo):
+    # Le texte de `done` fait foi : un item que sa phrase finale contredit n'ajoute rien, le suivant repart normalement.
+    corrected = Final("Salut tout le monde.", ())
+    fake_nemo.finals = (Partial("Bonjour"), corrected, Partial("Sa"), FINALS[1])
+    events = sse_events(ask(stream="true"))
+    assert deltas(events) == ["Bonjour", " Sa", "lut."]
+    assert events[-1] == {"type": "transcript.text.done", "text": "Salut tout le monde. Salut."}
+
+
+def test_stream_puts_one_space_between_two_items_whatever_the_partials_begin_with(ask, fake_nemo):
+    fake_nemo.finals = (Partial("  "), Partial(" Bonjour"), FINALS[0], Partial("  Salut"), Partial("."), FINALS[1])
+    events = sse_events(ask(stream="true"))
+    # Ni espace en tête du texte, ni espace en double entre les items, ni delta d'espaces seules.
+    assert deltas(events) == ["Bonjour", " à tous.", " Salut", "."]
+    assert "".join(deltas(events)) == events[-1]["text"] == "Bonjour à tous. Salut."
+
+
+def test_stream_ignores_empty_items_and_empty_partials(ask, fake_nemo):
+    fake_nemo.finals = (Final("", ()), Partial(""), Partial("Bonjour"), FINALS[0], Final("  ", ()), FINALS[1])
+    events = sse_events(ask(stream="true"))
+    assert deltas(events) == ["Bonjour", " à tous.", " Salut."]
+    assert events[-1]["text"] == "Bonjour à tous. Salut."
+
+
+def test_stream_with_speakers_sends_the_partials_before_the_segments(ask, fake_nemo):
+    fake_nemo.finals = PARTIAL_FINALS
+    events = sse_events(ask(model="dictee-diarize", stream="true"))
+    assert [e["type"] for e in events] == ["transcript.text.delta"] * 5 + ["transcript.text.segment"] * 2 + [
+        "transcript.text.done"
+    ]
+    assert deltas(events) == PARTIAL_DELTAS
+    assert events[-1]["text"] == "Bonjour à tous. Salut."
+
+
+def test_stream_with_clean_keeps_its_single_delta_whatever_nemo_sends_on_the_way(ask, fake_nemo, fake_llm):
+    fake_nemo.finals = PARTIAL_FINALS
+    assert sse_events(ask(model="dictee-clean", stream="true")) == [
+        {"type": "transcript.text.delta", "delta": fake_llm.reply},
+        {"type": "transcript.text.done", "text": fake_llm.reply},
+    ]
+    assert fake_nemo.calls[0]["partials"] is False
+
+
+@pytest.mark.parametrize(
+    "fields,asked",
+    [
+        ({"model": "dictee", "stream": "true"}, True),
+        ({"model": "dictee-diarize", "stream": "true"}, True),
+        ({"model": "dictee-clean", "stream": "true"}, False),
+        ({"model": "dictee", "stream": "false"}, False),
+        ({"model": "dictee-diarize"}, False),
+    ],
+    ids=["stream", "stream-with-speakers", "stream-with-clean", "no-stream", "no-stream-with-speakers"],
+)
+def test_partials_are_asked_of_nemo_only_by_a_stream_that_shows_them(ask, fake_nemo, fields, asked):
+    fake_nemo.finals = PARTIAL_FINALS
+    assert ask(**fields).status_code == 200
+    assert fake_nemo.calls[0]["partials"] is asked
+
+
+def test_the_text_without_stream_ignores_the_partials(ask, fake_nemo):
+    fake_nemo.finals = PARTIAL_FINALS
+    assert ask().json() == {"text": "Bonjour à tous. Salut."}
+    assert ask(response_format="verbose_json").json()["text"] == "Bonjour à tous. Salut."
+
+
+@pytest.mark.parametrize(
+    "error,status",
+    [(NemoOverloaded("the queue is full"), 429), (NemoUnavailable("connection refused"), 502), (NemoError("x"), 502)],
+)
+def test_nemo_failure_before_the_first_partial_is_a_429_or_502(ask, fake_nemo, error, status):
+    # La lecture anticipée s'arrête au premier `Partial` : tant qu'il manque, rien n'est parti et le statut dit la panne.
+    fake_nemo.finals = PARTIAL_FINALS
+    fake_nemo.error = error
+    r = ask(stream="true")
+    assert r.status_code == status
+    assert r.headers["content-type"].startswith("application/json")
+
+
+def test_nemo_failure_after_the_first_partial_is_an_error_event(ask, fake_nemo):
+    # Le premier `Partial` a ouvert la réponse, bien avant la première phrase finale : la panne se dit dans le flux.
+    fake_nemo.finals = PARTIAL_FINALS
+    fake_nemo.error = NemoOverloaded("the queue is full")
+    fake_nemo.after = 1
+    r = ask(stream="true")
+    assert r.status_code == 200
+    delta, event = sse_events(r)
+    assert delta == {"type": "transcript.text.delta", "delta": "Bonjour"}
+    assert (event["type"], event["error"]["code"]) == ("error", "overloaded")
+
+
+@pytest.mark.anyio
+async def test_stream_opens_with_the_first_partial_not_the_first_final(settings, fake_llm, service_headers, tmp_path):
+    release = anyio.Event()
+    nemo = FakeNemo(finals=PARTIAL_FINALS, release=release, after=1)
+    app = app_with(settings, nemo, fake_llm)
+    audio = make_audio(tmp_path, "a.mp3", seconds=3.0).read_bytes()
+    body, content_type = multipart_body({"model": "dictee", "stream": "true"}, audio)
+    headers = streaming_headers(service_headers, body, content_type)
+    hung_up = anyio.Event()
+    sent: list = []
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(functools.partial(call_app, app, headers, body, hung_up, sent=sent))
+        await wait_until(lambda: sent_events(sent))
+        # Le faux NeMo n'a rendu que le premier `Partial` et attend : la réponse est ouverte, avec son premier delta.
+        assert sent[0]["type"] == "http.response.start" and sent[0]["status"] == 200
+        assert sent_events(sent) == [{"type": "transcript.text.delta", "delta": "Bonjour"}]
+        release.set()
+        await wait_until(lambda: sent_events(sent)[-1:] and sent_events(sent)[-1]["type"] == "transcript.text.done")
+        hung_up.set()
+    events = sent_events(sent)
+    assert deltas(events) == PARTIAL_DELTAS
+    assert events[-1] == {"type": "transcript.text.done", "text": "Bonjour à tous. Salut."}
+    assert nemo.sessions_closed == 1
 
 
 @pytest.mark.parametrize(
@@ -729,12 +884,17 @@ def streaming_headers(service_headers, body: bytes, content_type: str) -> dict[s
     return {**service_headers, "content-type": content_type, "content-length": str(len(body))}
 
 
+FIRST_DELTA_FROM = [FINALS, (Partial("Bonjour"), *FINALS)]
+FIRST_DELTA_FROM_IDS = ["a-final", "a-partial"]
+
+
 @pytest.mark.anyio
+@pytest.mark.parametrize("finals", FIRST_DELTA_FROM, ids=FIRST_DELTA_FROM_IDS)
 async def test_client_hanging_up_mid_stream_closes_the_session_and_frees_the_slot(
-    caplog, settings, fake_llm, service_headers, tmp_path
+    finals, caplog, settings, fake_llm, service_headers, tmp_path
 ):
     # Le premier delta est parti : la réponse est ouverte, et c'est Starlette qui voit le client raccrocher.
-    nemo = FakeNemo(finals=FINALS, release=anyio.Event(), after=1)
+    nemo = FakeNemo(finals=finals, release=anyio.Event(), after=1)
     app = app_with(settings, nemo, fake_llm, long_audio_seconds=1.0)
     audio = make_audio(tmp_path, "long.mp3", seconds=3.0).read_bytes()
     body, content_type = multipart_body({"model": "dictee", "stream": "true"}, audio)
@@ -756,12 +916,13 @@ async def test_client_hanging_up_mid_stream_closes_the_session_and_frees_the_slo
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("finals", FIRST_DELTA_FROM, ids=FIRST_DELTA_FROM_IDS)
 async def test_client_hanging_up_before_the_stream_starts_still_ends_the_recognition(
-    caplog, settings, fake_llm, service_headers, tmp_path
+    finals, caplog, settings, fake_llm, service_headers, tmp_path
 ):
     # Le client raccroche entre la création de la réponse et son premier octet : le générateur ne démarre jamais et ses
     # `finally` ne courent pas. Seul le filet de la réponse ferme alors la session de NeMo et libère la place.
-    nemo = FakeNemo(finals=FINALS, release=anyio.Event(), after=1)
+    nemo = FakeNemo(finals=finals, release=anyio.Event(), after=1)
     app = app_with(settings, nemo, fake_llm, long_audio_seconds=1.0)
     audio = make_audio(tmp_path, "long.mp3", seconds=3.0).read_bytes()
     body, content_type = multipart_body({"model": "dictee", "stream": "true"}, audio)

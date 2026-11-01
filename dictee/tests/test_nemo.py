@@ -24,7 +24,7 @@ from dictee.nemo import (
     NemoOverloaded,
     NemoUnavailable,
 )
-from dictee.types import Turn, Word
+from dictee.types import Final, Partial, Turn, Word
 
 pytestmark = pytest.mark.anyio
 
@@ -146,8 +146,10 @@ async def until(condition, timeout: float = 2.0) -> None:
             await asyncio.sleep(0.01)
 
 
-async def transcribe(nemo, wav=WAV_1S, *, language="fr-FR", phrases=(), boost=3.0, prompt=None):
-    return await collect(nemo.transcribe(wav, language=language, phrases=list(phrases), boost=boost, prompt=prompt))
+async def transcribe(nemo, wav=WAV_1S, *, language="fr-FR", phrases=(), boost=3.0, prompt=None, **options):
+    return await collect(
+        nemo.transcribe(wav, language=language, phrases=list(phrases), boost=boost, prompt=prompt, **options)
+    )
 
 
 # --- Temps réel ---
@@ -228,6 +230,44 @@ async def test_each_completed_event_gives_a_final_and_committed_ends_the_session
     finals = await transcribe(nemo)
     assert [final.text for final in finals] == [COMPLETED["transcript"], "Deuxième phrase."]
     assert finals[1].words == (Word("Deuxième", 0.1, 0.5), Word("phrase.", 0.6, 1.0))
+
+
+async def test_no_partials_unless_they_are_asked_for(fake_ws, nemo):
+    items = await transcribe(nemo)
+    assert [type(item) for item in items] == [Final]
+    assert items == await transcribe(nemo, partials=False)
+
+
+async def test_partials_come_from_the_non_empty_deltas_in_order_before_the_final(fake_ws, nemo):
+    deltas = [event["delta"] for event in AFTER_COMMIT if event["type"].endswith(".delta")]
+    # Le relevé contient bien un delta vide, que le client ne relaie pas ; les autres gardent leurs espaces.
+    assert "" in deltas
+    assert any(delta != delta.strip() for delta in deltas)
+    items = await transcribe(nemo, partials=True)
+    assert items[:-1] == [Partial(delta) for delta in deltas if delta]
+    assert [type(item) for item in items[-1:]] == [Final]
+
+
+async def test_the_finals_do_not_change_with_the_partials(fake_ws, nemo):
+    with_partials = await transcribe(nemo, partials=True)
+    assert [item for item in with_partials if isinstance(item, Final)] == await transcribe(nemo)
+
+
+async def test_the_deltas_the_recording_shows_start_the_final_text(fake_ws, nemo):
+    # La route en flux émet le reste du `Final` après les `Partial` : elle suppose ce préfixe, que le relevé montre.
+    items = await transcribe(nemo, partials=True)
+    streamed = "".join(item.text for item in items if isinstance(item, Partial))
+    assert items[-1].text.startswith(streamed)
+    assert items[-1].text != streamed
+
+
+async def test_partials_of_each_item_come_before_its_final(fake_ws, nemo):
+    second = {**COMPLETED, "event_id": "event_19", "transcript": "Deuxième phrase.", "words": []}
+    delta = {"type": "conversation.item.input_audio_transcription.delta", "delta": "Deuxième"}
+    fake_ws.after_commit = [delta, COMPLETED, delta, second, COMMITTED]
+    items = await transcribe(nemo, partials=True)
+    recorded_final = (await transcribe(nemo))[0]
+    assert items == [Partial("Deuxième"), recorded_final, Partial("Deuxième"), Final("Deuxième phrase.", ())]
 
 
 async def test_the_client_closes_the_socket_when_the_session_ends(fake_ws, nemo):

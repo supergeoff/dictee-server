@@ -31,7 +31,7 @@ from dictee.lifecycle import CLIENT_CLOSED, Trace, cancel_once, elapsed_ms, logg
 from dictee.modes import Mode, resolve_mode, to_iso_language, to_nemo_language
 from dictee.profile import Profile, glossary_terms, load_profile
 from dictee.speakers import assign_speakers, build_segments
-from dictee.types import Transcript, Turn, Word
+from dictee.types import Partial, Transcript, Turn, Word
 from dictee.upload import read_upload
 
 # Plafond de durée d'un envoi, toutes transcriptions confondues. Dictee garde le WAV décodé en mémoire (173 Mo pour
@@ -173,6 +173,39 @@ class _End:
 _END = _End()
 
 
+class _DeltaFeed:
+    """Découpe en deltas le texte que NeMo rend : un par `Partial`, puis le reste de la phrase finale de l'item.
+
+    Le texte de `done` joint les phrases finales par une espace : le premier delta de chaque item, sauf du premier
+    item non vide, la porte, quelles que soient les espaces que NeMo met en tête de ses morceaux. Quand la phrase
+    finale ne commence pas par ce qui est déjà parti pour son item, rien de plus ne part : le texte de `done` fait
+    foi, et la suite reprend avec l'item suivant.
+    """
+
+    def __init__(self, emit: Callable[[str], None]) -> None:
+        self._emit = emit
+        self._sent_any = False  # un texte est déjà parti : le premier delta d'un nouvel item porte l'espace
+        self._item = ""  # ce qui est parti pour l'item en cours
+
+    def partial(self, text: str) -> None:
+        # Le premier morceau d'un item perd ses espaces de tête : seule celle qui sépare les items est posée.
+        self._send(text if self._item else text.lstrip())
+
+    def final(self, text: str) -> None:
+        """Termine l'item avec le texte de sa phrase finale, sans espaces autour, vide ou non."""
+        if text.startswith(self._item):
+            self._send(text[len(self._item) :])
+        self._item = ""
+
+    def _send(self, text: str) -> None:
+        if not text:
+            return
+        first = not self._item
+        self._item += text
+        self._emit(f" {text}" if first and self._sent_any else text)
+        self._sent_any = True
+
+
 async def _abandon(recognition: asyncio.Task, trace: Trace) -> None:
     """Filet d'une réponse en continu, lancé par Starlette quand la réponse est finie, même annulée.
 
@@ -199,14 +232,16 @@ class _Job:
     async def recognize(self, on_text: Callable[[str], None] | None = None) -> _Recognition:
         """Les passes de NeMo sur l'audio, sous la place des transcriptions longues.
 
-        `on_text` reçoit le texte de chaque phrase finale dès qu'elle arrive, précédé d'une espace à partir de la
-        seconde. La session de NeMo se ferme, et la place se libère, quelle que soit la sortie, annulation comprise.
+        `on_text` reçoit le texte au fur et à mesure (voir `_DeltaFeed`) : chaque morceau que NeMo produit en cours de
+        route, puis le reste de la phrase finale de son item. Sans `on_text`, NeMo ne rend que les phrases finales.
+        La session de NeMo se ferme, et la place se libère, quelle que soit la sortie, annulation comprise.
         Un audio long qui n'a pas de place à attendre lève `long_audio_busy` avant toute passe.
         """
         state, params = self.state, self.params
         texts: list[str] = []
         words: list[Word] = []
         turns: list[Turn] = []
+        feed = None if on_text is None else _DeltaFeed(on_text)
         async with state.gate.slot(self.duration):
             started = time.monotonic()
             try:
@@ -217,15 +252,20 @@ class _Job:
                         phrases=glossary_terms(self.profile.glossary),
                         boost=state.settings.glossary_boost,
                         prompt=params.prompt,
+                        partials=feed is not None,
                     )
-                ) as finals:
-                    async for final in finals:
-                        words.extend(final.words)
-                        text = final.text.strip()
+                ) as events:
+                    async for event in events:
+                        if isinstance(event, Partial):
+                            if feed is not None:
+                                feed.partial(event.text)
+                            continue
+                        words.extend(event.words)
+                        text = event.text.strip()
                         if text:
                             texts.append(text)
-                            if on_text is not None:
-                                on_text(text if len(texts) == 1 else f" {text}")
+                        if feed is not None:
+                            feed.final(text)
                 if params.mode is Mode.DIARIZE and words:
                     turns = await state.nemo.diarize(self.wav)
             finally:
@@ -252,10 +292,12 @@ class _Job:
     async def open_stream(self, request: Request) -> Response:
         """Ouvre la réponse en continu, une fois que NeMo a rendu son premier delta ou fini.
 
-        La reconnaissance démarre ici, sous la garde du client qui raccroche. Un échec qui survient avant le premier
-        delta est rendu comme celui d'une réponse ordinaire (429 ou 502 pour NeMo, 429 pour une place des audios longs
-        refusée) : le statut part après, quand on sait déjà si NeMo répond. Un échec plus tard n'a plus de statut à
-        changer et part en événement `error` (voir `events`).
+        Le premier delta est le premier morceau de texte que NeMo produit en cours de route (un `Partial`), bien avant
+        sa première phrase finale ; avec la reformulation, qui ne relaie rien, la réponse s'ouvre à la fin de la
+        reconnaissance. La reconnaissance démarre ici, sous la garde du client qui raccroche. Un échec qui survient
+        avant le premier delta est rendu comme celui d'une réponse ordinaire (429 ou 502 pour NeMo, 429 pour une place
+        des audios longs refusée) : le statut part après, quand on sait déjà si NeMo répond. Un échec plus tard n'a
+        plus de statut à changer et part en événement `error` (voir `events`).
         """
         deltas: asyncio.Queue[str | _End] = asyncio.Queue()
         # Avec la reformulation, le texte part en un seul delta, quand le LLM l'a rendu.

@@ -15,7 +15,7 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 
 from dictee.audio import SAMPLE_WIDTH, TRANSCRIPTION_RATE, wav_pcm
-from dictee.types import Final, Turn, Word
+from dictee.types import Final, Partial, Turn, Word
 
 # Fréquence native de la synthèse de NeMo (mesurée en tâche 1) : `speak` rend du PCM16 mono à cette fréquence.
 TTS_SAMPLE_RATE = 22050
@@ -34,6 +34,7 @@ DIARIZE_TIMEOUT = 1200.0
 SPEECH_TIMEOUT = 120.0
 MODELS_TIMEOUT = 10.0
 
+_DELTA = "conversation.item.input_audio_transcription.delta"
 _COMPLETED = "conversation.item.input_audio_transcription.completed"
 _COMMITTED = "input_audio_buffer.committed"
 
@@ -144,9 +145,20 @@ class NemoClient:
             raise NemoUnavailable(f"cannot open the realtime connection to NeMo: {exc!r}") from exc
 
     async def transcribe(
-        self, wav: Buffer, *, language: str, phrases: list[str], boost: float, prompt: str | None
-    ) -> AsyncIterator[Final]:
+        self,
+        wav: Buffer,
+        *,
+        language: str,
+        phrases: list[str],
+        boost: float,
+        prompt: str | None,
+        partials: bool = False,
+    ) -> AsyncIterator[Final | Partial]:
         """Transcrit un WAV PCM16 mono 16 kHz par une session temps réel et rend un `Final` par phrase finale.
+
+        Avec `partials=True`, chaque événement `delta` de NeMo non vide rend aussi un `Partial`, dans l'ordre d'arrivée
+        et avant le `Final` de son item : NeMo en émet un tous les 1,12 s d'audio traité, puis un seul `completed` au
+        commit. Sans `partials`, seuls les `Final` sortent.
 
         La session finit sur le premier `input_audio_buffer.committed` reçu après le commit : NeMo laisse alors le
         socket ouvert et c'est le client qui le ferme. La session se ferme aussi quand la tâche qui attend un
@@ -175,6 +187,9 @@ class NemoClient:
                 kind = event.get("type")
                 if kind == _COMPLETED:
                     yield _final(event)
+                elif kind == _DELTA:
+                    if partials and (text := event.get("delta")):
+                        yield Partial(text)
                 elif kind == _COMMITTED:
                     return
         except ConnectionClosed as exc:

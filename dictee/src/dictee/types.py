@@ -20,6 +20,13 @@ class Final:
 
 
 @dataclass(frozen=True)
+class Partial:
+    """Morceau de texte que NeMo produit en cours de session, avant la phrase finale de son item."""
+
+    text: str
+
+
+@dataclass(frozen=True)
 class Turn:
     """Tour de parole renvoyé par la séparation des locuteurs."""
 
