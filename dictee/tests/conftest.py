@@ -10,6 +10,7 @@ from starlette.testclient import TestClient
 from dictee.app import create_app
 from dictee.db import Database
 from dictee.settings import Settings
+from dictee.taskstore import TaskStore
 
 REQUIRED_ENV = {
     "NEMO_API_KEY": "test-nemo-key",
@@ -80,6 +81,12 @@ def settings(db_path):
 def db(db_path):
     # Même fichier que celui de l'app : la base ouvre une connexion par opération.
     return Database(db_path)
+
+
+@pytest.fixture
+def store(db):
+    """Registre des tâches sur la base du test."""
+    return TaskStore(db)
 
 
 @pytest.fixture

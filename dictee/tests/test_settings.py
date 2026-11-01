@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from conftest import REQUIRED_ENV
 
@@ -48,6 +50,21 @@ def test_optional_variables_override_the_defaults():
     assert s.long_audio_seconds == 120.0
     assert s.max_upload_mb == 50
     assert s.db_path == "/tmp/dictee.db"
+
+
+def test_task_settings_have_their_defaults(settings):
+    assert (settings.max_queued_long, settings.task_retention_hours) == (3, 24.0)
+    assert settings.tasks_dir == Path(settings.db_path).parent / "tasks"
+
+
+def test_task_settings_come_from_the_environment():
+    settings = Settings.from_env({**REQUIRED_ENV, "MAX_QUEUED_LONG": "5", "TASK_RETENTION_HOURS": "1.5"})
+    assert (settings.max_queued_long, settings.task_retention_hours) == (5, 1.5)
+
+
+def test_the_tasks_directory_sits_next_to_the_database():
+    settings = Settings.from_env({**REQUIRED_ENV, "DB_PATH": "/var/lib/dictee/main.db"})
+    assert settings.tasks_dir == Path("/var/lib/dictee/tasks")
 
 
 def test_missing_required_variable_is_named():

@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 # Champ de `Settings` -> variable d'environnement, pour les réglages sans valeur par défaut.
 _REQUIRED = {
@@ -24,6 +25,8 @@ _OPTIONAL = {
     "glossary_boost": ("GLOSSARY_BOOST", float),
     "long_audio_seconds": ("LONG_AUDIO_SECONDS", float),
     "max_upload_mb": ("MAX_UPLOAD_MB", int),
+    "max_queued_long": ("MAX_QUEUED_LONG", int),
+    "task_retention_hours": ("TASK_RETENTION_HOURS", float),
     "db_path": ("DB_PATH", str),
 }
 
@@ -49,7 +52,16 @@ class Settings:
     glossary_boost: float = 2.0
     long_audio_seconds: float = 600.0
     max_upload_mb: int = 300
+    # Tâches longues en attente, en plus de celle qui tourne ; au-delà, l'envoi reçoit 429 `long_audio_busy`.
+    max_queued_long: int = 3
+    # Durée de conservation d'un résultat, comptée depuis la fin de la tâche (réussie, en échec ou annulée).
+    task_retention_hours: float = 24.0
     db_path: str = "/data/dictee.db"
+
+    @property
+    def tasks_dir(self) -> Path:
+        """Dossier des tâches : `tasks` à côté de la base, où chaque tâche garde son audio le temps du traitement."""
+        return Path(self.db_path).parent / "tasks"
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> "Settings":
