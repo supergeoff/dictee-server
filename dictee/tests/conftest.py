@@ -30,6 +30,13 @@ def anyio_backend():
     return "asyncio"
 
 
+async def wait_until(condition, timeout: float = 2.0) -> None:
+    """Attend, sans bloquer la boucle, que `condition()` devienne vraie ; échoue après `timeout` secondes."""
+    with anyio.fail_after(timeout):
+        while not condition():
+            await anyio.sleep(0.01)
+
+
 def make_audio(
     directory: Path, name: str, *, seconds: float = 1.0, rate: int = 16000, channels: int = 1, codec: str | None = None
 ) -> Path:

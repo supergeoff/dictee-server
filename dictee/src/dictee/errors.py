@@ -6,7 +6,12 @@ from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from dictee.nemo import NemoError, NemoOverloaded, NemoUnavailable
+
 logger = logging.getLogger("dictee")
+
+# Les échecs de NeMo que `nemo_failure` sait rendre : une route les attrape par ce tuple.
+NEMO_ERRORS = (NemoOverloaded, NemoUnavailable, NemoError)
 
 
 class ApiError(Exception):
@@ -47,6 +52,17 @@ def unexpected_error(exc: Exception) -> ApiError:
     """
     logger.error("unexpected error class=%s", type(exc).__name__)
     return ApiError(500, "The server failed to process the request.", type="server_error")
+
+
+def nemo_failure(error: Exception) -> ApiError:
+    """Erreur de l'API pour un échec de NeMo : 429 s'il est saturé, 502 sinon.
+
+    Le message de NeMo n'est pas repris : il pourrait citer l'audio ou le texte transcrit.
+    """
+    if isinstance(error, NemoOverloaded):
+        message = "The speech engine is busy, try again shortly."
+        return ApiError(429, message, type="rate_limit_error", code="overloaded")
+    return ApiError(502, "The speech engine did not answer correctly.", type="server_error", code="upstream_error")
 
 
 async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:

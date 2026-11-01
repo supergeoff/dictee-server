@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 
+from dictee.errors import ApiError, envelope
 from dictee.modes import to_iso_language, unsupported_format
 from dictee.types import Segment, Transcript, Word
 
@@ -198,3 +199,9 @@ def segment_event(segment: Segment) -> str:
 
 def done_event(text: str) -> str:
     return _event({"type": "transcript.text.done", "text": text})
+
+
+def error_event(failure: ApiError) -> str:
+    """Événement d'erreur d'une réponse en continu déjà commencée : le corps de l'erreur de l'API, sous `error`."""
+    error = envelope(failure.message, type=failure.type, param=failure.param, code=failure.code)["error"]
+    return _event({"type": "error", "error": error})

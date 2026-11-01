@@ -3,7 +3,7 @@ import json
 import pytest
 
 from dictee.errors import ApiError
-from dictee.formats import Cue, build_cues, delta_event, done_event, render, segment_event
+from dictee.formats import Cue, build_cues, delta_event, done_event, error_event, render, segment_event
 from dictee.types import Segment, Transcript, Word
 
 NO_GRANULARITY = frozenset()
@@ -326,3 +326,24 @@ def test_events_keep_accents_unescaped_and_escape_line_breaks():
     event = delta_event("à\nbientôt")
     assert "à" in event and "\\u" not in event
     assert event.count("\n") == 2 and event.endswith("\n\n")
+
+
+def test_error_event_carries_the_body_of_the_api_error():
+    failure = ApiError(429, "The speech engine is busy.", type="rate_limit_error", code="overloaded")
+    event = error_event(failure)
+    assert event.startswith("data: ") and event.endswith("\n\n")
+    assert json.loads(event.removeprefix("data: ")) == {
+        "type": "error",
+        "error": {
+            "message": "The speech engine is busy.",
+            "type": "rate_limit_error",
+            "param": None,
+            "code": "overloaded",
+        },
+    }
+
+
+def test_error_event_keeps_accents_and_the_param():
+    event = error_event(ApiError(400, "Langue refusée.", param="language"))
+    assert "Langue refusée." in event
+    assert json.loads(event.removeprefix("data: "))["error"]["param"] == "language"

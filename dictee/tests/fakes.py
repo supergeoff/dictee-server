@@ -32,6 +32,8 @@ class FakeNemo:
     `finals` sont rendus par `transcribe`, `turns` par `diarize`, `pcm` par `speak`. `error`, s'il est donné, est levée
     par chacune des quatre méthodes. `release` (un `anyio.Event`) retient la première transcription : elle n'a de
     `Final` à rendre qu'une fois l'événement posé, ce qui laisse les transcriptions suivantes passer sans attendre.
+    `after` est le nombre de `Final` que `transcribe` rend avant de lever `error` ou d'attendre `release` : avec 1, une
+    réponse en continu a déjà son premier delta quand la panne ou l'attente arrive.
 
     Chaque appel est noté dans `calls`, sous forme de dict : `language`, `phrases`, `boost`, `prompt` et `wav_rate`
     pour `transcribe` ; `diarize` et `wav_rate` pour `diarize` ; `text`, `voice` et `language` pour `speak` ; `voices`
@@ -39,12 +41,13 @@ class FakeNemo:
     `NemoClient` ferme son socket dans un `finally` qui attend, et ce nettoyage-ci attend de même.
     """
 
-    def __init__(self, *, finals=(), turns=(), pcm=b"", error=None, release=None) -> None:
+    def __init__(self, *, finals=(), turns=(), pcm=b"", error=None, release=None, after: int = 0) -> None:
         self.finals = tuple(finals)
         self.turns = list(turns)
         self.pcm = pcm
         self.error = error
         self.release = release
+        self.after = after
         self.calls: list[dict] = []
         self.sessions_closed = 0
 
@@ -56,12 +59,14 @@ class FakeNemo:
         call = {"language": language, "phrases": list(phrases), "boost": boost, "prompt": prompt}
         self.calls.append({**call, "wav_rate": _wav_rate(wav)})
         try:
+            for final in self.finals[: self.after]:
+                yield final
             if self.error is not None:
                 raise self.error
             release, self.release = self.release, None
             if release is not None:
                 await release.wait()
-            for final in self.finals:
+            for final in self.finals[self.after :]:
                 yield final
         finally:
             await asyncio.sleep(0)

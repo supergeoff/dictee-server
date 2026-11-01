@@ -1,4 +1,5 @@
 import dataclasses
+import functools
 import json
 import logging
 import re
@@ -7,12 +8,13 @@ import tempfile
 import anyio
 import httpx
 import pytest
-from conftest import make_audio
+from conftest import make_audio, wait_until
 from fakes import FINALS, FakeNemo
 from starlette.testclient import TestClient
 
 from dictee import transcribe
 from dictee.app import create_app
+from dictee.errors import ApiError
 from dictee.nemo import NemoError, NemoOverloaded, NemoUnavailable
 from dictee.transcribe import LongAudioGate
 from dictee.types import Final
@@ -60,12 +62,6 @@ async def chunked(body: bytes):
     """Corps rendu en blocs : httpx l'envoie sans `Content-Length`."""
     for start in range(0, len(body), 65536):
         yield body[start : start + 65536]
-
-
-async def wait_until(condition, timeout: float = 2.0) -> None:
-    with anyio.fail_after(timeout):
-        while not condition():
-            await anyio.sleep(0.01)
 
 
 def app_with(settings, nemo, llm, **changes):
@@ -207,14 +203,82 @@ def test_stream_with_clean_sends_the_cleaned_text_in_one_delta(ask, fake_llm):
     ]
 
 
-def test_nemo_failure_during_a_stream_is_an_error_event(ask, fake_nemo):
+@pytest.mark.parametrize(
+    "error,status,error_type,code",
+    [
+        (NemoOverloaded("the queue is full"), 429, "rate_limit_error", "overloaded"),
+        (NemoUnavailable("connection refused"), 502, "server_error", "upstream_error"),
+        (NemoError("session failed"), 502, "server_error", "upstream_error"),
+    ],
+)
+def test_nemo_failure_when_a_stream_opens_is_a_429_or_502(ask, fake_nemo, caplog, error, status, error_type, code):
+    # Rien n'est encore parti : le statut de la réponse dit la panne, comme pour une réponse sans `stream`.
+    fake_nemo.error = error
+    caplog.set_level(logging.INFO, logger="dictee")
+    r = ask(stream="true")
+    assert r.status_code == status
+    assert r.headers["content-type"].startswith("application/json")
+    body = r.json()["error"]
+    assert (body["type"], body["code"], body["param"]) == (error_type, code, None)
+    assert str(error) not in body["message"]
+    (line,) = [record.getMessage() for record in caplog.records if record.name == "dictee"]
+    assert line.endswith(f"status={status}")
+
+
+def test_nemo_failure_after_the_first_delta_is_an_error_event(ask, fake_nemo, caplog):
+    # Le statut 200 est parti avec le premier delta : la panne ne peut plus que se dire dans le flux.
     fake_nemo.error = NemoOverloaded("the queue is full")
+    fake_nemo.after = 1
+    caplog.set_level(logging.INFO, logger="dictee")
     r = ask(stream="true")
     assert r.status_code == 200
-    (event,) = sse_events(r)
+    delta, event = sse_events(r)
+    assert delta == {"type": "transcript.text.delta", "delta": "Bonjour à tous."}
     assert event["type"] == "error"
     assert (event["error"]["type"], event["error"]["code"]) == ("rate_limit_error", "overloaded")
     assert "queue" not in event["error"]["message"]
+    (line,) = [record.getMessage() for record in caplog.records if record.name == "dictee"]
+    assert line.endswith("status=429")
+
+
+UNEXPECTED_BODY = {
+    "error": {
+        "message": "The server failed to process the request.",
+        "type": "server_error",
+        "param": None,
+        "code": None,
+    }
+}
+
+
+@pytest.mark.parametrize(
+    "stream,after",
+    [("false", 0), ("true", 0), ("true", 1)],
+    ids=["plain", "stream-at-open", "stream-after-the-first-delta"],
+)
+def test_unexpected_error_is_a_500_that_leaks_nothing(ask, fake_nemo, caplog, stream, after):
+    # Un texte transcrit pourrait se retrouver dans le message d'une exception : il ne sort ni par la réponse, ni par
+    # un journal, y compris celui d'uvicorn qui journalise le message d'une exception que Starlette relève.
+    marker = "Magpie-marker-7f3a91"
+    fake_nemo.error = RuntimeError(f"failed on {marker}")
+    fake_nemo.after = after
+    caplog.set_level(logging.DEBUG)
+    r = ask(stream=stream)
+    if after:
+        assert r.status_code == 200
+        delta, event = sse_events(r)
+        assert delta["type"] == "transcript.text.delta"
+        assert event == {"type": "error", **UNEXPECTED_BODY}
+    else:
+        assert r.status_code == 500
+        assert r.json() == UNEXPECTED_BODY
+    assert marker not in r.text and marker not in caplog.text
+    for record in caplog.records:
+        assert marker not in record.getMessage()
+        assert marker not in str(record.exc_info) and marker not in str(record.args)
+    messages = [record.getMessage() for record in caplog.records if record.name == "dictee"]
+    assert "unexpected error class=RuntimeError" in messages
+    assert messages[-1].endswith("status=500")
 
 
 def test_stream_accepts_only_true_or_false(ask):
@@ -473,6 +537,61 @@ async def test_waiting_for_the_slot_can_be_cancelled():
             pass
 
 
+def assert_long_audio_busy(error: ApiError) -> None:
+    assert (error.status, error.type, error.code, error.param) == (429, "rate_limit_error", "long_audio_busy", None)
+
+
+@pytest.mark.anyio
+async def test_third_long_request_is_refused_at_once_and_the_waiter_goes_on_after_the_runner():
+    gate = LongAudioGate(1.0)
+    waiter_ran = anyio.Event()
+
+    async def wait_for_the_slot():
+        async with gate.slot(5.0):
+            waiter_ran.set()
+
+    async with anyio.create_task_group() as tg:
+        async with gate.slot(5.0):
+            tg.start_soon(wait_for_the_slot)
+            await wait_until(lambda: gate.full)
+            with anyio.fail_after(0.5), pytest.raises(ApiError) as refused:
+                async with gate.slot(5.0):
+                    pytest.fail("a third long request must not be admitted")
+            assert_long_audio_busy(refused.value)
+            async with gate.slot(1.0):  # un audio court passe, même quand les places des longs sont prises
+                pass
+            assert not waiter_ran.is_set()
+        with anyio.fail_after(0.5):
+            await waiter_ran.wait()
+    assert not gate.full
+
+
+@pytest.mark.anyio
+async def test_cancelled_waiter_frees_its_waiting_place():
+    gate = LongAudioGate(1.0)
+
+    async def wait_for_the_slot():
+        async with gate.slot(5.0):
+            pytest.fail("the slot is taken")
+
+    async with gate.slot(5.0):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(wait_for_the_slot)
+            await wait_until(lambda: gate.full)
+            tg.cancel_scope.cancel()
+        assert not gate.full
+        # La place d'attente est libre : un autre audio long l'obtient, il n'est pas refusé.
+        with anyio.move_on_after(0.1) as waiting:
+            async with gate.slot(5.0):
+                pytest.fail("the slot is taken")
+        assert waiting.cancelled_caught
+    assert not gate.full
+
+
+def test_audio_limit_is_an_hour_and_a_half():
+    assert transcribe.MAX_AUDIO_SECONDS == 5400.0
+
+
 @pytest.mark.anyio
 async def test_short_request_passes_during_a_long_one(settings, fake_llm, service_headers, tmp_path):
     release = anyio.Event()
@@ -521,13 +640,23 @@ async def test_second_long_request_waits_for_the_first(settings, fake_llm, servi
     assert [a.status_code for a in answers] == [200, 200] and len(nemo.calls) == 2
 
 
-async def call_app(app, headers: dict[str, str], body: bytes, hung_up: anyio.Event, *, complete: bool = True) -> list:
+async def call_app(
+    app,
+    headers: dict[str, str],
+    body: bytes,
+    hung_up: anyio.Event,
+    *,
+    complete: bool = True,
+    sent: list | None = None,
+    on_send=None,
+) -> list:
     """Appelle l'app sans client HTTP et rend les messages envoyés.
 
-    Après le corps, `receive` attend que `hung_up` soit posé, puis dit `http.disconnect`.
+    Après le corps, `receive` attend que `hung_up` soit posé, puis dit `http.disconnect`. Les messages envoyés
+    s'ajoutent à `sent`, si elle est donnée, au fur et à mesure ; `on_send` est attendue avec chacun d'eux.
     """
     messages = [{"type": "http.request", "body": body, "more_body": not complete}]
-    sent = []
+    sent = [] if sent is None else sent
 
     async def receive():
         if messages:
@@ -537,6 +666,8 @@ async def call_app(app, headers: dict[str, str], body: bytes, hung_up: anyio.Eve
 
     async def send(message):
         sent.append(message)
+        if on_send is not None:
+            await on_send(message)
 
     scope = {
         "type": "http",
@@ -592,3 +723,121 @@ async def test_client_hanging_up_during_the_upload_is_not_an_error(settings, fak
         sent = await call_app(app, headers, body[:200], hung_up, complete=False)
     assert [message["status"] for message in sent if message["type"] == "http.response.start"] == [499]
     assert fake_nemo.calls == []
+
+
+def streaming_headers(service_headers, body: bytes, content_type: str) -> dict[str, str]:
+    return {**service_headers, "content-type": content_type, "content-length": str(len(body))}
+
+
+@pytest.mark.anyio
+async def test_client_hanging_up_mid_stream_closes_the_session_and_frees_the_slot(
+    caplog, settings, fake_llm, service_headers, tmp_path
+):
+    # Le premier delta est parti : la réponse est ouverte, et c'est Starlette qui voit le client raccrocher.
+    nemo = FakeNemo(finals=FINALS, release=anyio.Event(), after=1)
+    app = app_with(settings, nemo, fake_llm, long_audio_seconds=1.0)
+    audio = make_audio(tmp_path, "long.mp3", seconds=3.0).read_bytes()
+    body, content_type = multipart_body({"model": "dictee", "stream": "true"}, audio)
+    headers = streaming_headers(service_headers, body, content_type)
+    hung_up = anyio.Event()
+    sent: list = []
+    caplog.set_level(logging.INFO, logger="dictee")
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(functools.partial(call_app, app, headers, body, hung_up, sent=sent))
+        await wait_until(lambda: any(b"Bonjour" in message.get("body", b"") for message in sent))
+        assert sent[0]["type"] == "http.response.start" and sent[0]["status"] == 200
+        hung_up.set()
+        await wait_until(lambda: nemo.sessions_closed == 1)
+    with anyio.fail_after(0.5):
+        async with app.state.gate.slot(3.0):
+            pass
+    lines = [record.getMessage() for record in caplog.records if record.name == "dictee"]
+    assert len(lines) == 1 and lines[0].endswith("status=499")
+
+
+@pytest.mark.anyio
+async def test_client_hanging_up_before_the_stream_starts_still_ends_the_recognition(
+    caplog, settings, fake_llm, service_headers, tmp_path
+):
+    # Le client raccroche entre la création de la réponse et son premier octet : le générateur ne démarre jamais et ses
+    # `finally` ne courent pas. Seul le filet de la réponse ferme alors la session de NeMo et libère la place.
+    nemo = FakeNemo(finals=FINALS, release=anyio.Event(), after=1)
+    app = app_with(settings, nemo, fake_llm, long_audio_seconds=1.0)
+    audio = make_audio(tmp_path, "long.mp3", seconds=3.0).read_bytes()
+    body, content_type = multipart_body({"model": "dictee", "stream": "true"}, audio)
+    headers = streaming_headers(service_headers, body, content_type)
+    hung_up = anyio.Event()
+    sent: list = []
+
+    async def hang_up_at_the_start(message):
+        if message["type"] == "http.response.start":
+            hung_up.set()
+            await anyio.sleep_forever()  # annulée ici, avant que le flux ait rien envoyé
+
+    caplog.set_level(logging.INFO, logger="dictee")
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(functools.partial(call_app, app, headers, body, hung_up, sent=sent, on_send=hang_up_at_the_start))
+        await wait_until(lambda: nemo.sessions_closed == 1)
+    assert [message["type"] for message in sent] == ["http.response.start"]
+    with anyio.fail_after(0.5):
+        async with app.state.gate.slot(3.0):
+            pass
+    lines = [record.getMessage() for record in caplog.records if record.name == "dictee"]
+    assert len(lines) == 1 and lines[0].endswith("status=499")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", ["false", "true"])
+@pytest.mark.parametrize("while_decoding", [True, False], ids=["refused-while-decoding", "refused-at-the-gate"])
+async def test_third_concurrent_long_request_is_429_at_once(
+    stream, while_decoding, caplog, settings, fake_llm, service_headers, tmp_path, monkeypatch
+):
+    release = anyio.Event()
+    nemo = FakeNemo(finals=FINALS, release=release)
+    app = app_with(settings, nemo, fake_llm, long_audio_seconds=1.0)
+    audio = make_audio(tmp_path, "long.mp3", seconds=3.0).read_bytes()
+    limits = []
+    convert = transcribe.to_wav16k
+
+    async def spy(path, **kwargs):
+        limits.append(kwargs["max_seconds"])
+        if not while_decoding:
+            # Le décodage ne bornerait plus rien : le refus vient alors de la porte, à l'entrée de NeMo.
+            kwargs["max_seconds"] = transcribe.MAX_AUDIO_SECONDS
+        return await convert(path, **kwargs)
+
+    monkeypatch.setattr(transcribe, "to_wav16k", spy)
+    caplog.set_level(logging.INFO, logger="dictee")
+    answers = {}
+    async with asgi_client(app) as client:
+
+        async def send(name, **fields):
+            files = {"file": ("a.mp3", audio)}
+            data = {"model": "dictee", **fields}
+            answers[name] = await client.post(URL, headers=service_headers, files=files, data=data)
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(send, "runner")
+            await wait_until(lambda: len(nemo.calls) == 1)
+            tg.start_soon(send, "waiter")
+            await wait_until(lambda: app.state.gate.full)
+            with anyio.fail_after(2):  # le runner tient la place : un refus ne peut pas attendre
+                await send("third", stream=stream)
+            assert "runner" not in answers and "waiter" not in answers
+            release.set()
+    third = answers["third"]
+    assert third.status_code == 429
+    assert third.headers["content-type"].startswith("application/json")
+    assert third.json() == {
+        "error": {
+            "message": "Another long transcription is already waiting, try again later.",
+            "type": "rate_limit_error",
+            "param": None,
+            "code": "long_audio_busy",
+        }
+    }
+    assert [answers["runner"].status_code, answers["waiter"].status_code] == [200, 200]
+    assert len(nemo.calls) == 2  # le refusé n'a jamais atteint NeMo
+    assert limits == [transcribe.MAX_AUDIO_SECONDS] * 2 + [1.0]
+    statuses = [record.getMessage().rsplit("status=", 1)[1] for record in caplog.records if record.name == "dictee"]
+    assert sorted(statuses) == ["200", "200", "429"]
