@@ -1,0 +1,284 @@
+{
+  "duration": 30,
+  "language": "fr-FR",
+  "task": "transcribe",
+  "text": "Bonjour, je teste la transcription d'une motron et de sort former ce matin. Très bien, parlons maintenant de la synthèse vocale en français, je teste la transcription d'une motron et de sort former ce matin parlons maintenant de la synthèse vocale en français. Ce matin, parlons",
+  "words": [
+    {
+      "confidence": 1,
+      "end": 0.88,
+      "start": 0.64,
+      "word": "Bonjour,"
+    },
+    {
+      "confidence": 1,
+      "end": 1.68,
+      "start": 1.6,
+      "word": "je"
+    },
+    {
+      "confidence": 1,
+      "end": 1.92,
+      "start": 1.84,
+      "word": "teste"
+    },
+    {
+      "confidence": 1,
+      "end": 2.32,
+      "start": 2.24,
+      "word": "la"
+    },
+    {
+      "confidence": 1,
+      "end": 2.8,
+      "start": 2.56,
+      "word": "transcription"
+    },
+    {
+      "confidence": 1,
+      "end": 3.28,
+      "start": 3.2,
+      "word": "d'une"
+    },
+    {
+      "confidence": 1,
+      "end": 4,
+      "start": 3.52,
+      "word": "motron"
+    },
+    {
+      "confidence": 1,
+      "end": 4.08,
+      "start": 4,
+      "word": "et"
+    },
+    {
+      "confidence": 1,
+      "end": 4.24,
+      "start": 4.16,
+      "word": "de"
+    },
+    {
+      "confidence": 1,
+      "end": 4.56,
+      "start": 4.32,
+      "word": "sort"
+    },
+    {
+      "confidence": 1,
+      "end": 4.8,
+      "start": 4.64,
+      "word": "former"
+    },
+    {
+      "confidence": 1,
+      "end": 4.96,
+      "start": 4.88,
+      "word": "ce"
+    },
+    {
+      "confidence": 1,
+      "end": 5.2,
+      "start": 4.96,
+      "word": "matin."
+    },
+    {
+      "confidence": 1,
+      "end": 7.04,
+      "start": 6.88,
+      "word": "Très"
+    },
+    {
+      "confidence": 1,
+      "end": 7.28,
+      "start": 7.2,
+      "word": "bien,"
+    },
+    {
+      "confidence": 1,
+      "end": 8.16,
+      "start": 7.76,
+      "word": "parlons"
+    },
+    {
+      "confidence": 1,
+      "end": 8.32,
+      "start": 8.16,
+      "word": "maintenant"
+    },
+    {
+      "confidence": 1,
+      "end": 8.48,
+      "start": 8.4,
+      "word": "de"
+    },
+    {
+      "confidence": 1,
+      "end": 8.64,
+      "start": 8.56,
+      "word": "la"
+    },
+    {
+      "confidence": 1,
+      "end": 9.12,
+      "start": 8.72,
+      "word": "synthèse"
+    },
+    {
+      "confidence": 1,
+      "end": 9.6,
+      "start": 9.28,
+      "word": "vocale"
+    },
+    {
+      "confidence": 1,
+      "end": 9.84,
+      "start": 9.76,
+      "word": "en"
+    },
+    {
+      "confidence": 1,
+      "end": 10.16,
+      "start": 10,
+      "word": "français,"
+    },
+    {
+      "confidence": 1,
+      "end": 12.88,
+      "start": 12.8,
+      "word": "je"
+    },
+    {
+      "confidence": 1,
+      "end": 13.04,
+      "start": 12.96,
+      "word": "teste"
+    },
+    {
+      "confidence": 1,
+      "end": 13.6,
+      "start": 13.52,
+      "word": "la"
+    },
+    {
+      "confidence": 1,
+      "end": 13.92,
+      "start": 13.6,
+      "word": "transcription"
+    },
+    {
+      "confidence": 1,
+      "end": 14.4,
+      "start": 14.16,
+      "word": "d'une"
+    },
+    {
+      "confidence": 1,
+      "end": 15.04,
+      "start": 14.56,
+      "word": "motron"
+    },
+    {
+      "confidence": 1,
+      "end": 15.2,
+      "start": 15.12,
+      "word": "et"
+    },
+    {
+      "confidence": 1,
+      "end": 15.28,
+      "start": 15.2,
+      "word": "de"
+    },
+    {
+      "confidence": 1,
+      "end": 15.68,
+      "start": 15.44,
+      "word": "sort"
+    },
+    {
+      "confidence": 1,
+      "end": 15.92,
+      "start": 15.76,
+      "word": "former"
+    },
+    {
+      "confidence": 1,
+      "end": 16.08,
+      "start": 16,
+      "word": "ce"
+    },
+    {
+      "confidence": 1,
+      "end": 16.32,
+      "start": 16.16,
+      "word": "matin"
+    },
+    {
+      "confidence": 1,
+      "end": 19.12,
+      "start": 18.72,
+      "word": "parlons"
+    },
+    {
+      "confidence": 1,
+      "end": 19.36,
+      "start": 19.2,
+      "word": "maintenant"
+    },
+    {
+      "confidence": 1,
+      "end": 19.52,
+      "start": 19.44,
+      "word": "de"
+    },
+    {
+      "confidence": 1,
+      "end": 19.6,
+      "start": 19.52,
+      "word": "la"
+    },
+    {
+      "confidence": 1,
+      "end": 20.16,
+      "start": 19.84,
+      "word": "synthèse"
+    },
+    {
+      "confidence": 1,
+      "end": 20.56,
+      "start": 20.16,
+      "word": "vocale"
+    },
+    {
+      "confidence": 1,
+      "end": 20.88,
+      "start": 20.8,
+      "word": "en"
+    },
+    {
+      "confidence": 1,
+      "end": 21.04,
+      "start": 20.88,
+      "word": "français."
+    },
+    {
+      "confidence": 1,
+      "end": 27.2,
+      "start": 27.12,
+      "word": "Ce"
+    },
+    {
+      "confidence": 1,
+      "end": 27.36,
+      "start": 27.2,
+      "word": "matin,"
+    },
+    {
+      "confidence": 1,
+      "end": 30,
+      "start": 29.84,
+      "word": "parlons"
+    }
+  ]
+}
