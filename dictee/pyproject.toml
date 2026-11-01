@@ -6,6 +6,8 @@ requires-python = ">=3.13,<3.14"
 dependencies = [
     "authlib",
     "httpx",
+    # Client HTTP qu'Authlib charge en premier : sans lui, il retombe sur httpx avec un avertissement de dépréciation.
+    "httpx2",
     "itsdangerous",
     "jinja2",
     "python-multipart",

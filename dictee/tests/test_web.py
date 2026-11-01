@@ -1,5 +1,6 @@
 """Page de configuration : connexion PocketID, clés, réglages de chacun et aperçu des voix."""
 
+import asyncio
 import base64
 import dataclasses
 import html
@@ -14,6 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlsplit
 
+import anyio
 import httpx
 import pytest
 from authlib.integrations.starlette_client import OAuthError
@@ -23,7 +25,7 @@ from dictee.app import create_app
 from dictee.db import StoredSettings
 from dictee.nemo import TTS_SAMPLE_RATE, NemoOverloaded, NemoUnavailable
 from dictee.profile import DEFAULT_INSTRUCTIONS
-from dictee.web import PREVIEW_TEXT, build_oauth
+from dictee.web import PREVIEW_TEXT, PreviewCache, build_oauth
 
 USERINFO = {"sub": "sub-1", "email": "a@example.org", "name": "A"}
 MP3_MAGIC = (b"ID3", b"\xff\xfb", b"\xff\xf3")
@@ -42,9 +44,18 @@ POSTS = [
 POST_ROUTES = {"/keys", "/keys/{key_id:int}/revoke", "/settings", "/settings/reset-instructions", "/logout"}
 
 
-def sign_in(client, userinfo=USERINFO):
-    """Fait revenir PocketID : seul l'échange du code est remplacé, le reste de la route est réel."""
-    client.app.state.oauth.pocketid.authorize_access_token = AsyncMock(return_value={"userinfo": userinfo})
+def sign_in(client, userinfo=USERINFO, *, endpoint=None):
+    """Fait revenir PocketID : seuls l'échange du code et le point `userinfo` sont remplacés, le reste est réel.
+
+    `userinfo` est ce que le jeton d'identité porte ; `endpoint`, ce que répond le point `userinfo` de PocketID
+    (rien par défaut), ou l'exception qu'il lève.
+    """
+    pocketid = client.app.state.oauth.pocketid
+    pocketid.authorize_access_token = AsyncMock(return_value={"access_token": "token", "userinfo": userinfo})
+    if isinstance(endpoint, Exception):
+        pocketid.userinfo = AsyncMock(side_effect=endpoint)
+    else:
+        pocketid.userinfo = AsyncMock(return_value={} if endpoint is None else endpoint)
     return client.get("/auth/callback", params={"code": "c", "state": "s"}, follow_redirects=False)
 
 
@@ -223,6 +234,39 @@ def test_callback_refuses_an_answer_without_sub_or_email(transcriptions_client, 
     r = sign_in(transcriptions_client, userinfo)
     assert r.status_code == 400 and r.headers["content-type"].startswith("text/html")
     assert "set-cookie" not in r.headers
+    assert user_rows(db_path) == []
+    transcriptions_client.app.state.oauth.pocketid.userinfo.assert_awaited_once()  # PocketID a été interrogé aussi
+
+
+@pytest.mark.parametrize("claims", [None, {}, {"sub": "sub-1"}, {"sub": "sub-1", "email": " "}])
+def test_callback_asks_the_userinfo_endpoint_when_the_identity_token_is_incomplete(transcriptions_client, db, claims):
+    r = sign_in(transcriptions_client, claims, endpoint=USERINFO)
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    assert db.user_by_email("a@example.org") is not None
+    userinfo = transcriptions_client.app.state.oauth.pocketid.userinfo
+    userinfo.assert_awaited_once()
+    assert userinfo.await_args.kwargs["token"]["access_token"] == "token"
+
+
+def test_callback_keeps_the_identity_token_when_it_is_complete(transcriptions_client, db):
+    assert sign_in(transcriptions_client, endpoint={**USERINFO, "email": "other@example.org"}).status_code == 303
+    transcriptions_client.app.state.oauth.pocketid.userinfo.assert_not_awaited()
+    assert db.user_by_email("a@example.org") is not None and db.user_by_email("other@example.org") is None
+
+
+def test_callback_refuses_a_userinfo_answer_about_another_subject(transcriptions_client, db_path):
+    # Le `sub` de `userinfo` doit être celui du jeton d'identité, sinon ses valeurs ne servent pas (OIDC Core 5.3.2).
+    r = sign_in(transcriptions_client, {"sub": "sub-1"}, endpoint={**USERINFO, "sub": "sub-2"})
+    assert r.status_code == 400 and 'href="/login"' in r.text
+    assert "set-cookie" not in r.headers
+    assert user_rows(db_path) == []
+
+
+def test_callback_refuses_when_the_userinfo_endpoint_fails(transcriptions_client, db_path, caplog):
+    with caplog.at_level(logging.INFO, logger="dictee"):
+        r = sign_in(transcriptions_client, None, endpoint=ValueError("secret-detail"))
+    assert r.status_code == 400 and 'href="/login"' in r.text
+    assert "ValueError" in caplog.text and "secret-detail" not in r.text + caplog.text
     assert user_rows(db_path) == []
 
 
@@ -514,6 +558,97 @@ def test_voice_preview_accepts_any_casing_and_speaks_with_the_nemo_name(logged_i
     fake_nemo.pcm = bytes(2 * TTS_SAMPLE_RATE)
     assert logged_in.client.get("/voice/preview", params={"voice": "aRIA"}).status_code == 200
     assert fake_nemo.speak_calls[-1]["voice"] == "Aria"
+
+
+def test_voice_preview_is_synthesized_once_per_voice(logged_in, fake_nemo):
+    fake_nemo.pcm = bytes(2 * TTS_SAMPLE_RATE)
+    first = logged_in.client.get("/voice/preview", params={"voice": "Leo"})
+    second = logged_in.client.get("/voice/preview", params={"voice": "leo"})
+    assert first.content and first.content == second.content
+    assert len(fake_nemo.speak_calls) == 1
+    logged_in.client.get("/voice/preview", params={"voice": "Aria"})
+    assert [call["voice"] for call in fake_nemo.speak_calls] == ["Leo", "Aria"]
+
+
+def test_voice_preview_does_not_keep_a_failure(logged_in, fake_nemo):
+    fake_nemo.pcm = bytes(2 * TTS_SAMPLE_RATE)
+    fake_nemo.error = NemoUnavailable("down")
+    assert logged_in.client.get("/voice/preview", params={"voice": "Leo"}).status_code == 502
+    fake_nemo.error = None
+    assert logged_in.client.get("/voice/preview", params={"voice": "Leo"}).status_code == 200
+    fake_nemo.error = NemoUnavailable("down")  # l'aperçu réussi est gardé : NeMo n'est plus sollicité
+    assert logged_in.client.get("/voice/preview", params={"voice": "Leo"}).status_code == 200
+    assert len(fake_nemo.speak_calls) == 2
+
+
+@pytest.mark.anyio
+async def test_preview_cache_synthesizes_once_when_requests_overlap():
+    cache = PreviewCache()
+    calls = []
+
+    async def synthesize():
+        calls.append(1)
+        await anyio.sleep(0.01)
+        return b"mp3"
+
+    assert await asyncio.gather(cache.get("Leo", synthesize), cache.get("Leo", synthesize)) == [b"mp3", b"mp3"]
+    assert len(calls) == 1
+
+
+@pytest.fixture
+def preview_mp3(logged_in, fake_nemo):
+    """L'aperçu de Leo en entier, et de quoi le redemander avec un en-tête `Range`."""
+    fake_nemo.pcm = bytes(2 * TTS_SAMPLE_RATE)
+
+    def get(range_header=None):
+        headers = {} if range_header is None else {"Range": range_header}
+        return logged_in.client.get("/voice/preview", params={"voice": "Leo"}, headers=headers)
+
+    whole = get()
+    assert whole.status_code == 200 and len(whole.content) > 1000
+    return SimpleNamespace(get=get, content=whole.content, size=len(whole.content), whole=whole)
+
+
+def test_voice_preview_says_it_serves_byte_ranges(preview_mp3):
+    assert preview_mp3.whole.headers["accept-ranges"] == "bytes"
+    assert preview_mp3.whole.headers["content-length"] == str(preview_mp3.size)
+
+
+@pytest.mark.parametrize(
+    ("header", "span"),
+    [
+        ("bytes=0-1", lambda size: (0, 1)),
+        ("bytes=0-0", lambda size: (0, 0)),
+        ("bytes=2-5", lambda size: (2, 5)),
+        ("bytes=3-", lambda size: (3, size - 1)),
+        ("bytes=-4", lambda size: (size - 4, size - 1)),
+        ("bytes=0-99999999", lambda size: (0, size - 1)),
+        ("Bytes = 1 - 2", lambda size: (1, 2)),
+    ],
+)
+def test_voice_preview_serves_a_single_byte_range_as_206(preview_mp3, header, span):
+    start, end = span(preview_mp3.size)
+    r = preview_mp3.get(header)
+    assert r.status_code == 206 and r.headers["content-type"] == "audio/mpeg"
+    assert r.content == preview_mp3.content[start : end + 1]
+    assert r.headers["content-range"] == f"bytes {start}-{end}/{preview_mp3.size}"
+    assert r.headers["content-length"] == str(end - start + 1) and r.headers["accept-ranges"] == "bytes"
+
+
+@pytest.mark.parametrize("header", ["bytes=99999999-", "bytes=-0"])
+def test_voice_preview_refuses_a_range_past_the_end_with_416(preview_mp3, header):
+    r = preview_mp3.get(header)
+    assert r.status_code == 416 and r.headers["content-range"] == f"bytes */{preview_mp3.size}"
+    assert r.headers["accept-ranges"] == "bytes"
+
+
+@pytest.mark.parametrize(
+    "header",
+    ["bytes=", "bytes=-", "bytes=abc", "items=0-1", "0-1", "bytes=5-2", "bytes=0-1,3-4", "bytes=" + "9" * 5000 + "-"],
+)
+def test_voice_preview_sends_the_whole_file_for_a_range_it_does_not_follow(preview_mp3, header):
+    r = preview_mp3.get(header)
+    assert r.status_code == 200 and r.content == preview_mp3.content and "content-range" not in r.headers
 
 
 def test_voice_preview_requires_a_session(client):

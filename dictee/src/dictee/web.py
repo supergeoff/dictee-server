@@ -12,11 +12,13 @@ cache et portent une politique de sécurité qui n'autorise ni script, ni image,
 Le journal ne garde d'une connexion que le numéro du compte, jamais l'email, le nom, un jeton ni un réglage.
 """
 
+import asyncio
 import contextlib
 import logging
+import re
 import secrets
 import sqlite3
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
 from authlib.integrations.starlette_client import OAuth
 from jinja2 import Environment, PackageLoader, StrictUndefined
@@ -54,6 +56,11 @@ PAGE_HEADERS = {
 }
 HOME_LINK = ("/", "Retour à la page de configuration")
 LOGIN_LINK = ("/login", "Se connecter")
+LOGIN_FAILED = "La connexion avec PocketID a échoué."
+
+# Une seule plage d'octets : `bytes=a-b`, `bytes=a-` ou `bytes=-n`. Les nombres sont bornés, car `int` refuse les très
+# longues suites de chiffres.
+_BYTE_RANGE = re.compile(r"\s*bytes\s*=\s*(\d{1,15})?\s*-\s*(\d{1,15})?\s*", re.IGNORECASE)
 
 _templates = Jinja2Templates(
     env=Environment(
@@ -70,6 +77,26 @@ class WebError(Exception):
         self.status = status
         self.message = message
         self.link = link
+
+
+class PreviewCache:
+    """Mp3 de l'aperçu de chaque voix, gardés après la première synthèse réussie.
+
+    Un échec n'est pas gardé. Une voix n'est synthétisée qu'une fois à la fois : les requêtes qui arrivent ensemble
+    (Safari en envoie plusieurs par lecture) attendent la première au lieu de relancer chacune une synthèse.
+    """
+
+    def __init__(self) -> None:
+        self._mp3: dict[str, bytes] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    async def get(self, voice: str, synthesize: Callable[[], Awaitable[bytes]]) -> bytes:
+        """Mp3 de `voice` ; `synthesize` le fabrique si la voix n'est pas encore gardée."""
+        if voice not in self._mp3:
+            async with self._locks.setdefault(voice, asyncio.Lock()):
+                if voice not in self._mp3:
+                    self._mp3[voice] = await synthesize()
+        return self._mp3[voice]
 
 
 def _page(request: Request, name: str, context: dict, status: int = 200) -> Response:
@@ -200,27 +227,56 @@ async def login(request: Request) -> Response:
         raise WebError(502, "Le service de connexion ne répond pas. Réessayez dans un instant.", LOGIN_LINK) from None
 
 
+def _login_failed(error: Exception) -> WebError:
+    """Refus d'une connexion dont l'échange avec PocketID a échoué ; seule la classe de l'exception est journalisée.
+
+    Authlib, joserfc et httpx lèvent chacun leurs classes (état, jeton, signature, réseau) : toutes refusent la
+    connexion, et le message de l'exception peut citer le code ou le jeton.
+    """
+    logger.warning("login refused class=%s", type(error).__name__)
+    return WebError(400, LOGIN_FAILED, LOGIN_LINK)
+
+
+def _identity(claims: object) -> tuple[str, str, str] | None:
+    """`(sub, email, nom)` d'un `userinfo`, ou `None` s'il manque le `sub` ou l'email ; l'email tient lieu de nom."""
+    if not isinstance(claims, Mapping):
+        return None
+    sub, email, name = claims.get("sub"), claims.get("email"), claims.get("name")
+    if not (isinstance(sub, str) and sub.strip() and isinstance(email, str) and email.strip()):
+        return None
+    return sub, email, name if isinstance(name, str) and name.strip() else email
+
+
 async def callback(request: Request) -> Response:
     """Retour de PocketID : ouvre une session pour le compte, créé au premier passage.
 
-    Un email déjà pris par un autre compte refuse la connexion : rattacher le compte existant au nouvel identifiant
-    laisserait quiconque met l'email d'un autre dans PocketID prendre sa place.
+    Le jeton d'identité dit qui se connecte ; s'il ne porte pas le `sub` ou l'email, le point `userinfo` de PocketID
+    les donne. Un email déjà pris par un autre compte refuse la connexion : rattacher le compte existant au nouvel
+    identifiant laisserait quiconque met l'email d'un autre dans PocketID prendre sa place.
     """
     state = request.app.state
+    pocketid = state.oauth.pocketid
     try:
-        token = await state.oauth.pocketid.authorize_access_token(request)
+        token = await pocketid.authorize_access_token(request)
     except Exception as error:
-        # Authlib, joserfc et httpx lèvent chacun leurs classes (état, jeton, signature, réseau) : toutes refusent la
-        # connexion, et seule la classe est journalisée, car le message peut citer le code ou le jeton.
-        logger.warning("login refused class=%s", type(error).__name__)
-        raise WebError(400, "La connexion avec PocketID a échoué.", LOGIN_LINK) from None
+        raise _login_failed(error) from None
     claims = token.get("userinfo")
-    claims = claims if isinstance(claims, Mapping) else {}
-    sub, email, name = claims.get("sub"), claims.get("email"), claims.get("name")
-    if not (isinstance(sub, str) and sub.strip() and isinstance(email, str) and email.strip()):
+    identity = _identity(claims)
+    if identity is None:
+        try:
+            identity = _identity(await pocketid.userinfo(token=token))
+        except Exception as error:
+            raise _login_failed(error) from None
+        # Les valeurs de `userinfo` ne valent que pour le `sub` du jeton d'identité (OpenID Connect Core, 5.3.2).
+        known = claims.get("sub") if isinstance(claims, Mapping) else None
+        if identity is not None and isinstance(known, str) and known != identity[0]:
+            logger.warning("login refused reason=userinfo_subject_mismatch")
+            raise WebError(400, LOGIN_FAILED, LOGIN_LINK)
+    if identity is None:
         raise WebError(400, "PocketID n'a pas transmis l'identifiant ou l'email du compte.", LOGIN_LINK)
+    sub, email, name = identity
     try:
-        user_id = state.db.upsert_user(sub, email, name if isinstance(name, str) and name.strip() else email)
+        user_id = state.db.upsert_user(sub, email, name)
     except sqlite3.IntegrityError:
         message = "Un autre compte utilise déjà cet email. Adressez-vous à l'administrateur."
         raise WebError(409, message, LOGIN_LINK) from None
@@ -295,14 +351,48 @@ async def _mp3(pcm: bytes) -> bytes:
         return b"".join([chunk async for chunk in encoded])
 
 
+def _mp3_response(mp3: bytes, range_header: str | None) -> Response:
+    """Réponse portant `mp3`, qui suit une requête `Range` d'une seule plage, comme Safari l'exige d'un `<audio>`.
+
+    Une plage satisfaisable donne 206 avec `Content-Range`, une plage qui commence après la fin donne 416. Un en-tête
+    absent, d'une autre unité, mal formé ou de plusieurs plages est ignoré, ce que la RFC 9110 permet : le fichier
+    entier est rendu.
+    """
+    headers = {"Accept-Ranges": "bytes"}
+    media_type = OUTPUT_FORMATS["mp3"]
+    size = len(mp3)
+    match = _BYTE_RANGE.fullmatch(range_header or "")
+    first, last = (None if group is None else int(group) for group in match.groups()) if match else (None, None)
+    reversed_span = first is not None and last is not None and last < first
+    if (first is None and last is None) or reversed_span:
+        return Response(mp3, media_type=media_type, headers=headers)
+    if first is None:  # `bytes=-n` : les n derniers octets, aucun si n vaut 0
+        start, end = (max(size - last, 0) if last else size), size - 1
+    else:
+        start, end = first, size - 1 if last is None else min(last, size - 1)
+    if start >= size:
+        return Response(status_code=416, headers={**headers, "Content-Range": f"bytes */{size}"})
+    headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+    return Response(mp3[start : end + 1], status_code=206, media_type=media_type, headers=headers)
+
+
 async def voice_preview(request: Request) -> Response:
-    """Aperçu d'une voix : `PREVIEW_TEXT` en français, en mp3. Le texte est fixe et n'est pas journalisé."""
+    """Aperçu d'une voix : `PREVIEW_TEXT` en français, en mp3. Le texte est fixe et n'est pas journalisé.
+
+    L'aperçu de chaque voix est synthétisé une fois, puis gardé (`PreviewCache`) : relire un aperçu ou en lire les
+    plages ne sollicite plus NeMo.
+    """
     if _session_user(request) is None:
         raise WebError(401, "Connectez-vous pour écouter les voix.", LOGIN_LINK)
     state = request.app.state
+
+    async def synthesize() -> bytes:
+        pcm = await state.nemo.speak(PREVIEW_TEXT, voice=voice, language=LANGUAGE)
+        return await _mp3(pcm)
+
     try:
         voice = await _known_voice(state, request.query_params.get("voice", ""))
-        pcm = await state.nemo.speak(PREVIEW_TEXT, voice=voice, language=LANGUAGE)
+        mp3 = await state.previews.get(voice, synthesize)
     except NEMO_ERRORS as error:
         raise nemo_failure(error) from None
-    return Response(await _mp3(pcm), media_type=OUTPUT_FORMATS["mp3"])
+    return _mp3_response(mp3, request.headers.get("range"))

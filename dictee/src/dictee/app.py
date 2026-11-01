@@ -21,6 +21,7 @@ from dictee.settings import Settings
 from dictee.speech import speech
 from dictee.transcribe import LongAudioGate, transcriptions
 from dictee.web import (
+    PreviewCache,
     WebError,
     build_oauth,
     callback,
@@ -57,7 +58,8 @@ def create_app(settings: Settings, *, nemo=None, http: httpx.AsyncClient | None 
 
     Chaque route `/v1` appelle `require_caller` en premier ; `/health` reste ouverte. La page de configuration
     (`dictee.web`) ouvre ses sessions par PocketID : `app.state.oauth` porte le client `pocketid`, et le cookie de
-    session, signé par `settings.session_secret`, n'est envoyé que sur une connexion sécurisée.
+    session, signé par `settings.session_secret`, n'est envoyé que sur une connexion sécurisée. `app.state.previews`
+    garde les aperçus de voix déjà synthétisés.
     """
 
     @contextlib.asynccontextmanager
@@ -107,4 +109,5 @@ def create_app(settings: Settings, *, nemo=None, http: httpx.AsyncClient | None 
     app.state.http = http
     app.state.gate = LongAudioGate(settings.long_audio_seconds)
     app.state.voices = None
+    app.state.previews = PreviewCache()
     return app

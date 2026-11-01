@@ -146,6 +146,7 @@ source = { editable = "." }
 dependencies = [
     { name = "authlib" },
     { name = "httpx" },
+    { name = "httpx2" },
     { name = "itsdangerous" },
     { name = "jinja2" },
     { name = "python-multipart" },
@@ -165,6 +166,7 @@ dev = [
 requires-dist = [
     { name = "authlib" },
     { name = "httpx" },
+    { name = "httpx2" },
     { name = "itsdangerous" },
     { name = "jinja2" },
     { name = "python-multipart" },
