@@ -1,11 +1,14 @@
 import math
 import struct
 import subprocess
+import threading
+import time
 import wave
 from pathlib import Path
 
 import anyio
 import pytest
+import uvicorn
 from fakes import FINALS, FakeLlm, FakeNemo
 from openai import OpenAI
 from starlette.testclient import TestClient
@@ -175,6 +178,35 @@ def transcriptions_client(settings, fake_nemo, fake_llm):
     app = create_app(settings, nemo=fake_nemo, http=fake_llm.http)
     with TestClient(app, base_url="https://testserver") as test_client:
         yield test_client
+
+
+@pytest.fixture
+def live_client(transcriptions_client):
+    """Client de la dictée en direct : la même app, qui parle au faux NeMo ; il ouvre ses WebSocket dans un fil à part."""
+    return transcriptions_client
+
+
+@pytest.fixture
+def live_server(settings, fake_nemo, fake_llm):
+    """URL de base d'un vrai serveur uvicorn de l'app sur le faux NeMo, sur un port libre de 127.0.0.1, dans un fil.
+
+    Le client temps réel du SDK d'OpenAI ouvre sa connexion par `websockets.sync` : il lui faut un vrai serveur, que
+    `TestClient` ne fournit pas. `log_config=None` laisse la configuration des journaux du processus de test intacte.
+    """
+    app = create_app(settings, nemo=fake_nemo, http=fake_llm.http)
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_config=None, log_level="warning"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not server.started:
+            assert thread.is_alive() and time.monotonic() < deadline, "uvicorn did not start"
+            time.sleep(0.01)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        thread.join(5)
 
 
 @pytest.fixture

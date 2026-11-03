@@ -17,7 +17,7 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 
 from dictee.audio import SAMPLE_WIDTH, TRANSCRIPTION_RATE, pcm_frames
-from dictee.types import Final, Partial, Word
+from dictee.types import Cleared, Committed, Final, Partial, Word
 
 # Fréquence native de la synthèse de NeMo (mesurée en tâche 1) : `speak` rend du PCM16 mono à cette fréquence.
 TTS_SAMPLE_RATE = 22050
@@ -49,6 +49,7 @@ READY_TIMEOUT = 5.0
 _DELTA = "conversation.item.input_audio_transcription.delta"
 _COMPLETED = "conversation.item.input_audio_transcription.completed"
 _COMMITTED = "input_audio_buffer.committed"
+_CLEARED = "input_audio_buffer.cleared"
 
 # À son niveau DEBUG, `websockets` écrit chaque en-tête de la poignée de main (dont la clé d'API) et un extrait de
 # chaque trame (dont la session, qui porte le glossaire et la consigne). Il lit ce niveau à la création de la
@@ -110,6 +111,11 @@ async def _next_event(ws: ClientConnection, timeout: float | None = None, sender
             raw = await (ws.recv() if sender is None else _receive(ws, sender))
     except TimeoutError:
         raise NemoError(f"no event from NeMo for {timeout:g} seconds") from None
+    return _decode(raw)
+
+
+def _decode(raw: str | bytes) -> dict:
+    """Événement lu dans un message de NeMo ; un événement `error` lève l'exception qui lui correspond."""
     event = json.loads(raw)
     if event.get("type") == "error":
         raise _event_error(event)
@@ -152,6 +158,58 @@ def _word(word: dict) -> Word:
 
 def _final(event: dict) -> Final:
     return Final(text=event["transcript"], words=tuple(_word(word) for word in event.get("words") or ()))
+
+
+class LiveSession:
+    """Session temps réel de NeMo ouverte par `NemoClient.live` pour la dictée en direct.
+
+    `send_audio` envoie le PCM16 tel quel en une trame binaire, à la fréquence déclarée à l'ouverture ; `commit`
+    valide la prise de parole en cours et `clear` en vide l'audio. `events` rend ce que NeMo répond, dans l'ordre
+    d'arrivée : un `Partial` par delta non vide, un `Final` par texte final (sans mots, que la session ne demande
+    pas), un `Committed` quand NeMo a fini une prise de parole validée et un `Cleared` quand il en a vidé l'audio.
+
+    L'attente des événements n'a pas de délai : pendant une dictée, NeMo se tait tant que le client n'envoie rien, et
+    c'est la connexion du client qui borne la session. Lève les mêmes exceptions que `NemoClient.transcribe` :
+    `NemoUnavailable` quand NeMo coupe la connexion, `NemoOverloaded` et `NemoError` pour ses événements `error`.
+    """
+
+    def __init__(self, ws: ClientConnection) -> None:
+        self._ws = ws
+
+    async def _send(self, message: str | bytes) -> None:
+        try:
+            await self._ws.send(message)
+        except ConnectionClosed as exc:
+            raise NemoUnavailable(f"NeMo closed the realtime connection: {exc}") from exc
+
+    async def send_audio(self, pcm: bytes) -> None:
+        await self._send(pcm)
+
+    async def commit(self) -> None:
+        await self._send(json.dumps({"type": "input_audio_buffer.commit"}))
+
+    async def clear(self) -> None:
+        await self._send(json.dumps({"type": "input_audio_buffer.clear"}))
+
+    async def events(self) -> AsyncIterator[Partial | Final | Committed | Cleared]:
+        while True:
+            try:
+                event = _decode(await self._ws.recv())
+            except ConnectionClosed as exc:
+                raise NemoUnavailable(f"NeMo closed the realtime connection: {exc}") from exc
+            kind = event.get("type")
+            if kind == _DELTA:
+                if text := event.get("delta"):
+                    yield Partial(text)
+            elif kind == _COMPLETED:
+                transcript = event.get("transcript")
+                if not isinstance(transcript, str):
+                    raise NemoError("NeMo sent a final event without its transcript")
+                yield Final(transcript, ())
+            elif kind == _COMMITTED:
+                yield Committed()
+            elif kind == _CLEARED:
+                yield Cleared()
 
 
 def _error_message(response: httpx.Response) -> str:
@@ -258,6 +316,41 @@ class NemoClient:
             if sender is not None:
                 sender.cancel()
                 await asyncio.gather(sender, return_exceptions=True)
+            await ws.close()
+
+    @contextlib.asynccontextmanager
+    async def live(
+        self,
+        *,
+        sample_rate: int,
+        language: str,
+        phrases: Sequence[str],
+        boost: float,
+        endpointing_ms: int | None = None,
+    ) -> AsyncIterator[LiveSession]:
+        """Ouvre une session temps réel pour la dictée en direct et la ferme à la sortie du bloc `async with`.
+
+        La session reçoit `sample_rate`, la fréquence de l'audio que le client envoie (NeMo accepte de 8000 à
+        96000 Hz), `language`, `speech_contexts` s'il y a des termes, et `endpointing_ms` s'il est donné : NeMo
+        ferme alors seul une phrase après ce silence. Ni `word_timestamps` ni `prompt` ne partent. NeMo refuse un
+        `session.update` une fois l'audio commencé : les réglages se fixent ici, une fois pour toutes.
+
+        L'ouverture lève les erreurs de `transcribe` ; la session, celles que décrit `LiveSession`.
+        """
+        session: dict[str, object] = {"sample_rate": sample_rate, "language": language}
+        if phrases:
+            session["speech_contexts"] = [{"phrases": list(phrases), "boost": boost}]
+        if endpointing_ms is not None:
+            session["endpointing_ms"] = endpointing_ms
+        ws = await self._open()
+        try:
+            await _expect(ws, "session.created")
+            await ws.send(json.dumps({"type": "session.update", "session": session}))
+            await _expect(ws, "session.updated")
+            yield LiveSession(ws)
+        except ConnectionClosed as exc:
+            raise NemoUnavailable(f"NeMo closed the realtime connection: {exc}") from exc
+        finally:
             await ws.close()
 
     async def _request(self, method: str, path: str, *, timeout: float, **kwargs) -> httpx.Response:

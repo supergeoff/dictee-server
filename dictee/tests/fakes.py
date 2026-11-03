@@ -1,6 +1,7 @@
 """Faux NeMo et faux LiteLLM des tests de routes : aucun réseau, aucun modèle."""
 
 import asyncio
+import contextlib
 import io
 import json
 import wave
@@ -9,7 +10,7 @@ from dataclasses import replace
 
 import httpx
 
-from dictee.types import Final, Partial, Word
+from dictee.types import Cleared, Committed, Final, Partial, Word
 
 # Deux phrases finales de deux personnes, que la session temps réel de NeMo numérote « 0 » puis « 1 » : le texte
 # attendu est « Bonjour à tous. Salut. ».
@@ -31,11 +32,72 @@ CHUNK = Final(
 # Voix de Magpie, comme la route `/v1/models` de NeMo les liste.
 VOICES = ["John", "Sofia", "Aria", "Jason", "Leo"]
 
+# Les prises de parole que la dictée en direct reçoit par défaut : chacune un texte partiel, puis la phrase finale de
+# `FINALS` qui lui correspond.
+LIVE_TURNS = ((Partial("Bonjour"), FINALS[0]), (Partial("Salut"), FINALS[1]))
+
 
 def _wav_info(source: str | io.BytesIO) -> tuple[int, float]:
     """Cadence et durée en secondes d'un WAV : le chemin d'un fichier écrit sur le disque, ou ses octets en mémoire."""
     with wave.open(source) as wav:
         return wav.getframerate(), wav.getnframes() / wav.getframerate()
+
+
+class FakeLiveSession:
+    """Fausse `LiveSession` que `FakeNemo.live` ouvre : elle note ce qu'elle reçoit et rejoue `live_turns`.
+
+    `options` garde les arguments de `live`, `audio` les octets reçus bout à bout, `commits` et `clears` le nombre de
+    commits et d'effacements, `closed` la fermeture de la session. Les prises de parole de `nemo.live_turns` se suivent
+    d'une session à l'autre : les `Partial` de la prise de parole en cours partent à son premier `send_audio`, son
+    `Final` puis un `Committed` à son commit, et la suivante commence. Avec `endpointing_ms`, comme NeMo qui ferme seul
+    une phrase après un silence, le `Final` part aussitôt après les `Partial`, sans `Committed`, et la prise de parole
+    suivante commence au prochain `send_audio`. Un effacement rend un `Cleared` et laisse la même prise de parole
+    recommencer. `nemo.live_error`, s'il est donné, est levée par `events`.
+    """
+
+    def __init__(self, nemo: "FakeNemo", options: dict) -> None:
+        self.nemo = nemo
+        self.options = options
+        self.audio = bytearray()
+        self.commits = 0
+        self.clears = 0
+        self.closed = False
+        self._events: asyncio.Queue = asyncio.Queue()
+        self._started = False  # les `Partial` de la prise de parole en cours sont déjà partis
+
+    def _put(self, kind: type) -> None:
+        for event in self.nemo.live_turn():
+            if isinstance(event, kind):
+                self._events.put_nowait(event)
+
+    async def send_audio(self, pcm: bytes) -> None:
+        self.audio += pcm
+        if self._started:
+            return
+        self._started = True
+        self._put(Partial)
+        if self.options["endpointing_ms"] is not None:
+            self._put(Final)
+            self.nemo.next_live_turn()
+            self._started = False
+
+    async def commit(self) -> None:
+        self.commits += 1
+        self._put(Final)
+        self._events.put_nowait(Committed())
+        self.nemo.next_live_turn()
+        self._started = False
+
+    async def clear(self) -> None:
+        self.clears += 1
+        self._events.put_nowait(Cleared())
+        self._started = False
+
+    async def events(self):
+        if self.nemo.live_error is not None:
+            raise self.nemo.live_error
+        while True:
+            yield await self._events.get()
 
 
 class FakeNemo:
@@ -70,6 +132,11 @@ class FakeNemo:
     `on_progress(seconds)` avant son premier événement. `sessions_closed` compte les sessions de transcription
     terminées, de quelque façon que ce soit : `NemoClient` ferme son socket dans un `finally` qui attend, et ce
     nettoyage-ci attend de même.
+
+    `live` ouvre une `FakeLiveSession`, ajoutée à `live_sessions`. `live_turns` donne les prises de parole de la dictée
+    en direct, chacune une suite de `Partial` et de `Final` (par défaut `LIVE_TURNS`) ; la dernière se répète une fois
+    la liste épuisée. `live_error`, s'il est donné, est levée par `events` de chaque session ; `error` ne touche pas
+    la dictée en direct.
     """
 
     def __init__(
@@ -84,6 +151,8 @@ class FakeNemo:
         ready_answers: Sequence[bool] | None = None,
         transcribe_errors: Sequence[Exception | None] = (),
         on_chunk: Callable[[], None] | None = None,
+        live_turns: Sequence[Sequence[Partial | Final]] = LIVE_TURNS,
+        live_error: Exception | None = None,
     ) -> None:
         self.finals = tuple(finals)
         self.pcm = pcm
@@ -94,9 +163,36 @@ class FakeNemo:
         self.ready_answers = (True,) if ready_answers is None else tuple(ready_answers)
         self.transcribe_errors = list(transcribe_errors)
         self.on_chunk = on_chunk
+        self.live_turns = [list(turn) for turn in live_turns]
+        self.live_error = live_error
+        self.live_sessions: list[FakeLiveSession] = []
         self.calls: list[dict] = []
         self.sessions_closed = 0
         self._taken = None  # le dernier événement de `release` qu'une transcription a pris
+        self._live_turn = 0  # rang de la prise de parole en cours dans `live_turns`
+
+    def live_turn(self) -> list[Partial | Final]:
+        """La prise de parole en cours de la dictée en direct ; la dernière se répète."""
+        return self.live_turns[min(self._live_turn, len(self.live_turns) - 1)]
+
+    def next_live_turn(self) -> None:
+        self._live_turn += 1
+
+    @contextlib.asynccontextmanager
+    async def live(self, *, sample_rate, language, phrases, boost, endpointing_ms=None):
+        options = {
+            "sample_rate": sample_rate,
+            "language": language,
+            "phrases": list(phrases),
+            "boost": boost,
+            "endpointing_ms": endpointing_ms,
+        }
+        session = FakeLiveSession(self, options)
+        self.live_sessions.append(session)
+        try:
+            yield session
+        finally:
+            session.closed = True
 
     @property
     def transcribe_calls(self) -> list[dict]:

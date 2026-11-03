@@ -27,7 +27,7 @@ from dictee.nemo import (
     NemoOverloaded,
     NemoUnavailable,
 )
-from dictee.types import Final, Partial, Word
+from dictee.types import Cleared, Committed, Final, Partial, Word
 
 pytestmark = pytest.mark.anyio
 
@@ -80,6 +80,24 @@ SPEAKERS_AFTER_COMMIT = SPEAKERS_RECORDED[2:]
 SPEAKERS_COMPLETED = next(event for event in SPEAKERS_AFTER_COMMIT if event["type"].endswith(".completed"))
 
 
+def split_after_commits(events: list[dict]) -> list[list[dict]]:
+    """Coupe les événements d'après les commits en une liste par commit, chacune finie par son `committed`."""
+    turns: list[list[dict]] = [[]]
+    for event in events:
+        turns[-1].append(event)
+        if event["type"] == "input_audio_buffer.committed":
+            turns.append([])
+    return turns[:-1]
+
+
+# Relevé d'une session à deux commits (tâche 1) : après l'ouverture, les événements de chaque commit, du premier delta
+# à son `committed`.
+MULTITURN_RECORDED = [
+    json.loads(line) for line in (FIXTURES / "realtime_multiturn_events.jsonl").read_text().splitlines()
+]
+MULTITURN_AFTER_COMMITS = split_after_commits(MULTITURN_RECORDED[2:])
+
+
 def error_event(code: str, error_type: str) -> dict:
     """Événement `error` tel que NeMo l'envoie (forme relevée sur le vrai serveur)."""
     return {
@@ -92,12 +110,16 @@ def error_event(code: str, error_type: str) -> dict:
 class FakeNemoRealtime:
     """Faux serveur temps réel de NeMo : il rejoue le relevé de la tâche 1 et note ce qu'il reçoit.
 
-    Comme NeMo, il laisse le socket ouvert après `committed` : c'est au client de le fermer.
+    Comme NeMo, il laisse le socket ouvert après `committed` : c'est au client de le fermer. Il répond
+    `input_audio_buffer.cleared` à chaque `input_audio_buffer.clear`.
     """
 
     def __init__(self) -> None:
         # Événements envoyés après le commit ; une liste vide donne un NeMo qui ne répond plus.
         self.after_commit: list[dict] = AFTER_COMMIT
+        # Événements de chaque commit, dans l'ordre des commits ; une fois la liste épuisée, `after_commit` vaut.
+        self.after_commits: list[list[dict]] = []
+        self.commits = 0
         self.commit_delay = 0.0  # secondes d'attente entre le commit et le premier événement qui le suit
         self.drop_on_commit = False  # coupe la connexion à la réception du commit
         self.error_code: str | None = None  # envoie cet `error` à la place de session.updated
@@ -135,8 +157,13 @@ class FakeNemoRealtime:
                         await ws.close()
                         return
                     await asyncio.sleep(self.commit_delay)
-                    for item in self.after_commit:
+                    turn = self.commits
+                    self.commits += 1
+                    after = self.after_commits[turn] if turn < len(self.after_commits) else self.after_commit
+                    for item in after:
                         await ws.send(json.dumps(item))
+                elif event["type"] == "input_audio_buffer.clear":
+                    await ws.send(json.dumps({"event_id": "event_9", "type": "input_audio_buffer.cleared"}))
         except ConnectionClosed:
             pass
         finally:
@@ -492,6 +519,90 @@ async def test_logs_never_carry_the_api_key_nor_the_session_content(fake_ws, nem
     assert fake_ws.authorization == "Bearer test-nemo-key"  # la session a bien eu lieu, clé comprise
     for secret in ("test-nemo-key", "Sortformer", "speech_contexts", "speaker_diarization"):
         assert secret not in caplog.text
+
+
+# --- Dictée en direct ---
+
+
+def live_items(after_commit: list[dict]) -> list:
+    """Ce que `LiveSession.events` doit rendre des événements d'un commit : un `Partial` par delta non vide, le texte
+    du `completed` en `Final`, puis `Committed`."""
+    partials = [
+        Partial(event["delta"]) for event in after_commit if event["type"].endswith(".delta") and event["delta"]
+    ]
+    (completed,) = [event for event in after_commit if event["type"].endswith(".completed")]
+    return [*partials, Final(completed["transcript"], ()), Committed()]
+
+
+async def test_a_live_session_sends_its_options_then_the_audio_as_binary_frames(fake_ws, nemo):
+    async with nemo.live(
+        sample_rate=24000, language="fr-FR", phrases=["Nemotron"], boost=1.0, endpointing_ms=500
+    ) as session:
+        await session.send_audio(b"\x00\x01" * 100)
+        await session.commit()
+    assert fake_ws.session == {
+        "sample_rate": 24000,
+        "language": "fr-FR",
+        "speech_contexts": [{"phrases": ["Nemotron"], "boost": 1.0}],
+        "endpointing_ms": 500,
+    }
+    assert fake_ws.frames == [b"\x00\x01" * 100]
+
+
+async def test_a_live_session_sends_neither_terms_nor_endpointing_unless_given(fake_ws, nemo):
+    async with nemo.live(sample_rate=16000, language="en-US", phrases=[], boost=1.0):
+        pass
+    assert fake_ws.session == {"sample_rate": 16000, "language": "en-US"}
+
+
+async def test_live_events_follow_the_recorded_multiturn_session(fake_ws, nemo):
+    fake_ws.after_commits = MULTITURN_AFTER_COMMITS
+    received = []
+    live = nemo.live(sample_rate=16000, language="fr-FR", phrases=[], boost=1.0)
+    async with live as session, aclosing(session.events()) as events:
+        for _ in MULTITURN_AFTER_COMMITS:
+            await session.send_audio(b"\x00\x00" * 1600)
+            await session.commit()
+            async for event in events:
+                received.append(event)
+                if isinstance(event, Committed):
+                    break
+    assert len(MULTITURN_AFTER_COMMITS) == 2
+    assert received == [item for turn in MULTITURN_AFTER_COMMITS for item in live_items(turn)]
+
+
+async def test_a_live_clear_is_sent_and_acknowledged(fake_ws, nemo):
+    async with nemo.live(sample_rate=24000, language="fr-FR", phrases=[], boost=1.0) as session:
+        await session.send_audio(b"\x00\x01" * 100)
+        await session.clear()
+        async with aclosing(session.events()) as events:
+            assert await anext(events) == Cleared()
+    assert fake_ws.text_messages[-1] == {"type": "input_audio_buffer.clear"}
+
+
+async def test_a_live_error_event_raises_the_exception_of_its_code(fake_ws, nemo):
+    fake_ws.after_commit = [error_event("resource_exhausted", "rate_limit_error")]
+    with pytest.raises(NemoOverloaded):
+        async with nemo.live(sample_rate=24000, language="fr-FR", phrases=[], boost=1.0) as session:
+            await session.commit()
+            async with aclosing(session.events()) as events:
+                await anext(events)
+    await asyncio.wait_for(fake_ws.closed.wait(), 1)
+
+
+async def test_a_live_session_dropped_by_nemo_raises_unavailable(fake_ws, nemo):
+    fake_ws.drop_on_commit = True
+    with pytest.raises(NemoUnavailable):
+        async with nemo.live(sample_rate=24000, language="fr-FR", phrases=[], boost=1.0) as session:
+            await session.commit()
+            async with aclosing(session.events()) as events:
+                await anext(events)
+
+
+async def test_leaving_a_live_session_closes_its_socket(fake_ws, nemo):
+    async with nemo.live(sample_rate=24000, language="fr-FR", phrases=[], boost=1.0) as session:
+        await session.send_audio(b"\x00\x01" * 100)
+    await asyncio.wait_for(fake_ws.closed.wait(), 1)
 
 
 # --- Routes HTTP ---

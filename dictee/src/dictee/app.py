@@ -10,11 +10,12 @@ from starlette.middleware import Middleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from starlette.routing import Route
+from starlette.routing import Route, WebSocketRoute
 
 from dictee.auth import require_caller
 from dictee.db import Database
 from dictee.errors import ApiError, handle_api_error, handle_http_exception, handle_unexpected_error
+from dictee.live import realtime
 from dictee.modes import MODELS
 from dictee.nemo import NemoClient
 from dictee.processing import Services
@@ -65,10 +66,11 @@ def create_app(settings: Settings, *, nemo=None, http: httpx.AsyncClient | None 
     clients, et le démarre : il reprend les tâches restées en file ou en cours. L'arrêt de l'app arrête le runner, avant
     que le client HTTP se ferme.
 
-    Chaque route `/v1` appelle `require_caller` en premier ; `/health` reste ouverte. La page de configuration
-    (`dictee.web`) ouvre ses sessions par PocketID : `app.state.oauth` porte le client `pocketid`, et le cookie de
-    session, signé par `settings.session_secret`, n'est envoyé que sur une connexion sécurisée. `app.state.previews`
-    garde les aperçus de voix déjà synthétisés.
+    Chaque route `/v1` appelle `require_caller` en premier ; `/health` reste ouverte. La dictée en direct
+    (`/v1/realtime`, une route WebSocket, voir `dictee.live`) identifie l'appelant par les mêmes en-têtes. La page de
+    configuration (`dictee.web`) ouvre ses sessions par PocketID : `app.state.oauth` porte le client `pocketid`, et le
+    cookie de session, signé par `settings.session_secret`, n'est envoyé que sur une connexion sécurisée.
+    `app.state.previews` garde les aperçus de voix déjà synthétisés.
     """
 
     @contextlib.asynccontextmanager
@@ -106,6 +108,7 @@ def create_app(settings: Settings, *, nemo=None, http: httpx.AsyncClient | None 
             Route("/v1/audio/transcriptions/{task_id}", get_task),
             Route("/v1/audio/transcriptions/{task_id}/cancel", cancel_task, methods=["POST"]),
             Route("/v1/audio/speech", speech, methods=["POST"]),
+            WebSocketRoute("/v1/realtime", realtime),
         ],
         middleware=[
             Middleware(SessionMiddleware, secret_key=settings.session_secret, https_only=True, same_site="lax")

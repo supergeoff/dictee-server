@@ -27,6 +27,16 @@ class Partial:
 
 
 @dataclass(frozen=True)
+class Committed:
+    """NeMo a fini la prise de parole validée par un commit : tous ses textes sont partis avant lui."""
+
+
+@dataclass(frozen=True)
+class Cleared:
+    """NeMo a vidé, à la demande du client, l'audio de la prise de parole en cours."""
+
+
+@dataclass(frozen=True)
 class Segment:
     id: str
     start: float

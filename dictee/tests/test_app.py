@@ -5,6 +5,7 @@ from pathlib import Path
 import anyio
 import httpx
 from conftest import audio_task
+from starlette.routing import WebSocketRoute
 from starlette.testclient import TestClient
 
 from dictee.app import create_app
@@ -41,10 +42,14 @@ def test_v1_routes_require_a_key(client, service_headers):
 
 def test_every_v1_route_refuses_a_call_without_a_key(client):
     # Garde pour les routes à venir : toute route /v1 ajoutée à l'app doit exiger une clé
-    # avant de lire le corps de la requête.
+    # avant de lire le corps de la requête. Une route WebSocket répond par l'erreur d'OpenAI avant tout événement.
     v1_routes = [route for route in client.app.routes if route.path.startswith("/v1/")]
     assert v1_routes
     for route in v1_routes:
+        if isinstance(route, WebSocketRoute):
+            with client.websocket_connect(route.path) as ws:
+                assert ws.receive_json()["error"]["code"] == "invalid_api_key", f"{route.path} opened without a key"
+            continue
         for method in route.methods - {"HEAD"}:
             r = client.request(method, route.path)
             assert r.status_code == 401, f"{method} {route.path} answered {r.status_code} without a key"
