@@ -1491,10 +1491,24 @@ git add integration/boost.py dictee/src/dictee/settings.py dictee/tests/test_set
 git commit -m "Mesure la force du glossaire sans insertion et en fait la valeur par défaut"
 ```
 
-**Résultats** (remplis à l'exécution) :
-- Corpus utilisé (avec ou sans le glossaire de Geoff, enregistrement ou synthèse).
-- Insertions par moteur et par force.
-- Force retenue.
+**Résultats** (4 novembre 2026, NeMo jetable sur le VPS, aucun texte ni aucun terme gardé dans ce plan) :
+- Corpus utilisé : sans le glossaire de Geoff, car la base de production ne contient aucun compte ni aucun glossaire. Le glossaire de la mesure se réduit donc aux trois termes fixes. Geoff n'a pas fourni d'enregistrement non plus : le corpus réunit le Call (43,6 s) et la Note (385,9 s), sans référence, et trois phrases de synthèse Magpie de 3 à 4 s (voix Sofia, produites par un script jetable hors dépôt), une par terme fixe, dont le texte sert de référence. Chaque audio passe sur les deux moteurs (`rest` par tranches nettes de 30 s, `realtime` en une session), sans glossaire puis aux forces 0,5, 1, 1,5 et 2, soit 50 passes.
+- Insertions (mots du glossaire en trop) par moteur et par force :
+
+| Moteur | Force | Call | Note | Synthèse (3 phrases) | Total |
+|---|---|---|---|---|---|
+| `rest` | 0,5 | 0 | 0 | 0 | 0 |
+| `rest` | 1 | 0 | 0 | 0 | 0 |
+| `rest` | 1,5 | 0 | 1 | 0 | 1 |
+| `rest` | 2 | 0 | 13 | 0 | 13 |
+| `realtime` | 0,5 | 0 | 0 | 0 | 0 |
+| `realtime` | 1 | 0 | 0 | 0 | 0 |
+| `realtime` | 1,5 | 0 | 0 | 0 | 0 |
+| `realtime` | 2 | 3 | 9 | 0 | 12 |
+
+- Le glossaire agit sur ce corpus : le terme dit est rendu dans 2 phrases de synthèse sur 3 dès la force 0,5, et dans l'une des deux il ne l'est que grâce au glossaire. Les insertions n'apparaissent qu'à partir de 1,5. La force 2, ancienne valeur par défaut, en fait 25 au total (13 en `rest`, 12 en `realtime`), et la sortie temps réel du Call passe de 28 à 17 mots.
+- Force retenue : 1. Les forces 0,5 et 1 ne font aucune insertion sur les deux moteurs, et 1 est la plus haute. Le repli à 0,5 n'a pas servi. La valeur par défaut de `glossary_boost` passe de 2.0 à 1.0.
+- Le script accepte `--glossary FICHIER` pour rejouer la mesure avec les termes de Geoff quand il aura un glossaire.
 
 ### Tâche 14 : documentation
 

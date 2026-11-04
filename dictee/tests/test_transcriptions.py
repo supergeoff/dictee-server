@@ -165,13 +165,13 @@ async def assert_lane_is_free(app) -> None:
             pass
 
 
-def test_json_with_any_model_name(openai_client, fake_nemo, tone_mp3):
+def test_json_with_any_model_name(openai_client, fake_nemo, tone_mp3, settings):
     r = openai_client.audio.transcriptions.create(model="whisper-1", file=("a.mp3", tone_mp3))
     assert r.text == "Bonjour à tous. Salut."
     # Sans `stream`, le fichier passe par morceaux (section 7.2 de la spec) : ni session, ni personnes, ni partiels.
     assert fake_nemo.calls == fake_nemo.chunk_calls
     call = fake_nemo.calls[0]
-    assert (call["language"], call["boost"], call["phrases"]) == ("fr-FR", 2.0, [])
+    assert (call["language"], call["boost"], call["phrases"]) == ("fr-FR", settings.glossary_boost, [])
 
 
 def test_user_glossary_becomes_boosted_phrases(openai_client, fake_nemo, db, tone_mp3):

@@ -10,11 +10,14 @@ def test_defaults_apply_when_optional_variables_are_missing():
     s = Settings.from_env(REQUIRED_ENV)
     assert s.cleanup_model == "simple-low"
     assert s.long_audio_seconds == 600.0
-    assert s.glossary_boost == 2.0
     assert s.max_upload_mb == 300
     assert s.nemo_url == "http://nemo:8000"
     assert s.db_path == "/data/dictee.db"
     assert s.default_voice == "Leo"
+
+
+def test_glossary_boost_defaults_to_the_measured_force():
+    assert Settings.from_env(REQUIRED_ENV).glossary_boost == 1.0
 
 
 def test_required_variables_are_read_from_the_environment():

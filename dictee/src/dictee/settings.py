@@ -49,7 +49,8 @@ class Settings:
     nemo_url: str = "http://nemo:8000"
     cleanup_model: str = "simple-low"
     default_voice: str = "Leo"
-    glossary_boost: float = 2.0
+    # Force du glossaire : la plus haute sans insertion sur le corpus de `integration/boost.py` (spec 7.6, tâche 13).
+    glossary_boost: float = 1.0
     long_audio_seconds: float = 600.0
     max_upload_mb: int = 300
     # Tâches longues en attente, en plus de celle qui tourne ; au-delà, l'envoi reçoit 429 `long_audio_busy`.

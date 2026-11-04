@@ -2,59 +2,68 @@
 # requires-python = ">=3.11"
 # dependencies = ["httpx==0.28.1", "websockets==17.4"]
 # ///
-"""Mesure la force du renforcement du glossaire sur le vrai NeMo-Speech.cpp (tâche 14).
+"""Mesure la force du glossaire sur le vrai NeMo-Speech.cpp (tâche 13, vérification 12.6 de la spec).
 
-Prérequis : `make integration` ou `make nemo-up` (NeMo répond sur http://127.0.0.1:18001).
-Usage : uv run --script integration/boost.py
+Prérequis : un NeMo qui répond (`NEMO_URL`, par défaut http://127.0.0.1:18001) et sa clé (`NEMO_API_KEY`, sinon `.env`).
+Usage :
+    uv run --script integration/boost.py --audio call.wav --audio phrase.wav:phrase.txt [--glossary termes.txt]
+    uv run --script integration/boost.py --self-test
 
-Sofia dit quatre phrases qui contiennent chacune un terme rare (Nemotron, Sortformer, Magpie, Starlette) et une phrase
-témoin qui n'en contient aucun. Chaque phrase passe seule dans une session temps réel de NeMo, par
-`integration/nemo_rt.py`, sans renforcement (force 0) puis avec chaque force de FORCES, les quatre termes formant le
-glossaire. Tout le balayage est joué SWEEPS fois, pour voir si le résultat est stable.
+Pour chaque audio (WAV PCM16 mono) et chaque moteur, le script fait une passe sans glossaire, puis une passe par force
+avec le glossaire de `--glossary` (un terme par ligne, vide par défaut) augmenté de « Nemotron », « Sortformer » et
+« Discord ». Le moteur `rest` envoie des tranches nettes de 30 s à `/v1/audio/transcriptions` ; le moteur `realtime`
+ouvre une session par fichier sur `/v1/audio/transcriptions/realtime`. La référence d'un audio est un fichier texte
+(`--audio WAV:RÉFÉRENCE`) qui dit ce qui est prononcé ; sans elle, la référence est vide.
 
-Pour chaque force le script affiche le nombre de termes rares reconnus sur 4, les termes apparus à tort dans la phrase
-témoin, la stabilité entre les passes et le texte transcrit de chaque phrase. Il termine par la plus petite force qui
-reconnaît les quatre termes sans rien insérer dans la phrase témoin, ou dit qu'aucune ne le fait. Une phrase témoin
-transcrite en texte vide compte comme un échec, pas comme une phrase sans insertion.
-
-Un terme est reconnu s'il figure comme mot, sans tenir compte de la casse ni des accents, dans la transcription de sa
-propre phrase. Un terme est inséré s'il figure, sous la même règle de casse et d'accents, n'importe où dans la
-transcription de la phrase témoin. Les phrases sont neutres : aucun contenu personnel.
+Les insertions d'un terme dans une passe valent `max(0, occurrences dans la passe - max(occurrences sans glossaire,
+occurrences dans la référence))`, sur les mots repliés par `fold`. Le script affiche les insertions par moteur et par
+force, sous forme de nombres seulement (les termes avec `--show-terms`), puis la force retenue : la plus haute sans
+aucune insertion sur tout le corpus, ou 0,5 quand aucune n'y parvient. Les textes transcrits vont dans `--out`, sous
+`.integration/` : ils ne se commitent jamais.
 """
 
 from __future__ import annotations
 
+import argparse
+import json
 import re
 import sys
 import time
 import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
+
+import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import nemo_rt  # noqa: E402
 
-RATE = 16000
-VOICE = "Sofia"
+# Les termes ajoutés au glossaire de `--glossary`, et la force à retenir quand toutes les autres font des insertions.
+FIXED_TERMS = ("Nemotron", "Sortformer", "Discord")
+FALLBACK_FORCE = 0.5
+DEFAULT_FORCES = "0.5,1,1.5,2"
+ENGINES = ("rest", "realtime")
 LANGUAGE = "fr-FR"
-# Le glossaire envoyé à NeMo, et la phrase de chaque terme.
-SENTENCES = {
-    "Nemotron": "Le modèle Nemotron transcrit la réunion en direct.",
-    "Sortformer": "Le modèle Sortformer sépare les voix des participants.",
-    "Magpie": "La synthèse vocale Magpie lit le texte à voix haute.",
-    "Starlette": "Le serveur web repose sur Starlette pour ses routes.",
-}
-TERMS = list(SENTENCES)
-CONTROL_LABEL = "témoin"
-CONTROL = "Nous parlons de la météo de demain matin."
-LABELS = [*TERMS, CONTROL_LABEL]
-# Force 0 : aucune liste `speech_contexts`, donc aucun renforcement. À 6 et 10 le terme renforcé remplace d'autres
-# mots (relevé de la tâche 1) : le balayage s'arrête à 6.
-FORCES = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
-SWEEPS = 2
+SLICE_SECONDS = 30
+DEFAULT_OUT = nemo_rt.ROOT / ".integration" / "verif-taches" / "boost"
 COMPLETED = "conversation.item.input_audio_transcription.completed"
+COMMITTED = "input_audio_buffer.committed"
 
-# transcripts[sweep][force][étiquette] -> texte transcrit
-Transcripts = list[dict[float, dict[str, str]]]
+
+@dataclass(frozen=True)
+class Audio:
+    name: str
+    rate: int
+    pcm: bytes
+    reference: str
+
+    @property
+    def seconds(self) -> float:
+        return len(self.pcm) / (self.rate * 2)
+
+
+# texts[(moteur, audio, force)] -> texte transcrit ; la force vaut None pour la passe sans glossaire.
+Texts = dict[tuple[str, str, float | None], str]
 
 
 def fold(text: str) -> str:
@@ -63,141 +72,217 @@ def fold(text: str) -> str:
     return "".join(char for char in decomposed if unicodedata.category(char) != "Mn")
 
 
-def recognized(term: str, text: str) -> bool:
-    """Le terme figure comme mot de `text`."""
-    return fold(term) in re.findall(r"\w+", fold(text))
+def words(text: str) -> list[str]:
+    """Les mots de `text`, repliés par `fold`."""
+    return re.findall(r"\w+", fold(text))
 
 
-def inserted(text: str) -> list[str]:
-    """Les termes du glossaire qui figurent n'importe où dans `text`."""
-    return [term for term in TERMS if fold(term) in fold(text)]
+def occurrences(term: str, text: str) -> int:
+    """Nombre de fois où les mots de `term` se suivent dans `text`, sur les mots repliés."""
+    wanted, found = words(term), words(text)
+    if not wanted:
+        return 0
+    return sum(found[start : start + len(wanted)] == wanted for start in range(len(found) - len(wanted) + 1))
 
 
-def transcribe(pcm: bytes, force: float) -> str:
-    """Transcrit `pcm` par une session temps réel ; sans renforcement quand la force est 0."""
-    events = nemo_rt.realtime(pcm, RATE, TERMS if force > 0 else [], force, language=LANGUAGE)
+def insertions(term: str, passe: str, baseline: str, reference: str) -> int:
+    """Insertions de `term` dans `passe` : ses occurrences au-delà de la sortie sans glossaire et de la référence."""
+    return max(0, occurrences(term, passe) - max(occurrences(term, baseline), occurrences(term, reference)))
+
+
+def force_label(force: float) -> str:
+    """La force écrite à la française : 0,5 ; 1 ; 1,5."""
+    return f"{force:g}".replace(".", ",")
+
+
+def verdict(totals: dict[float, int]) -> str:
+    """La ligne de verdict : la plus haute force sans insertion, ou la force de repli quand toutes en font."""
+    free = [force for force, total in totals.items() if total == 0]
+    if free:
+        return f"force retenue : {force_label(max(free))}"
+    return f"aucune force sans insertion : {force_label(FALLBACK_FORCE)}"
+
+
+def glossary_terms(file_terms: list[str]) -> list[str]:
+    """Les termes du fichier, puis ceux de `FIXED_TERMS` qui n'y figurent pas, sans doublon à la casse près."""
+    terms: list[str] = []
+    seen: set[str] = set()
+    for term in [*file_terms, *FIXED_TERMS]:
+        key = " ".join(words(term))
+        if key and key not in seen:
+            seen.add(key)
+            terms.append(term)
+    return terms
+
+
+def read_glossary(path: Path | None) -> list[str]:
+    """Les termes de `path`, un par ligne ; une liste vide sans fichier."""
+    if path is None:
+        return []
+    return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def load_audio(spec: str) -> Audio:
+    """Lit `WAV[:RÉFÉRENCE]` : le WAV PCM16 mono, et le texte de référence quand un fichier est donné."""
+    wav, _, reference = spec.partition(":")
+    path = Path(wav)
+    rate, pcm = nemo_rt.parse_wav(path.read_bytes())
+    text = Path(reference).read_text(encoding="utf-8") if reference else ""
+    return Audio(path.stem, rate, pcm, text)
+
+
+def transcribe_rest(audio: Audio, phrases: list[str], boost: float) -> str:
+    """Transcrit `audio` par tranches nettes de `SLICE_SECONDS` sur la route REST ; joint les textes par une espace."""
+    form = {"language": LANGUAGE, "response_format": "verbose_json", "timestamp_granularities[]": "word"}
+    if phrases:
+        form["speech_contexts"] = json.dumps([{"phrases": phrases, "boost": boost}])
+    size = SLICE_SECONDS * audio.rate * 2
+    texts = []
+    for start in range(0, len(audio.pcm), size):
+        wav = nemo_rt.wav_file(audio.pcm[start : start + size], audio.rate)
+        response = httpx.post(
+            f"{nemo_rt.BASE_URL}/v1/audio/transcriptions",
+            data=form,
+            files={"file": ("slice.wav", wav, "audio/wav")},
+            headers=nemo_rt.auth_headers(),
+            timeout=600,
+        )
+        response.raise_for_status()
+        texts.append(response.json()["text"].strip())
+    return " ".join(text for text in texts if text)
+
+
+def transcribe_realtime(audio: Audio, phrases: list[str], boost: float) -> str:
+    """Transcrit `audio` dans une seule session temps réel ; joint les textes finals par une espace."""
+    info: dict[str, object] = {}
+    events = nemo_rt.realtime(audio.pcm, audio.rate, phrases, boost, language=LANGUAGE, info=info)
     errors = [event for event in events if event.get("type") == "error"]
     if errors:
-        raise RuntimeError(f"NeMo a répondu une erreur à la force {force} : {errors[0]}")
+        raise RuntimeError(f"NeMo a répondu une erreur sur {audio.name} : {errors[0]}")
+    if info["ended_by"] != COMMITTED:
+        raise RuntimeError(
+            f"session interrompue sur {audio.name} : fin par {info['ended_by']}, code {info['close_code']}"
+        )
     finals = [event.get("transcript", "").strip() for event in events if event.get("type") == COMPLETED]
     return " ".join(text for text in finals if text)
 
 
-def score(texts: dict[str, str]) -> tuple[int, list[str]]:
-    """(termes reconnus sur 4, termes insérés dans la phrase témoin) pour un balayage d'une force."""
-    found = sum(recognized(term, texts[term]) for term in TERMS)
-    return found, inserted(texts[CONTROL_LABEL])
+def measure(audios: list[Audio], terms: list[str], forces: list[float], engines: list[str], out: Path) -> Texts:
+    """Joue, pour chaque audio et chaque moteur, la passe sans glossaire puis une passe par force ; écrit les textes."""
+    transcribe = {"rest": transcribe_rest, "realtime": transcribe_realtime}
+    out.mkdir(parents=True, exist_ok=True)
+    texts: Texts = {}
+    for audio in audios:
+        for engine in engines:
+            for force in [None, *forces]:
+                started = time.monotonic()
+                phrases, boost = ([], 0.0) if force is None else (terms, force)
+                text = transcribe[engine](audio, phrases, boost)
+                texts[(engine, audio.name, force)] = text
+                label = "sans-glossaire" if force is None else f"force-{force:g}"
+                (out / f"{audio.name}.{engine}.{label}.txt").write_text(text + "\n", encoding="utf-8")
+                shown = "sans glossaire" if force is None else f"force {force_label(force)}"
+                print(
+                    f"{audio.name} ({audio.seconds:.0f} s), {engine}, {shown} : {time.monotonic() - started:.0f} s",
+                    flush=True,
+                )
+    return texts
 
 
-def control_ok(text: str) -> bool:
-    """La phrase témoin est transcrite et n'a reçu aucun terme du glossaire."""
-    return bool(text.strip()) and not inserted(text)
+def cell_insertions(texts: Texts, terms: list[str], engine: str, audio: Audio, force: float) -> dict[str, int]:
+    """Insertions de chaque terme (celles qui ne sont pas nulles) dans la passe de `audio` à `force`."""
+    passe = texts[(engine, audio.name, force)]
+    baseline = texts[(engine, audio.name, None)]
+    counts = {term: insertions(term, passe, baseline, audio.reference) for term in terms}
+    return {term: count for term, count in counts.items() if count}
 
 
-def meets_criterion(texts: dict[str, str]) -> bool:
-    found, _ = score(texts)
-    return found == len(TERMS) and control_ok(texts[CONTROL_LABEL])
-
-
-def cell(texts: dict[str, str]) -> tuple[str, str]:
-    found, extra = score(texts)
-    if not texts[CONTROL_LABEL].strip():
-        return f"{found}/{len(TERMS)}", "témoin vide"
-    return f"{found}/{len(TERMS)}", f"{len(extra)} ({', '.join(extra)})" if extra else "0"
-
-
-def print_table(transcripts: Transcripts) -> None:
-    print("\nTABLEAU (une colonne par passe ; stable = textes identiques sur les cinq phrases entre les passes)")
-    numbers = range(1, SWEEPS + 1)
-    head = ["force", *[f"reconnus p{n}" for n in numbers], *[f"insérés p{n}" for n in numbers], "stable"]
+def print_report(
+    texts: Texts, audios: list[Audio], terms: list[str], forces: list[float], engines: list[str], show_terms: bool
+) -> None:
+    """Affiche le tableau des insertions, les termes si demandé, et le verdict."""
+    cells = {
+        (engine, force, audio.name): cell_insertions(texts, terms, engine, audio, force)
+        for engine in engines
+        for force in forces
+        for audio in audios
+    }
+    head = ["moteur", "force", *[audio.name for audio in audios], "total"]
     rows = []
-    for force in FORCES:
-        cells = [cell(sweep[force]) for sweep in transcripts]
-        stable = all(sweep[force] == transcripts[0][force] for sweep in transcripts)
-        rows.append([f"{force:.1f}", *[c[0] for c in cells], *[c[1] for c in cells], "oui" if stable else "NON"])
-    widths = [max(len(row[i]) for row in [head, *rows]) for i in range(len(head))]
+    for engine in engines:
+        for force in forces:
+            counts = [sum(cells[(engine, force, audio.name)].values()) for audio in audios]
+            rows.append([engine, force_label(force), *map(str, counts), str(sum(counts))])
+    widths = [max(len(row[index]) for row in [head, *rows]) for index in range(len(head))]
+    print(f"\nINSERTIONS ({len(audios)} audio(s), {len(terms)} terme(s) dans le glossaire, nombres de mots en trop)")
     for row in [head, *rows]:
         print("  ".join(value.ljust(width) for value, width in zip(row, widths)).rstrip())
+    if show_terms:
+        print("\nTERMES INSÉRÉS (cases non nulles)")
+        for (engine, force, name), counts in cells.items():
+            if counts:
+                detail = ", ".join(f"{term} x{count}" for term, count in counts.items())
+                print(f"  {engine}, force {force_label(force)}, {name} : {detail}")
+    totals = {
+        force: sum(sum(cells[(engine, force, audio.name)].values()) for engine in engines for audio in audios)
+        for force in forces
+    }
+    print(f"\n{verdict(totals)}")
 
 
-def print_texts(transcripts: Transcripts) -> None:
-    print("\nTEXTES TRANSCRITS")
-    print("Référence :")
-    for label in LABELS:
-        print(f"  {label:<10} {CONTROL if label == CONTROL_LABEL else SENTENCES[label]}")
-    for force in FORCES:
-        print(f"\nForce {force:.1f}" + (" (sans renforcement)" if force == 0 else ""))
-        for number, sweep in enumerate(transcripts, start=1):
-            print(f"  passe {number}")
-            for label in LABELS:
-                text = sweep[force][label]
-                mark = recognized(label, text) if label != CONTROL_LABEL else control_ok(text)
-                print(f"    {label:<10} {'ok ' if mark else 'KO '} {text}")
-
-
-def print_differences(transcripts: Transcripts) -> None:
-    print("\nDIFFÉRENCES ENTRE LES PASSES")
-    differences = 0
-    for force in FORCES:
-        for label in LABELS:
-            variants = [sweep[force][label] for sweep in transcripts]
-            if len(set(variants)) > 1:
-                differences += 1
-                print(f"  force {force:.1f}, {label} :")
-                for number, text in enumerate(variants, start=1):
-                    print(f"    passe {number} : {text}")
-    if not differences:
-        print("  aucune : les deux passes donnent les mêmes textes à toutes les forces")
-
-
-def print_verdict(transcripts: Transcripts) -> None:
-    print("\nCRITÈRE : les quatre termes reconnus, la phrase témoin transcrite et sans terme inséré")
-    baseline = [meets_criterion(sweep[0.0]) for sweep in transcripts]
-    if all(baseline):
-        print("  Attention : la force 0 (sans renforcement) remplit déjà le critère dans toutes les passes.")
-    elif any(baseline):
-        print("  Attention : la force 0 (sans renforcement) remplit le critère dans une passe seulement.")
-    smallest = None
-    for force in FORCES[1:]:
-        ok_per_sweep = [meets_criterion(sweep[force]) for sweep in transcripts]
-        verdict = "aucune passe"
-        if all(ok_per_sweep):
-            verdict = "toutes les passes"
-        elif any(ok_per_sweep):
-            verdict = "une passe seulement"
-        print(f"  force {force:.1f} : critère rempli dans {verdict}")
-        if smallest is None and all(ok_per_sweep):
-            smallest = force
-    if smallest is None:
-        print("PLUS PETITE FORCE RETENUE : aucune ne remplit le critère dans toutes les passes")
-    else:
-        print(f"PLUS PETITE FORCE RETENUE : {smallest:.1f}")
+def self_test() -> None:
+    # Un terme absent partout n'est jamais inséré.
+    assert insertions("Nemotron", "bonjour tout le monde", "bonjour tout le monde", "bonjour tout le monde") == 0
+    # Un terme inséré deux fois, absent de la sortie sans glossaire et de la référence, compte deux insertions.
+    assert insertions("Nemotron", "un nemotron puis nemotron", "un puis", "un puis") == 2
+    # Un terme dit une fois dans la référence et rendu deux fois ne compte qu'une insertion.
+    assert insertions("Nemotron", "nemotron et nemotron", "et", "nemotron et") == 1
+    # La casse et les accents ne comptent pas, et un terme de plusieurs mots se compte comme une suite de mots.
+    assert insertions("Café Crème", "un CAFÉ, crème et un cafe creme", "un et un", "un et un") == 2
+    # La force retenue est la plus haute sans insertion, même quand une force plus basse en a.
+    assert verdict({0.5: 0, 1.0: 0, 1.5: 2, 2.0: 1}) == "force retenue : 1"
+    assert verdict({0.5: 1, 1.0: 0, 1.5: 3, 2.0: 0}) == "force retenue : 2"
+    assert verdict({0.5: 0, 1.0: 0}) == "force retenue : 1"
+    # Sans aucune force sans insertion, la valeur est 0,5.
+    assert verdict({0.5: 3, 1.0: 1}) == "aucune force sans insertion : 0,5"
+    # Le glossaire reçoit les trois termes fixes une seule fois, à la casse près.
+    assert glossary_terms(["discord", "Open WebUI"]) == ["discord", "Open WebUI", "Nemotron", "Sortformer"]
+    print("self-test OK")
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--glossary", type=Path, help="fichier de termes, un par ligne (vide par défaut)")
+    parser.add_argument("--audio", action="append", default=[], metavar="WAV[:RÉFÉRENCE]", help="répétable")
+    parser.add_argument("--forces", default=DEFAULT_FORCES, help=f"forces séparées par des virgules ({DEFAULT_FORCES})")
+    parser.add_argument("--engines", default=",".join(ENGINES), help="moteurs séparés par des virgules (rest,realtime)")
+    parser.add_argument(
+        "--out", type=Path, default=DEFAULT_OUT, help="dossier des textes transcrits, sous .integration/"
+    )
+    parser.add_argument("--show-terms", action="store_true", help="affiche aussi les termes insérés")
+    parser.add_argument("--self-test", action="store_true", help="vérifie le comptage et le verdict, sans NeMo")
+    args = parser.parse_args()
+    if args.self_test:
+        self_test()
+        return 0
+    if not args.audio:
+        parser.error("au moins un --audio est nécessaire")
+    engines = [engine for engine in args.engines.split(",") if engine]
+    if not engines or any(engine not in ENGINES for engine in engines):
+        parser.error(f"--engines accepte {', '.join(ENGINES)}")
+    try:
+        forces = [float(force) for force in args.forces.split(",") if force]
+    except ValueError:
+        parser.error("--forces attend des nombres séparés par des virgules")
+    if not forces or any(force <= 0 for force in forces):
+        parser.error("--forces attend des nombres positifs")
+    audios = [load_audio(spec) for spec in args.audio]
+    if len({audio.name for audio in audios}) != len(audios):
+        parser.error("deux --audio portent le même nom de fichier")
+    terms = glossary_terms(read_glossary(args.glossary))
     started = time.monotonic()
-    pcms: dict[str, bytes] = {}
-    for label in LABELS:
-        text = CONTROL if label == CONTROL_LABEL else SENTENCES[label]
-        pcms[label] = nemo_rt.synth(text, VOICE, RATE)
-        print(f"synthèse {label} : {len(pcms[label]) / (RATE * 2):.1f} s d'audio", flush=True)
-    transcripts: Transcripts = []
-    for number in range(1, SWEEPS + 1):
-        sweep: dict[float, dict[str, str]] = {}
-        for force in FORCES:
-            force_started = time.monotonic()
-            sweep[force] = {label: transcribe(pcms[label], force) for label in LABELS}
-            found, extra = score(sweep[force])
-            print(
-                f"passe {number}, force {force:.1f} : {found}/{len(TERMS)} reconnus, {len(extra)} inséré(s), "
-                f"{time.monotonic() - force_started:.1f} s",
-                flush=True,
-            )
-        transcripts.append(sweep)
-    print_table(transcripts)
-    print_differences(transcripts)
-    print_verdict(transcripts)
-    print_texts(transcripts)
+    texts = measure(audios, terms, forces, engines, args.out)
+    print_report(texts, audios, terms, forces, engines, args.show_terms)
     print(f"\nDurée totale : {time.monotonic() - started:.0f} s")
     return 0
 
