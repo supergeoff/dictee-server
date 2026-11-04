@@ -28,7 +28,6 @@ from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 from starlette.templating import Jinja2Templates
-from starlette.types import Message
 
 from dictee.audio import OUTPUT_FORMATS, encode_stream
 from dictee.auth import Caller
@@ -37,6 +36,7 @@ from dictee.nemo import TTS_SAMPLE_RATE
 from dictee.profile import DEFAULT_INSTRUCTIONS, load_profile
 from dictee.settings import Settings
 from dictee.speech import LANGUAGE, list_voices, resolve_voice
+from dictee.upload import bounded_request
 
 logger = logging.getLogger("dictee")
 
@@ -157,24 +157,6 @@ def _too_big() -> WebError:
     return WebError(413, "Le formulaire est trop volumineux.")
 
 
-def _bounded(request: Request) -> Request:
-    """Requête de même corps que `request`, dont la lecture lève 413 dès que `MAX_FORM_BYTES` octets sont dépassés.
-
-    `Content-Length` ne dit rien d'un corps envoyé par morceaux : seule la lecture sait combien il en vient.
-    """
-    received = 0
-
-    async def receive() -> Message:
-        nonlocal received
-        message = await request.receive()
-        received += len(message.get("body", b""))
-        if received > MAX_FORM_BYTES:
-            raise _too_big()
-        return message
-
-    return Request(request.scope, receive)
-
-
 async def _read_post(request: Request) -> tuple[int, dict[str, str]]:
     """Compte de la session et champs textuels d'un `POST` ; 403 sans session ou sans jeton anti-CSRF valide.
 
@@ -193,7 +175,7 @@ async def _read_post(request: Request) -> tuple[int, dict[str, str]]:
     if declared > MAX_FORM_BYTES:
         raise _too_big()
     try:
-        async with _bounded(request).form() as form:
+        async with bounded_request(request, MAX_FORM_BYTES, _too_big).form() as form:
             fields = {name: value for name, value in form.items() if isinstance(value, str)}
     except HTTPException:
         raise WebError(400, "Le formulaire n'a pas pu être lu.") from None

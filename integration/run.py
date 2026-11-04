@@ -10,8 +10,8 @@ puis lance ce script. Usage : uv run --script integration/run.py [--only a,b,c]
 `--only` rejoue seulement les contrôles nommés, avec ceux dont ils dépendent, sur une stack déjà démarrée : pratique
 pour refaire un contrôle long (`--only hangup`) sans relancer tout le reste. `--help` donne la liste des noms.
 
-dictee répond sur http://127.0.0.1:18000. Le script l'appelle avec la clé de service (`OPENWEBUI_SERVICE_KEY` du
-`.env`, jamais affichée) et sans en-tête d'email : les valeurs par défaut s'appliquent. Chaque contrôle affiche `OK`
+dictee répond sur http://127.0.0.1:18000. Le script l'appelle avec la clé de service (`OPENWEBUI_SERVICE_KEY` de
+l'environnement, sinon du `.env`, jamais affichée) et sans en-tête d'email : les valeurs par défaut s'appliquent. Chaque contrôle affiche `OK`
 ou `ÉCHEC` avec sa durée, et le script s'arrête au premier échec. Les lignes `INFO` sont des mesures, sans verdict.
 Les contrôles rapides passent d'abord, les contrôles longs à la fin, l'un après l'autre.
 
@@ -101,15 +101,6 @@ def info(text: str) -> None:
 
 def note(text: str) -> None:
     print(f"   {text}", flush=True)
-
-
-def env_value(name: str) -> str:
-    """Lit une valeur du `.env` sans jamais l'afficher."""
-    for line in (ROOT / ".env").read_text().splitlines():
-        key, _, value = line.partition("=")
-        if key.strip() == name:
-            return value.strip()
-    raise Failure(f"{name} absente de .env (lancer `make integration`)")
 
 
 def words(text: str) -> list[str]:
@@ -732,7 +723,7 @@ def main() -> int:
         parser.error(f"contrôle inconnu : {', '.join(sorted(unknown))}")
     selected = select(only) if only else CHECKS
 
-    key = env_value("OPENWEBUI_SERVICE_KEY")
+    key = nemo_rt.env_value("OPENWEBUI_SERVICE_KEY")
     WORK.mkdir(exist_ok=True)
     headers = {"Authorization": f"Bearer {key}"}
     with httpx.Client(base_url=BASE_URL, headers=headers, timeout=httpx.Timeout(900.0, connect=10.0)) as http:

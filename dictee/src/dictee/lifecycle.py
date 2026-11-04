@@ -23,15 +23,35 @@ CLIENT_CLOSED = 499
 _running: set[asyncio.Task] = set()
 
 
-@dataclass
-class Trace:
+@dataclass(kw_only=True)
+class RequestTrace:
+    """Base des lignes de journal d'une requête : son statut, et la garantie que la ligne ne s'écrit qu'une fois.
+
+    Le statut d'une requête qui s'arrête sur une erreur imprévue reste 500. `log` n'écrit la ligne qu'une fois : la
+    première qui l'appelle la fixe. Chaque route donne le format de sa ligne dans `_write`.
+    """
+
+    status: int = 500
+    logged: bool = False
+
+    def log(self) -> None:
+        if self.logged:
+            return
+        self.logged = True
+        self._write()
+
+    def _write(self) -> None:
+        raise NotImplementedError
+
+
+@dataclass(kw_only=True)
+class Trace(RequestTrace):
     """Ce que la ligne de journal d'une requête dit d'elle ; un champ resté inconnu s'écrit `-`.
 
-    `route` nomme la route (`transcriptions`, par exemple). Le statut d'une requête qui s'arrête sur une erreur
-    imprévue reste 500. `mismatch` compte, dans une réponse en continu, les items dont la phrase finale ne prolonge
-    pas les morceaux déjà envoyés : un nombre sans contenu, `-` hors réponse en continu. `task` est l'identifiant de
-    la tâche de transcription que la requête a créée ou rejointe, écrit en fin de ligne. `log` n'écrit la ligne
-    qu'une fois : la première qui l'appelle la fixe.
+    `route` nomme la route (`transcriptions`, par exemple). `mismatch` compte, dans une réponse en continu, les items
+    dont la phrase finale ne prolonge pas les morceaux déjà envoyés : un nombre sans contenu, `-` hors réponse en
+    continu. `task` est l'identifiant de la tâche de transcription que la requête a créée ou rejointe, écrit en fin de
+    ligne. Le statut et l'écriture unique viennent de `RequestTrace`.
     """
 
     route: str
@@ -43,15 +63,9 @@ class Trace:
     llm_ms: int | None = None
     decision: str = "-"
     mismatch: int | None = None
-    status: int = 500
     task: str = "-"
-    logged: bool = False
 
-    def log(self) -> None:
-        if self.logged:
-            return
-        self.logged = True
-
+    def _write(self) -> None:
         def show(value: float | int | None, template: str = "{}") -> str:
             return "-" if value is None else template.format(value)
 
@@ -109,6 +123,20 @@ def cancel_once(task: asyncio.Task) -> None:
     """
     if not task.done() and not task.cancelling():
         task.cancel()
+
+
+async def abandon_stream(task: asyncio.Task, trace: RequestTrace) -> None:
+    """Filet d'une réponse en continu, que Starlette lance quand la réponse est finie, même annulée.
+
+    Si le client raccroche entre la création de la réponse et le premier octet, le générateur du flux ne démarre
+    jamais et ses `finally` ne courent pas : `task`, déjà lancée (la reconnaissance ou l'encodage), serait seule à
+    continuer et garderait sa place ou ses appels à NeMo. Le filet l'annule, et écrit la ligne de la requête avec le
+    statut 499 si personne ne l'a encore écrite.
+    """
+    cancel_once(task)
+    if not trace.logged:
+        trace.status = CLIENT_CLOSED
+        trace.log()
 
 
 def _forget(task: asyncio.Task) -> None:

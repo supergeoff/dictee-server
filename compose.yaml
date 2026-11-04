@@ -43,6 +43,8 @@ services:
       context: https://github.com/supergeoff/dictee-server.git#main:dictee
       target: runtime
     restart: unless-stopped
+    # Docker attend 30 s après SIGTERM avant SIGKILL : uvicorn en laisse 20 aux requêtes, puis arrête les tâches.
+    stop_grace_period: 30s
     env_file: .env
     expose:
       - "8000"

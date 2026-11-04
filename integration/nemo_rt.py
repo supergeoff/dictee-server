@@ -3,7 +3,8 @@
 `synth` produit de l'audio par `/v1/audio/speech`, `realtime` joue une session
 sur `/v1/audio/transcriptions/realtime`. `check_nemo.py` et, plus tard,
 `boost.py` partagent ces deux fonctions. Le module vise le NeMo du compose
-d'intégration (`http://127.0.0.1:18001`) et lit sa clé dans `.env`.
+d'intégration (`http://127.0.0.1:18001`) et lit sa clé par `env_value`, seule lecture du `.env`
+des scripts d'intégration.
 
 Dépendances : httpx, websockets (déclarées par les scripts qui l'importent).
 """
@@ -25,15 +26,26 @@ ROOT = Path(__file__).resolve().parent.parent
 BASE_URL = os.environ.get("NEMO_URL", "http://127.0.0.1:18001")
 
 
+def env_value(name: str) -> str:
+    """La variable `name` de l'environnement si elle existe, sinon sa valeur dans le `.env` du dépôt.
+
+    C'est la seule lecture du `.env` des scripts d'intégration. La valeur n'est jamais affichée : le message d'erreur
+    ne cite que son nom. Un conteneur jetable, qui n'a pas de `.env`, passe la valeur par l'environnement.
+    """
+    if os.environ.get(name):
+        return os.environ[name]
+    env_file = ROOT / ".env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == name:
+                return value.strip()
+    raise RuntimeError(f"{name} absente de l'environnement et de .env (lancer `make nemo-up` ou `make integration`)")
+
+
 def api_key() -> str:
-    """Lit NEMO_API_KEY dans l'environnement, sinon dans le .env du dépôt (un conteneur jetable n'a pas de .env)."""
-    if os.environ.get("NEMO_API_KEY"):
-        return os.environ["NEMO_API_KEY"]
-    for line in (ROOT / ".env").read_text().splitlines():
-        name, _, value = line.partition("=")
-        if name.strip() == "NEMO_API_KEY":
-            return value.strip()
-    raise RuntimeError("NEMO_API_KEY absente de .env (lancer `make nemo-up`)")
+    """La clé de NeMo, NEMO_API_KEY, lue par `env_value`."""
+    return env_value("NEMO_API_KEY")
 
 
 def auth_headers() -> dict[str, str]:

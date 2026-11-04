@@ -14,6 +14,7 @@ from typing import BinaryIO
 from python_multipart.exceptions import FormParserError
 from python_multipart.multipart import MultipartParser, parse_options_header
 from starlette.requests import Request
+from starlette.types import Message
 
 from dictee.errors import ApiError
 
@@ -27,6 +28,25 @@ def payload_too_large(limit_mb: int) -> ApiError:
     """Erreur 413 d'un corps plus grand que la limite."""
     message = f"The request body is larger than the limit of {limit_mb} MB."
     return ApiError(413, message, param="file", code="payload_too_large")
+
+
+def bounded_request(request: Request, limit_bytes: int, too_big: Callable[[], Exception]) -> Request:
+    """Requête de même corps que `request`, dont la lecture lève `too_big()` dès que `limit_bytes` octets sont dépassés.
+
+    `Content-Length` ne dit rien d'un corps envoyé par morceaux : seule la lecture sait combien il en vient. La route
+    qui veut refuser plus tôt un `Content-Length` trop grand le fait elle-même, avant de lire.
+    """
+    received = 0
+
+    async def receive() -> Message:
+        nonlocal received
+        message = await request.receive()
+        received += len(message.get("body", b""))
+        if received > limit_bytes:
+            raise too_big()
+        return message
+
+    return Request(request.scope, receive)
 
 
 @dataclass(frozen=True)
@@ -164,12 +184,8 @@ async def read_upload(
     if content_type.lower() != b"multipart/form-data" or not boundary:
         raise ApiError(400, "Send the request as multipart/form-data.")
     reader = MultipartReader(boundary, path, on_file)
-    received = 0
     try:
-        async for chunk in request.stream():
-            received += len(chunk)
-            if received > limit:
-                raise payload_too_large(limit_mb)
+        async for chunk in bounded_request(request, limit, lambda: payload_too_large(limit_mb)).stream():
             reader.write(chunk)
         reader.finish()
     except FormParserError:

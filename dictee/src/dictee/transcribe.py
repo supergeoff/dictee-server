@@ -33,7 +33,16 @@ from dictee.auth import require_caller
 from dictee.cleanup import clean
 from dictee.errors import NEMO_ERRORS, ApiError, nemo_failure, unexpected_error
 from dictee.formats import delta_event, done_event, error_event, render, segment_event
-from dictee.lifecycle import CLIENT_CLOSED, Trace, cancel_once, elapsed_ms, loggable, run_unless_disconnected, spawn
+from dictee.lifecycle import (
+    CLIENT_CLOSED,
+    Trace,
+    abandon_stream,
+    cancel_once,
+    elapsed_ms,
+    loggable,
+    run_unless_disconnected,
+    spawn,
+)
 from dictee.modes import Mode, resolve_mode, to_iso_language, to_nemo_language
 from dictee.processing import task_audio, task_dir
 from dictee.profile import Profile, glossary_terms, load_profile
@@ -195,18 +204,6 @@ class _DeltaFeed:
         self._sent_any = True
 
 
-async def _abandon(recognition: asyncio.Task, trace: Trace) -> None:
-    """Filet d'une réponse en continu, lancé par Starlette quand la réponse est finie, même annulée.
-
-    Si le client raccroche entre la création de la réponse et le premier octet, le générateur ne démarre jamais et
-    ses `finally` ne courent pas : la reconnaissance, déjà lancée, serait seule à continuer et garderait sa place.
-    """
-    cancel_once(recognition)
-    if not trace.logged:
-        trace.status = CLIENT_CLOSED
-        trace.log()
-
-
 @dataclass
 class _Job:
     """Un flux en cours : l'audio converti et ce que ses étapes partagent.
@@ -324,7 +321,7 @@ class _Job:
             self.events(first, deltas, recognition),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache"},
-            background=BackgroundTask(_abandon, recognition, self.trace),
+            background=BackgroundTask(abandon_stream, recognition, self.trace),
         )
 
     async def events(

@@ -632,6 +632,13 @@ def test_unreadable_audio_is_422(ask, fake_nemo):
     assert fake_nemo.calls == []
 
 
+def test_unreadable_audio_is_422_and_leaves_neither_task_nor_folder(transcriptions_client, service_headers):
+    response = post(transcriptions_client, service_headers, b"not audio", model="dictee")
+    assert (response.status_code, response.json()["error"]["code"]) == (422, "invalid_audio")
+    assert tasks_of(transcriptions_client) == []
+    assert not any(transcriptions_client.app.state.settings.tasks_dir.iterdir())
+
+
 def test_empty_file_is_422(ask):
     assert ask(b"").status_code == 422
 
