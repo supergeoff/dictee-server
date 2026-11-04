@@ -162,7 +162,7 @@ La connexion suit le Realtime d'OpenAI en mode transcription. dictee traduit ses
 | `input_audio_buffer.append` (PCM16 en base64) | Décode et transmet à NeMo en trames binaires. |
 | `input_audio_buffer.commit` | Transmet le commit, envoie `input_audio_buffer.committed` avec l'`item_id` de la prise de parole. |
 | `input_audio_buffer.clear` | Transmet, puis envoie `input_audio_buffer.cleared`. |
-| Événements de NeMo pendant la session | Chaque texte partiel de NeMo devient `conversation.item.input_audio_transcription.delta` (`item_id`, `content_index` à 0, `delta`) ; chaque texte final devient `…completed` (`item_id`, `content_index`, `transcript`). |
+| Événements de NeMo pendant la session | Chaque texte partiel de NeMo devient `conversation.item.input_audio_transcription.delta` (`item_id`, `content_index` à 0, `delta`) ; les textes finals d'une prise de parole, joints par une espace, forment un seul `…completed` (`item_id`, `content_index`, `transcript`), que dictee envoie après `input_audio_buffer.committed`, quand NeMo a rendu tous les textes de la prise de parole. |
 
 L'`item_id` d'une prise de parole (`item_` suivi d'un compteur) naît au premier `append` après le commit précédent, si bien que les textes partiels portent déjà l'identifiant que `committed` annoncera. Si NeMo n'accepte qu'un commit par session (vérification 12.3), dictee ouvre une nouvelle session NeMo pour la prise de parole suivante, sans que le client le voie.
 
