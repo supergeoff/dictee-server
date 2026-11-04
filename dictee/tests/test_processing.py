@@ -260,6 +260,27 @@ async def test_the_progress_of_a_meeting_never_goes_past_one(services, monkeypat
     assert writes == [0.5, 1.0, 1.0, 1.0]
 
 
+async def test_the_progress_of_a_meeting_never_goes_back_after_a_retry(services, monkeypatch):
+    # Le premier essai annonce 1 à 4 s envoyées puis perd sa session ; le second repart de 1 s.
+    monkeypatch.setattr(processing, "PROGRESS_EVERY_S", 0.0)
+    writes = progress_writes(services, monkeypatch)
+    nemo = FramedNemo(finals=services.nemo.finals, transcribe_errors=[NemoUnavailable("lost"), None])
+    services = replace(services, nemo=nemo)
+    await process(services, audio_task(services, 4.0, mode=Mode.DIARIZE), RunStats())
+    assert writes == [0.25, 0.5, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0]
+
+
+async def test_a_resumed_meeting_keeps_the_progress_it_had_reached(services, monkeypatch):
+    # Après un redémarrage, la tâche avait atteint 0,6 : la nouvelle session ne fait pas reculer la barre.
+    monkeypatch.setattr(processing, "PROGRESS_EVERY_S", 0.0)
+    services = replace(services, nemo=FramedNemo(finals=services.nemo.finals))
+    task = audio_task(services, 4.0, mode=Mode.DIARIZE)
+    services.store.set_progress(task.id, 0.6)
+    writes = progress_writes(services, monkeypatch)
+    await process(services, services.store.get(task.id), RunStats())
+    assert writes == [0.6, 0.6, 0.75, 1.0]
+
+
 # Les reprises auprès de NeMo.
 
 

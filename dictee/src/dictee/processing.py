@@ -177,18 +177,22 @@ async def _transcribe_meeting(
 
     Une session perdue recommence au début du fichier, avec des mots et des phrases neufs. L'avancement vaut les
     secondes envoyées sur la durée de la tâche ; il s'écrit au plus toutes les `PROGRESS_EVERY_S` secondes de temps
-    réel, tous essais confondus.
+    réel, tous essais confondus. Il ne redescend jamais : son plancher part de l'avancement de la tâche au départ,
+    monte avec chaque écriture et vaut pour tous les essais, si bien qu'une reprise ou un redémarrage ne fait pas
+    reculer la barre qu'un client lit.
     """
     wav = task_audio(services.settings, task.id)
     params = task.params
     last_write: float | None = None
+    floor = task.progress
 
     def on_progress(sent: float) -> None:
-        nonlocal last_write
+        nonlocal last_write, floor
         now = time.monotonic()
         if last_write is None or now - last_write >= PROGRESS_EVERY_S:
             last_write = now
-            services.store.set_progress(task.id, min(1.0, sent / task.duration))
+            floor = max(floor, min(1.0, sent / task.duration))
+            services.store.set_progress(task.id, floor)
 
     async def attempt() -> tuple[list[str], list[Word]]:
         texts: list[str] = []
