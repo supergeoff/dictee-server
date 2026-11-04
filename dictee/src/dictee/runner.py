@@ -36,8 +36,8 @@ logger = logging.getLogger("dictee")
 # Une tâche en cours trouvée au démarrage après `MAX_TASK_STARTS` démarrages passe en échec `interrupted` : elle est déjà
 # partie trois fois sans arriver au bout, et dictee ne la reprend plus.
 MAX_TASK_STARTS = 3
-# La boucle de ménage tourne toutes les `CLEANUP_EVERY_S` secondes. Ces deux valeurs se lisent à chaque tour : les tests
-# les remplacent.
+# La boucle de ménage tourne toutes les `CLEANUP_EVERY_S` secondes. Cette valeur se lit à chaque tour, et les tests la
+# remplacent.
 CLEANUP_EVERY_S = 600.0
 # Un dossier de `settings.tasks_dir` qui n'est celui d'aucune tâche n'est effacé qu'après `ORPHAN_AGE_S` secondes : il
 # peut être celui d'un audio en cours de décodage, dont la tâche n'est pas encore enregistrée.

@@ -29,7 +29,8 @@ FRAME_BYTES = TRANSCRIPTION_RATE * SAMPLE_WIDTH
 OPEN_TIMEOUT = 10.0  # ouverture d'une connexion, WebSocket ou HTTP
 EVENT_TIMEOUT = 300.0  # silence maximal entre deux événements de NeMo pendant une session temps réel
 # Silence maximal entre deux événements quand la session marque les personnes : une réunion de 2 heures peut rester
-# bien plus longtemps sans événement qu'une dictée. Valeur provisoire, en attendant la mesure sur 2 heures.
+# bien plus longtemps sans événement qu'une dictée. La tâche 1 a mesuré au plus 23 s de silence sur une réunion de
+# 2 heures, commit et événement final compris : le délai retenu reste le plancher de 300 s.
 SPEAKERS_EVENT_TIMEOUT = 300.0
 # Clé de la personne dans chaque mot de l'événement final : un entier, numéroté à partir de 1 (relevé de la tâche 1).
 SPEAKER_KEY = "speaker"
@@ -52,7 +53,7 @@ _COMMITTED = "input_audio_buffer.committed"
 _CLEARED = "input_audio_buffer.cleared"
 
 # À son niveau DEBUG, `websockets` écrit chaque en-tête de la poignée de main (dont la clé d'API) et un extrait de
-# chaque trame (dont la session, qui porte le glossaire et la consigne). Il lit ce niveau à la création de la
+# chaque trame (dont la session, qui porte le glossaire de l'appelant). Il lit ce niveau à la création de la
 # connexion : un logger dédié, au niveau INFO fixé, reste muet en DEBUG quel que soit le réglage du logger racine.
 _WEBSOCKETS_LOGGER = logging.getLogger("dictee.nemo.websockets")
 _WEBSOCKETS_LOGGER.setLevel(logging.INFO)

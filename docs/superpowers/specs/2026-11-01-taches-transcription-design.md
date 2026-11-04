@@ -145,7 +145,7 @@ Le moteur dépend du mode et des drapeaux.
 
 ### 6.4 Envoi identique
 
-Deux envois sont identiques quand ils ont le même propriétaire, les mêmes octets de fichier (empreinte SHA-256 calculée pendant la réception), le même modèle, la même langue, le même glossaire et la même force de glossaire, plus les mêmes consignes de reformulation pour `dictee-clean` (choix de Claude : sinon un renvoi rendrait un texte reformulé avec d'anciennes consignes). Le format de réponse et les granularités ne comptent pas : le résultat est gardé sous une forme neutre et rendu à la demande.
+Deux envois sont identiques quand ils ont le même propriétaire, les mêmes octets de fichier (empreinte SHA-256 calculée pendant la réception), le même mode (deux noms de modèle qui donnent le même mode donnent le même texte, donc se rejoignent), la même langue, le même glossaire et la même force de glossaire, plus les mêmes consignes de reformulation pour `dictee-clean` (choix de Claude : sinon un renvoi rendrait un texte reformulé avec d'anciennes consignes). Le format de réponse et les granularités ne comptent pas : le résultat est gardé sous une forme neutre et rendu à la demande.
 
 Un envoi identique à une tâche `queued` ou `in_progress` la rejoint. Identique à une tâche `completed` non effacée, il reçoit son résultat sans retraitement. Une tâche `failed` ou `cancelled` ne se rejoint pas : l'envoi crée une nouvelle tâche. La règle vaut avec ou sans `background`, de sorte que l'application de Geoff peut renvoyer une demande sans créer de doublon.
 
