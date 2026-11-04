@@ -17,7 +17,7 @@ import json
 import logging
 import secrets
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import NoReturn
 
 import anyio
@@ -66,12 +66,16 @@ class _Config:
 
 @dataclass
 class _Item:
-    """Une prise de parole : son identifiant, la durée de son audio et les événements déjà partis pour elle."""
+    """Une prise de parole : son identifiant, la durée de son audio, son commit et ses textes finals.
+
+    NeMo peut rendre plusieurs textes finals pour une même prise de parole : le client n'en reçoit qu'un seul
+    `completed`, qui les joint, une fois la prise de parole finie.
+    """
 
     id: str
     seconds: float = 0.0
     committed: bool = False
-    completed: bool = False
+    texts: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -482,6 +486,7 @@ class _LiveConnection:
         elif isinstance(event, Partial):
             await self._send(_DELTA, item_id=item.id, content_index=0, delta=event.text)
         elif isinstance(event, Final):
+            item.texts.append(event.text)
             if not item.committed:
                 # NeMo a fermé seul la prise de parole après le silence de `server_vad` : il n'enverra pas de
                 # `Committed` pour elle, et l'audio suivant ouvre une autre prise de parole.
@@ -489,10 +494,10 @@ class _LiveConnection:
                 if self._current is item:
                     self._current = None
                 await self._announce(item)
-            await self._complete(item, event.text)
+                await self._complete(item)
         elif isinstance(event, Committed) and item.committed:
             self._items.popleft()
-            await self._complete(item, "")  # sans effet si son texte final est déjà parti
+            await self._complete(item)  # NeMo a rendu tous les textes finals de la prise de parole validée
 
     async def _announce(self, item: _Item) -> None:
         """`input_audio_buffer.committed` d'une prise de parole, liée à celle validée avant elle."""
@@ -501,11 +506,10 @@ class _LiveConnection:
         self._turns += 1
         await self._send("input_audio_buffer.committed", item_id=item.id, previous_item_id=previous)
 
-    async def _complete(self, item: _Item, transcript: str) -> None:
-        """Le texte final d'une prise de parole et la durée de son audio ; une seule fois par prise de parole."""
-        if item.completed:
-            return
-        item.completed = True
+    async def _complete(self, item: _Item) -> None:
+        """Le texte final d'une prise de parole, ses textes finals non vides joints par une espace, et la durée de son
+        audio ; une seule fois par prise de parole, qui a déjà quitté `_items`."""
+        transcript = " ".join(text for text in item.texts if text)
         usage = {"type": "duration", "seconds": round(item.seconds, 3)}
         await self._send(_COMPLETED, item_id=item.id, content_index=0, transcript=transcript, usage=usage)
 

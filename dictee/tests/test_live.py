@@ -11,6 +11,7 @@ from openai import OpenAI
 
 from dictee import live
 from dictee.nemo import NemoError, NemoOverloaded
+from dictee.types import Final, Partial
 
 DELTA = "conversation.item.input_audio_transcription.delta"
 COMPLETED = "conversation.item.input_audio_transcription.completed"
@@ -114,6 +115,30 @@ def test_a_commit_gives_committed_with_its_item_then_completed(live_client, serv
         "Bonjour à tous.",
     )
     assert completed["usage"] == {"type": "duration", "seconds": 1.4}
+
+
+def test_the_final_texts_of_a_turn_reach_the_client_as_one_completed_text(live_client, service_headers, fake_nemo):
+    # NeMo peut rendre plusieurs textes finals pour un même commit, dont un vide : aucun ne se perd.
+    fake_nemo.live_turns = [
+        [Partial("Bonjour"), Final("Bonjour à tous.", ()), Final("", ()), Final("On commence.", ())],
+        [Partial("Salut"), Final("Salut.", ())],
+    ]
+    with open_live(live_client, service_headers) as ws:
+        until(ws, "session.created")
+        events = []
+        for _ in range(2):
+            ws.send_json({"type": "input_audio_buffer.append", "audio": pcm_b64(0.5, 24000)})
+            ws.send_json({"type": "input_audio_buffer.commit"})
+            events += until(ws, COMPLETED)
+    kinds = [(event["type"], event.get("item_id")) for event in events if event["type"] != DELTA]
+    assert kinds == [
+        ("input_audio_buffer.committed", "item_1"),
+        (COMPLETED, "item_1"),
+        ("input_audio_buffer.committed", "item_2"),
+        (COMPLETED, "item_2"),
+    ]
+    transcripts = [event["transcript"] for event in events if event["type"] == COMPLETED]
+    assert transcripts == ["Bonjour à tous. On commence.", "Salut."]
 
 
 def test_partials_carry_the_item_that_committed_announces_later(live_client, service_headers):
