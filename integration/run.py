@@ -482,9 +482,14 @@ class State:
             time.sleep(POLL_INTERVAL)
 
     def task_folders(self) -> set[str]:
-        """Les dossiers de tâche présents dans le conteneur dictee (aucun quand le dossier des tâches n'existe pas)."""
+        """Les dossiers de tâche présents dans le conteneur dictee.
+
+        dictee crée le dossier des tâches à son démarrage : une lecture qui échoue (conteneur arrêté, dossier absent)
+        lève `Failure`, pour qu'un contrôle de dossiers effacés ne passe jamais faute d'avoir pu lire le dossier.
+        """
         out = subprocess.run(["docker", "exec", self.dictee, "ls", "-1", TASKS_DIR], capture_output=True, text=True)
-        return set(out.stdout.split()) if out.returncode == 0 else set()
+        expect(out.returncode == 0, f"lecture du dossier des tâches impossible (code {out.returncode})")
+        return set(out.stdout.split())
 
     def expect_folders_gone(self, task_ids: list[str]) -> None:
         """Vérifie que les dossiers de ces tâches finies ont disparu, attendus LOG_TIMEOUT secondes au plus."""
