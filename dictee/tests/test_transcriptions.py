@@ -1,12 +1,15 @@
 import contextlib
 import dataclasses
+import errno
 import functools
 import gc
 import hashlib
 import itertools
 import json
 import logging
+import os
 import re
+import shutil
 import tempfile
 import time
 import warnings
@@ -1359,6 +1362,38 @@ def test_an_identical_upload_after_a_failure_makes_a_new_task(ask, transcription
     fake_nemo.chunks = [Final("Bonjour.", ())]
     assert ask().json() == {"text": "Bonjour."}
     assert [task.status for task in tasks_of(transcriptions_client)] == [TaskStatus.FAILED, TaskStatus.COMPLETED]
+
+
+@pytest.fixture
+def failing_removal(monkeypatch):
+    """Fait échouer l'effacement des dossiers temporaires, comme un `rmtree` refusé ; les dossiers restent à effacer.
+
+    L'échec passe par le `onexc` de `tempfile`, qui décide seul de lever ou non. Les dossiers laissés sont effacés à la
+    fin du test.
+    """
+    left: list[str] = []
+
+    def rmtree(path, onexc):
+        left.append(path)
+        # Comme `shutil.rmtree`, l'appel de `onexc` se fait pendant que l'exception est levée : `tempfile` la relance.
+        try:
+            raise OSError(errno.EBUSY, "Device or resource busy", path)
+        except OSError as error:
+            onexc(os.rmdir, path, error)
+
+    monkeypatch.setattr(tempfile._shutil, "rmtree", rmtree)
+    yield
+    monkeypatch.undo()
+    for path in left:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.mark.parametrize("stream", ["false", "true"])
+def test_a_temporary_folder_that_cannot_be_removed_does_not_change_the_answer(ask, caplog, failing_removal, stream):
+    caplog.set_level(logging.DEBUG)
+    response = ask(stream=stream)
+    assert response.status_code == 200 and "Bonjour à tous." in response.text
+    assert not [record for record in caplog.records if "dictee-" in record.getMessage() or record.exc_info]
 
 
 def test_another_glossary_makes_another_task(transcriptions_client, db, tone_mp3):

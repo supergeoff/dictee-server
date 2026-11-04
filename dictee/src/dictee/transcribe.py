@@ -300,7 +300,8 @@ class _Job:
         recognition = spawn(self.recognize(on_text))
         recognition.add_done_callback(lambda _: deltas.put_nowait(_END))
         # Une tâche annulée avant son premier pas n'entre jamais dans `recognize` : le dossier du WAV et la place se
-        # rendent ici, à la fin de la tâche.
+        # rendent ici, à la fin de la tâche. Le dossier est créé avec `ignore_cleanup_errors` (voir `_handle`) : son
+        # effacement ne lève jamais dans ce rappel.
         recognition.add_done_callback(lambda _: self.scratch.cleanup())
         if self.ticket is not None:
             recognition.add_done_callback(lambda _: self.ticket.release())
@@ -458,8 +459,9 @@ async def _handle(request: Request, trace: Trace) -> Response:
     profile = load_profile(state.db, settings, caller)
 
     # Le dossier garde l'envoi le temps de le lire et de le décoder. Un flux garde ensuite son WAV à côté et prend le
-    # dossier à sa charge (`_stream`) ; pour une tâche, le dossier disparaît dès qu'elle est trouvée ou créée.
-    scratch = tempfile.TemporaryDirectory(prefix="dictee-")
+    # dossier à sa charge (`_stream`) ; pour une tâche, le dossier disparaît dès qu'elle est trouvée ou créée. Un
+    # effacement qui échoue est ignoré : il ne change pas la réponse et ne lève rien dans le rappel de `open_stream`.
+    scratch = tempfile.TemporaryDirectory(prefix="dictee-", ignore_cleanup_errors=True)
     handed_over = False
     try:
         upload_path = Path(scratch.name) / "upload"
