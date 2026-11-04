@@ -287,6 +287,24 @@ def test_audio_over_the_limit_ends_the_session(live_client, service_headers, mon
         assert ws.receive()["code"] == 1000
 
 
+def test_an_odd_number_of_bytes_is_refused_and_leaves_the_session_as_it_was(
+    live_client, service_headers, fake_nemo, monkeypatch
+):
+    # Avec 0,6 s comptée en trop, la seconde moitié dépasserait la limite d'une seconde et fermerait la session.
+    monkeypatch.setattr(live, "MAX_AUDIO_S", 1.0)
+    odd = base64.b64encode(bytes(2 * 14_400 + 1)).decode()
+    with open_live(live_client, service_headers) as ws:
+        until(ws, "session.created")
+        ws.send_json({"type": "input_audio_buffer.append", "event_id": "evt_client_1", "audio": odd})
+        error = until(ws, "error")[-1]["error"]
+        assert fake_nemo.live_sessions == []
+        ws.send_json({"type": "input_audio_buffer.append", "audio": pcm_b64(0.6, 24000)})
+        ws.send_json({"type": "input_audio_buffer.commit"})
+        assert until(ws, COMPLETED)[-1]["item_id"] == "item_1"
+    assert (error["code"], error["param"], error["event_id"]) == ("invalid_value", "audio", "evt_client_1")
+    assert bytes(fake_nemo.live_sessions[0].audio) == bytes(2 * 14_400)
+
+
 def test_the_session_line_never_carries_any_text(live_client, fake_nemo, db, caplog):
     caplog.set_level(logging.DEBUG)
     headers, owner = personal_headers(db, "alice@example.test")

@@ -400,6 +400,10 @@ class _LiveConnection:
             pcm = None
         if pcm is None:
             raise _invalid("audio", "'audio' must be base64-encoded 16-bit PCM.")
+        # Un nombre impair d'octets décalerait d'un octet tous les échantillons suivants de la session : le morceau est
+        # refusé avant de compter son audio ou d'ouvrir une session NeMo.
+        if len(pcm) % SAMPLE_WIDTH:
+            raise _invalid("audio", "'audio' must hold whole 16-bit samples, so an even number of bytes.")
         seconds = len(pcm) / (SAMPLE_WIDTH * self._config.rate)
         self._audio_s += seconds
         if self._audio_s > MAX_AUDIO_S:
