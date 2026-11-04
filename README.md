@@ -28,7 +28,7 @@ Chaque appel porte une clé dans l'en-tête `Authorization: Bearer <clé>`. Une 
 
 | `model` | Résultat |
 |---|---|
-| `dictee` | Le texte brut. Tout autre nom de modèle, comme `whisper-1`, donne aussi le texte brut. |
+| `dictee` | Le texte brut. Tout autre nom de modèle, comme `whisper-1`, donne aussi le texte brut, sauf `gpt-4o-transcribe-diarize`, le nom du modèle d'OpenAI qui sépare les locuteurs : dictee le traite comme `dictee-diarize`. |
 | `dictee-clean` | Le texte reformulé par un LLM (un modèle de langage). Si la reformulation échoue, dictee rend le texte brut. |
 | `dictee-diarize` | Le texte avec ses locuteurs, nommés A, B, C dans l'ordre de leur première prise de parole. Le format `diarized_json` donne les mêmes locuteurs, quel que soit le modèle. |
 
