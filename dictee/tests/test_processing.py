@@ -218,6 +218,8 @@ async def test_a_meeting_starts_its_whole_session_again_after_a_lost_connection(
 
 
 async def test_a_meeting_keeps_only_the_words_of_its_last_session(services, fake_nemo):
+    # La première session rend sa première phrase avant d'être perdue : ses mots ne doivent pas rester dans le résultat.
+    fake_nemo.after = 1
     fake_nemo.transcribe_errors = [NemoUnavailable("lost"), None]
     result = await process(services, audio_task(services, 3.0, mode=Mode.DIARIZE), RunStats())
     assert result.text == "Bonjour à tous. Salut."
