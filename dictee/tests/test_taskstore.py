@@ -133,6 +133,30 @@ def test_failed_cancelled_and_expired_tasks_are_never_joined(store):
     assert store.find_identical(1, "c" * 64, RAW.digest(), NOW + 60) is None
 
 
+CLEAN = TaskParams("fr-FR", Mode.CLEAN, (), 1.0, "Corrige la ponctuation.")
+
+
+@pytest.mark.parametrize("decision", ["llm_timeout", "llm_failed", "llm_empty", "ratio"])
+def test_a_clean_task_that_fell_back_to_the_raw_text_is_not_joined(store, decision):
+    task = make(store, params=CLEAN)
+    store.complete(task.id, replace(RESULT, cleaned=RESULT.text, decision=decision), NOW, 86_400)
+    assert store.find_identical(1, task.upload_sha256, CLEAN.digest(), NOW + 60) is None
+
+
+@pytest.mark.parametrize("decision", ["cleaned", "short", "long"])
+def test_a_clean_task_that_was_reformulated_or_skipped_by_design_is_joined(store, decision):
+    task = make(store, params=CLEAN)
+    store.complete(task.id, replace(RESULT, cleaned="Bonjour à tous, salut !", decision=decision), NOW, 86_400)
+    assert store.find_identical(1, task.upload_sha256, CLEAN.digest(), NOW + 60).id == task.id
+
+
+def test_an_older_reformulated_task_is_joined_past_a_newer_fallback(store):
+    older, newer = make(store, params=CLEAN, now=NOW), make(store, params=CLEAN, now=NOW + 5)
+    store.complete(older.id, replace(RESULT, cleaned="Bonjour à tous, salut !", decision="cleaned"), NOW, 86_400)
+    store.complete(newer.id, replace(RESULT, cleaned=RESULT.text, decision="llm_timeout"), NOW + 5, 86_400)
+    assert store.find_identical(1, older.upload_sha256, CLEAN.digest(), NOW + 60).id == older.id
+
+
 def test_the_most_recent_identical_task_is_the_one_found(store):
     make(store, now=NOW)
     newer = make(store, now=NOW + 5)

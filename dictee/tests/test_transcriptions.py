@@ -220,6 +220,18 @@ def test_clean_applies_to_json_and_text_only(openai_client, fake_llm, tone_mp3):
     assert len(fake_llm.calls) == 1
 
 
+def test_a_clean_upload_that_fell_back_to_the_raw_text_is_reformulated_when_sent_again(
+    openai_client, transcriptions_client, fake_llm, tone_mp3
+):
+    create = openai_client.audio.transcriptions.create
+    reply, fake_llm.reply = fake_llm.reply, ""
+    assert create(model="dictee-clean", file=("a.mp3", tone_mp3)).text == "Bonjour à tous. Salut."
+    fake_llm.reply = reply
+    # La première tâche a gardé le texte brut faute de réponse du LLM : le même envoi refait la tâche et la reformulation.
+    assert create(model="dictee-clean", file=("a.mp3", tone_mp3)).text == reply
+    assert len(fake_llm.calls) == 2 and len(tasks_of(transcriptions_client)) == 2
+
+
 def test_diarized_json_through_the_sdk(openai_client, fake_nemo, tone_mp3):
     r = openai_client.audio.transcriptions.create(
         model="gpt-4o-transcribe-diarize",

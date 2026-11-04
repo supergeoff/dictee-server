@@ -15,6 +15,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 
+from dictee.cleanup import SETTLED_DECISIONS
 from dictee.db import Database
 from dictee.modes import Mode
 from dictee.profile import GlossaryEntry
@@ -341,14 +342,26 @@ class TaskStore:
         """La plus récente des tâches du propriétaire qu'un même envoi peut rejoindre, ou `None`.
 
         Une tâche se rejoint en file ou en cours, ou terminée avec succès tant qu'elle n'est pas effacée à `now`.
-        Une tâche en échec ou annulée ne se rejoint jamais.
+        Une tâche en échec ou annulée ne se rejoint jamais. Une tâche `Mode.CLEAN` terminée dont la reformulation s'est
+        repliée sur le texte brut (sa décision n'est pas dans `SETTLED_DECISIONS`) ne se rejoint pas non plus : un nouvel
+        envoi refait la tâche et redemande la reformulation.
         """
+        settled = ", ".join("?" for _ in SETTLED_DECISIONS)
         with self._connect() as conn:
             row = conn.execute(
                 "select * from tasks where owner is ? and upload_sha256 = ? and params_sha256 = ? "
-                f"and ({_UNFINISHED} or (status = ? and expires_at > ?)) "
+                f"and ({_UNFINISHED} or (status = ? and expires_at > ? "
+                f"and (mode != ? or json_extract(result, '$.decision') in ({settled})))) "
                 "order by created_at desc, id desc limit 1",
-                (owner, upload_sha256, params_digest, TaskStatus.COMPLETED.value, now),
+                (
+                    owner,
+                    upload_sha256,
+                    params_digest,
+                    TaskStatus.COMPLETED.value,
+                    now,
+                    Mode.CLEAN.value,
+                    *sorted(SETTLED_DECISIONS),
+                ),
             ).fetchone()
         return None if row is None else _record(row)
 
