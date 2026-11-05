@@ -32,6 +32,21 @@
   h1 { font-size: 28px; font-weight: 650; }
   h2 { border-top: 1px solid var(--border); font-size: 16px; font-weight: 650; margin-top: 2rem; padding-top: 1rem; }
   a { color: inherit; text-decoration: none; }
+  button, input, select { font: inherit; }
+  .button {
+    align-items: center; border: 1px solid transparent; border-radius: 8px; cursor: pointer; display: inline-flex;
+    gap: 8px; justify-content: center; min-height: 40px; padding: 8px 13px;
+    transition: background .15s ease, border-color .15s ease, color .15s ease, transform .1s ease;
+  }
+  .button:active { transform: scale(.98); }
+  .button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+  .button-primary { background: var(--primary); color: var(--primary-foreground); }
+  .button-secondary { background: var(--card); border-color: var(--border); color: var(--foreground); }
+  .button-secondary:hover, .button-ghost:hover { background: var(--accent); color: var(--accent-foreground); }
+  .button-danger { background: var(--destructive-surface); border-color: transparent; color: var(--destructive); }
+  .button-danger:hover { border-color: var(--destructive); }
+  .button-ghost { background: transparent; border-color: transparent; color: var(--muted-foreground); }
+  .button-small { font-size: 12px; min-height: 32px; padding: 5px 9px; }
   label { font-size: 13px; font-weight: 600; }
   textarea, input[type="text"] {
     background: var(--card); border: 1px solid var(--input); border-radius: 8px; box-sizing: border-box;
@@ -46,7 +61,6 @@
   code { background: var(--muted); border-radius: 6px; font-family: ui-monospace, monospace; overflow-wrap: anywhere; padding: 1px 5px; }
   table { border-collapse: collapse; width: 100%; }
   th, td { border-bottom: 1px solid var(--border); padding: 0.4rem; text-align: left; }
-  button { font: inherit; padding: 0.3rem 0.8rem; }
   .discret { color: var(--muted-foreground); }
   .notice { background: var(--warning-surface); border-radius: 4px; padding: 0.6rem 0.8rem; }
   .voice { align-items: center; display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; padding: 0.3rem 0; }

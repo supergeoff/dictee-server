@@ -3,7 +3,7 @@
 {% macro csrf_field() %}<input type="hidden" name="csrf" value="{{ csrf }}">{% endmacro %}
 <header>
   <h1>dictee</h1>
-  <form method="post" action="/logout">{{ csrf_field() }}<button type="submit">Se déconnecter</button></form>
+  <form method="post" action="/logout">{{ csrf_field() }}<button class="button button-ghost" type="submit">Se déconnecter</button></form>
 </header>
 {% if saved %}
 <p class="notice" role="status">Modifications enregistrées.</p>
@@ -31,7 +31,7 @@
         {% if key.revoked_at %}
           révoquée le {{ key.revoked_at[:10] }}
         {% else %}
-          <form method="post" action="/keys/{{ key.id }}/revoke">{{ csrf_field() }}<button type="submit">Révoquer</button></form>
+          <form method="post" action="/keys/{{ key.id }}/revoke">{{ csrf_field() }}<button class="button button-danger button-small" type="submit">Révoquer</button></form>
         {% endif %}
       </td>
     </tr>
@@ -44,7 +44,7 @@
 <form method="post" action="/keys">
   {{ csrf_field() }}
   <p><label>Libellé de la nouvelle clé<br><input type="text" name="label" maxlength="100" required></label></p>
-  <p><button type="submit">Créer une clé</button></p>
+  <p><button class="button button-primary" type="submit">Créer une clé</button></p>
 </form>
 
 <h2 id="glossaire">Glossaire</h2>
@@ -52,7 +52,7 @@
 <form method="post" action="/settings">
   {{ csrf_field() }}
   <p><textarea name="glossary" rows="10" maxlength="20000" aria-label="Glossaire">{{ glossary }}</textarea></p>
-  <p><button type="submit">Enregistrer le glossaire</button></p>
+  <p><button class="button button-primary" type="submit">Enregistrer le glossaire</button></p>
 </form>
 
 <h2 id="consignes">Consignes de reformulation</h2>
@@ -60,11 +60,11 @@
 <form method="post" action="/settings">
   {{ csrf_field() }}
   <p><textarea name="instructions" rows="12" maxlength="20000" aria-label="Consignes de reformulation">{{ instructions }}</textarea></p>
-  <p><button type="submit">Enregistrer les consignes</button></p>
+  <p><button class="button button-primary" type="submit">Enregistrer les consignes</button></p>
 </form>
 <form method="post" action="/settings/reset-instructions">
   {{ csrf_field() }}
-  <p><button type="submit">Revenir aux consignes par défaut</button></p>
+  <p><button class="button button-secondary" type="submit">Revenir aux consignes par défaut</button></p>
 </form>
 
 <h2 id="voix">Voix</h2>
@@ -78,7 +78,7 @@
     <audio controls preload="none" src="/voice/preview?voice={{ voice|urlencode }}"></audio>
   </div>
   {% endfor %}
-  <p><button type="submit">Enregistrer la voix</button></p>
+  <p><button class="button button-primary" type="submit">Enregistrer la voix</button></p>
 </form>
 {% else %}
 <p class="notice">La liste des voix est indisponible pour le moment. Réessayez dans un instant.</p>

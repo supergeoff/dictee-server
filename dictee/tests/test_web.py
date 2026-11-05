@@ -519,6 +519,35 @@ def test_design_system_code_wraps_long_keys(logged_in):
     assert "overflow-wrap: anywhere" in logged_in.client.get("/").text
 
 
+BUTTON_CLASSES = {
+    "Se déconnecter": "button button-ghost",
+    "Créer une clé": "button button-primary",
+    "Révoquer": "button button-danger button-small",
+    "Enregistrer le glossaire": "button button-primary",
+    "Enregistrer les consignes": "button button-primary",
+    "Revenir aux consignes par défaut": "button button-secondary",
+    "Enregistrer la voix": "button button-primary",
+}
+
+
+def button_classes(page: str, label: str) -> str | None:
+    found = re.search(rf'<button[^>]*class="([^"]+)"[^>]*>\s*{re.escape(label)}\s*</button>', page)
+    return found.group(1) if found else None
+
+
+def test_design_system_buttons_carry_the_broker_classes(logged_in):
+    page = logged_in.post("/keys", {"label": "Android"}).text  # une clé existe, donc « Révoquer » est affiché
+    for label, classes in BUTTON_CLASSES.items():
+        assert button_classes(page, label) == classes, label
+
+
+def test_design_system_message_pages_link_with_a_primary_button(logged_in):
+    refused = logged_in.client.post("/keys", data={"label": "x"})  # 403 : pas de jeton
+    logged_out = logged_in.post("/logout").text
+    for page, label in ((logged_out, "Se connecter"), (refused.text, "Retour à la page de configuration")):
+        assert re.search(rf'<a [^>]*class="button button-primary"[^>]*>\s*{label}\s*</a>', page), label
+
+
 # --- Garde anti-CSRF ---
 
 
