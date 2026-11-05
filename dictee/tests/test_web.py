@@ -487,6 +487,38 @@ def test_html_responses_are_not_cached_and_carry_a_content_security_policy(logge
         assert page.headers["cache-control"] == "no-store"
 
 
+# --- Habillage ---
+
+TOKENS = (
+    "--background", "--foreground", "--card", "--muted", "--muted-foreground", "--border", "--input",
+    "--primary", "--primary-foreground", "--accent", "--accent-foreground", "--success", "--success-surface",
+    "--warning", "--warning-surface", "--destructive", "--destructive-surface",
+)  # fmt: skip
+
+
+def test_design_system_palette_is_declared_for_light_and_dark(logged_in):
+    for page in (logged_in.client.get("/").text, logged_in.post("/logout").text):
+        for token in TOKENS:
+            assert page.count(f"{token}:") == 2, token  # une déclaration en clair, une en sombre
+        assert "color-scheme: light dark" in page and "prefers-color-scheme: dark" in page
+
+
+def test_design_system_pages_load_nothing_from_outside(logged_in):
+    pages = [
+        logged_in.client.get("/").text,
+        logged_in.post("/keys", {"label": "x"}).text,
+        logged_in.post("/logout").text,
+    ]
+    for page in pages:
+        assert "<script" not in page
+        assert not re.search(r"<(link|img|iframe|object|embed)\b", page)
+        assert "@import" not in page and "url(" not in page
+
+
+def test_design_system_code_wraps_long_keys(logged_in):
+    assert "overflow-wrap: anywhere" in logged_in.client.get("/").text
+
+
 # --- Garde anti-CSRF ---
 
 

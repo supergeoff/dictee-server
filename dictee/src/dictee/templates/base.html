@@ -6,24 +6,48 @@
 <meta name="color-scheme" content="light dark">
 <title>dictee</title>
 <style>
-  :root { --fond: #fafafa; --texte: #1d1d1f; --discret: #5f6368; --trait: #d0d0d5; --accent: #0b57d0; --alerte: #fff4ce; }
-  @media (prefers-color-scheme: dark) {
-    :root { --fond: #1b1b1d; --texte: #ececec; --discret: #a0a4a8; --trait: #3b3b40; --accent: #8ab4f8; --alerte: #4a3d12; }
+  /* La palette et les composants viennent du design system du MCP broker. Le thème suit le système
+     sans aucun script, puisque la politique de sécurité de la page n'en autorise pas. */
+  :root {
+    color-scheme: light dark;
+    --background: #f5f5f5; --foreground: #0a0a0a; --card: #ffffff; --muted: #f1f1f1; --muted-foreground: #737373;
+    --border: #d7d7d7; --input: #e5e5e5; --primary: #171717; --primary-foreground: #fafafa;
+    --accent: #ededed; --accent-foreground: #171717;
+    --success: #047857; --success-surface: #d1fae5; --warning: #b45309; --warning-surface: #fef3c7;
+    --destructive: #b91c1c; --destructive-surface: #fee2e2; --radius: 10px;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
-  body { background: var(--fond); color: var(--texte); font: 16px/1.5 system-ui, sans-serif; margin: 0; }
-  main { max-width: 46rem; margin: 0 auto; padding: 1rem; }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --background: #0d0d0d; --foreground: #fafafa; --card: #171717; --muted: #212121; --muted-foreground: #b3b3b3;
+      --border: #ffffff1a; --input: #ffffff26; --primary: #e5e5e5; --primary-foreground: #171717;
+      --accent: #262626; --accent-foreground: #fafafa;
+      --success: #34d399; --success-surface: #064e3b66; --warning: #fbbf24; --warning-surface: #78350f66;
+      --destructive: #f87171; --destructive-surface: #7f1d1d66;
+    }
+  }
+  body { background: var(--background); color: var(--foreground); font-size: 14px; line-height: 1.5; margin: 0; }
+  main { margin: 0 auto; max-width: 46rem; padding: 16px; }
   header { align-items: center; display: flex; justify-content: space-between; }
-  h1 { font-size: 1.5rem; }
-  h2 { border-top: 1px solid var(--trait); font-size: 1.2rem; margin-top: 2rem; padding-top: 1rem; }
-  a { color: var(--accent); }
-  code { overflow-wrap: anywhere; }
+  h1 { font-size: 28px; font-weight: 650; }
+  h2 { border-top: 1px solid var(--border); font-size: 16px; font-weight: 650; margin-top: 2rem; padding-top: 1rem; }
+  a { color: inherit; text-decoration: none; }
+  label { font-size: 13px; font-weight: 600; }
+  textarea, input[type="text"] {
+    background: var(--card); border: 1px solid var(--input); border-radius: 8px; box-sizing: border-box;
+    color: var(--foreground); font: inherit; min-height: 40px; outline: none; padding: 8px 10px; width: 100%;
+  }
+  textarea { font-family: ui-monospace, monospace; font-size: 0.9rem; resize: vertical; }
+  textarea:focus, input[type="text"]:focus { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(23, 23, 23, 0.18); }
+  @media (prefers-color-scheme: dark) {
+    textarea:focus, input[type="text"]:focus { box-shadow: 0 0 0 2px rgba(229, 229, 229, 0.16); }
+  }
+  code { background: var(--muted); border-radius: 6px; font-family: ui-monospace, monospace; overflow-wrap: anywhere; padding: 1px 5px; }
   table { border-collapse: collapse; width: 100%; }
-  th, td { border-bottom: 1px solid var(--trait); padding: 0.4rem; text-align: left; }
-  textarea, input[type="text"] { background: var(--fond); border: 1px solid var(--trait); box-sizing: border-box; color: inherit; font: inherit; padding: 0.4rem; width: 100%; }
-  textarea { font-family: ui-monospace, monospace; font-size: 0.9rem; }
+  th, td { border-bottom: 1px solid var(--border); padding: 0.4rem; text-align: left; }
   button { font: inherit; padding: 0.3rem 0.8rem; }
-  .discret { color: var(--discret); }
-  .notice { background: var(--alerte); border-radius: 4px; padding: 0.6rem 0.8rem; }
+  .discret { color: var(--muted-foreground); }
+  .notice { background: var(--warning-surface); border-radius: 4px; padding: 0.6rem 0.8rem; }
   .voice { align-items: center; display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; padding: 0.3rem 0; }
   .voice label { min-width: 6rem; }
 </style>
