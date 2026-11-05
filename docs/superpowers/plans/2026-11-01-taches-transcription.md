@@ -1580,7 +1580,12 @@ Effacer `.integration/verif-taches/` sur le Mac (Call, Note, glossaire, enregist
 
 **Résultats** (remplis à l'exécution) :
 - Contrôles locaux.
-- Scénarios longs : temps, pics mémoire de NeMo et de dictee, personnes, `starts`, morceaux.
+- Scénarios longs : temps, pics mémoire de NeMo et de dictee, personnes, `starts`, morceaux. Joués le 5 novembre 2026 sur le VPS, à partir de l'arbre du commit 32dfb59, avec `verif-dictee` (512 Mio) et `verif-nemo` (3 Gio). L'audio est la Note répétée jusqu'à 7199,9 s, et la mémoire est relevée par `docker stats` toutes les 5 à 7 s.
+  - Scénario 1 (réunion en arrière-plan, client coupé après une minute, puis lecture par `GET`) : réussi. La réponse arrive en 6,8 s, et la tâche finit `completed` en 3099 s (51,7 min) avec 3 personnes et 497 segments. Les pics sont de 1616 Mio pour NeMo et de 221 Mio pour dictee, qui couvrent aussi le scénario 2.
+  - Scénario 2 (même audio en synchrone, coupé à 5 s puis renvoyé pendant la tâche du scénario 1, alors entre 2,5 et 2,7 %) : réussi. Le journal porte trois requêtes (200, 499 puis 200) sur la même tâche et une seule ligne de fin. Le second envoi répond 200 après 3023 s, avec 3 personnes et 497 segments.
+  - Scénario 3 (mode `dictee` en arrière-plan, `docker restart verif-dictee` à 2,1 %, après environ cinq morceaux) : réussi. dictee redevient sain 2 s après le redémarrage, l'avancement relu vaut 2,1 % avant comme après et ne recule plus ensuite, et la tâche finit `completed` en 2824 s (47,1 min). Sa ligne porte `chunks=241`, `starts=2` et `retries=0`. NeMo ne journalise pas ses requêtes REST, donc leur nombre n'a pas été compté. Les pics sont de 2350 Mio pour NeMo et de 325 Mio pour dictee.
+  - Scénario 4 (dictée en direct par le contrôle `live`) : réussi. 9 mots sur 12 sont retrouvés (75 %), le texte final arrive 2,3 s après le début de l'audio et `cleared` 106 ms après `clear`. Les pics sont de 2385 Mio pour NeMo et de 271 Mio pour dictee.
+  - Sur l'ensemble, NeMo culmine à 2385 Mio (sous 3 Gio) et dictee à 325 Mio (sous 512 Mio). Conteneurs, réseau, volume, images et fichiers du VPS ont été supprimés à la fin.
 - Vérifications après déploiement.
 
 ### Tâche 16 : restes de la revue du premier plan (carte STK-50)
