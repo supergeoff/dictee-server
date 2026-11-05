@@ -487,6 +487,120 @@ def test_html_responses_are_not_cached_and_carry_a_content_security_policy(logge
         assert page.headers["cache-control"] == "no-store"
 
 
+# --- Habillage ---
+
+TOKENS = (
+    "--background", "--foreground", "--card", "--muted", "--muted-foreground", "--border", "--input",
+    "--primary", "--primary-foreground", "--accent", "--accent-foreground", "--success", "--success-surface",
+    "--warning", "--warning-surface", "--destructive", "--destructive-surface",
+)  # fmt: skip
+
+
+def test_design_system_palette_is_declared_for_light_and_dark(logged_in):
+    for page in (logged_in.client.get("/").text, logged_in.post("/logout").text):
+        for token in TOKENS:
+            assert page.count(f"{token}:") == 2, token  # une déclaration en clair, une en sombre
+        assert "color-scheme: light dark" in page and "prefers-color-scheme: dark" in page
+
+
+def test_design_system_pages_load_nothing_from_outside(logged_in):
+    pages = [
+        logged_in.client.get("/").text,
+        logged_in.post("/keys", {"label": "x"}).text,
+        logged_in.post("/logout").text,
+    ]
+    for page in pages:
+        assert "<script" not in page
+        assert not re.search(r"<(link|img|iframe|object|embed)\b", page)
+        assert "@import" not in page and "url(" not in page
+
+
+def test_design_system_code_wraps_long_keys(logged_in):
+    assert "overflow-wrap: anywhere" in logged_in.client.get("/").text
+
+
+BUTTON_CLASSES = {
+    "Se déconnecter": "button button-ghost",
+    "Créer une clé": "button button-primary",
+    "Révoquer": "button button-danger button-small",
+    "Enregistrer le glossaire": "button button-primary",
+    "Enregistrer les consignes": "button button-primary",
+    "Revenir aux consignes par défaut": "button button-secondary",
+    "Enregistrer la voix": "button button-primary",
+}
+
+
+def button_classes(page: str, label: str) -> str | None:
+    found = re.search(rf'<button[^>]*class="([^"]+)"[^>]*>\s*{re.escape(label)}\s*</button>', page)
+    return found.group(1) if found else None
+
+
+def test_design_system_buttons_carry_the_broker_classes(logged_in):
+    page = logged_in.post("/keys", {"label": "Android"}).text  # une clé existe, donc « Révoquer » est affiché
+    for label, classes in BUTTON_CLASSES.items():
+        assert button_classes(page, label) == classes, label
+
+
+def test_design_system_message_pages_link_with_a_primary_button(logged_in):
+    refused = logged_in.client.post("/keys", data={"label": "x"})  # 403 : pas de jeton
+    logged_out = logged_in.post("/logout").text
+    for page, label in ((logged_out, "Se connecter"), (refused.text, "Retour à la page de configuration")):
+        assert re.search(rf'<a [^>]*class="button button-primary"[^>]*>\s*{label}\s*</a>', page), label
+
+
+def test_design_system_buttons_are_border_box(logged_in):
+    # Sans cela, un lien .button (content-box par défaut) est plus haut qu'un <button> (border-box par défaut).
+    rule = re.search(r"(?m)^\s*\.button\s*\{([^}]*)\}", logged_in.client.get("/").text)  # ni .button-* ni .button:*
+    assert rule is not None and "box-sizing: border-box" in rule.group(1)
+
+
+def test_design_system_notices_use_their_variants(logged_in, fake_nemo):
+    def has_success_variant(page: str) -> bool:
+        return re.search(r'class="[^"]*notice-success', page) is not None  # la feuille de style le nomme toujours
+
+    saved = logged_in.client.get("/?saved=1").text
+    assert re.search(r'class="notice notice-success"[^>]*>\s*Modifications enregistrées', saved)
+    created = logged_in.post("/keys", {"label": "Android"}).text
+    assert 'class="notice" role="alert"' in created and not has_success_variant(created)
+    logged_in.client.app.state.voices = None
+    fake_nemo.error = NemoUnavailable("down")
+    down = logged_in.client.get("/").text
+    assert re.search(r'class="notice"[^>]*>\s*La liste des voix', down) and not has_success_variant(down)
+
+
+def test_design_system_key_table_scrolls_on_its_own_and_marks_revoked_keys(logged_in):
+    page = logged_in.post("/keys", {"label": "x" * 100}).text  # 100 caractères : la limite des libellés
+    assert re.search(r'<div class="table-scroll">\s*<table class="data-table">', page)
+    key_id = re.search(r'action="/keys/(\d+)/revoke"', page).group(1)
+    page = logged_in.post(f"/keys/{key_id}/revoke").text
+    assert re.search(r'class="status-badge status-retired"[^>]*>\s*révoquée le', page)
+    assert "Révoquer" not in page
+
+
+def css_rules(page: str, selector: str) -> list[str]:
+    """Corps des règles de la feuille de style dont la liste de sélecteurs contient exactement ce sélecteur."""
+    style = re.search(r"<style>(.*?)</style>", page, re.S).group(1)
+    return [
+        body
+        for selectors, body in re.findall(r"([^{}]+)\{([^}]*)\}", style)
+        if selector in [part.strip() for part in selectors.split(",")]
+    ]
+
+
+def test_design_system_key_table_rows_stay_on_one_line(logged_in):
+    page = logged_in.client.get("/").text
+    assert any("white-space: nowrap" in rule for rule in css_rules(page, ".data-table td"))
+    assert any("overflow-x: auto" in rule for rule in css_rules(page, ".table-scroll"))
+    # Le libellé fait exception : il se replie et casse une longue suite sans espace, dans une largeur bornée,
+    # et garde un plancher pour ne pas s'écraser sur la largeur de son en-tête.
+    label = " ".join(css_rules(page, ".data-table td:first-child"))
+    assert "white-space: normal" in label and "overflow-wrap: anywhere" in label
+    assert "max-width" in label and "min-width" in label
+    # Une clé du tableau reste d'un bloc ; celle de l'encart, hors tableau, garde le repli n'importe où.
+    assert any("overflow-wrap: normal" in rule for rule in css_rules(page, ".data-table code"))
+    assert any("overflow-wrap: anywhere" in rule for rule in css_rules(page, "code"))
+
+
 # --- Garde anti-CSRF ---
 
 

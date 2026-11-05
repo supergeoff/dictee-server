@@ -6,26 +6,87 @@
 <meta name="color-scheme" content="light dark">
 <title>dictee</title>
 <style>
-  :root { --fond: #fafafa; --texte: #1d1d1f; --discret: #5f6368; --trait: #d0d0d5; --accent: #0b57d0; --alerte: #fff4ce; }
-  @media (prefers-color-scheme: dark) {
-    :root { --fond: #1b1b1d; --texte: #ececec; --discret: #a0a4a8; --trait: #3b3b40; --accent: #8ab4f8; --alerte: #4a3d12; }
+  /* La palette et les composants viennent du design system du MCP broker. Le thème suit le système
+     sans aucun script, puisque la politique de sécurité de la page n'en autorise pas. */
+  :root {
+    color-scheme: light dark;
+    --background: #f5f5f5; --foreground: #0a0a0a; --card: #ffffff; --muted: #f1f1f1; --muted-foreground: #737373;
+    --border: #d7d7d7; --input: #e5e5e5; --primary: #171717; --primary-foreground: #fafafa;
+    --accent: #ededed; --accent-foreground: #171717;
+    --success: #047857; --success-surface: #d1fae5; --warning: #b45309; --warning-surface: #fef3c7;
+    --destructive: #b91c1c; --destructive-surface: #fee2e2; --radius: 10px;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
-  body { background: var(--fond); color: var(--texte); font: 16px/1.5 system-ui, sans-serif; margin: 0; }
-  main { max-width: 46rem; margin: 0 auto; padding: 1rem; }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --background: #0d0d0d; --foreground: #fafafa; --card: #171717; --muted: #212121; --muted-foreground: #b3b3b3;
+      --border: #ffffff1a; --input: #ffffff26; --primary: #e5e5e5; --primary-foreground: #171717;
+      --accent: #262626; --accent-foreground: #fafafa;
+      --success: #34d399; --success-surface: #064e3b66; --warning: #fbbf24; --warning-surface: #78350f66;
+      --destructive: #f87171; --destructive-surface: #7f1d1d66;
+    }
+  }
+  body { background: var(--background); color: var(--foreground); font-size: 14px; line-height: 1.5; margin: 0; }
+  main { margin: 0 auto; max-width: 46rem; padding: 16px; }
   header { align-items: center; display: flex; justify-content: space-between; }
-  h1 { font-size: 1.5rem; }
-  h2 { border-top: 1px solid var(--trait); font-size: 1.2rem; margin-top: 2rem; padding-top: 1rem; }
-  a { color: var(--accent); }
-  code { overflow-wrap: anywhere; }
-  table { border-collapse: collapse; width: 100%; }
-  th, td { border-bottom: 1px solid var(--trait); padding: 0.4rem; text-align: left; }
-  textarea, input[type="text"] { background: var(--fond); border: 1px solid var(--trait); box-sizing: border-box; color: inherit; font: inherit; padding: 0.4rem; width: 100%; }
-  textarea { font-family: ui-monospace, monospace; font-size: 0.9rem; }
-  button { font: inherit; padding: 0.3rem 0.8rem; }
-  .discret { color: var(--discret); }
-  .notice { background: var(--alerte); border-radius: 4px; padding: 0.6rem 0.8rem; }
-  .voice { align-items: center; display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; padding: 0.3rem 0; }
-  .voice label { min-width: 6rem; }
+  h1 { font-size: 28px; font-weight: 650; }
+  h2 { border-top: 1px solid var(--border); font-size: 16px; font-weight: 650; margin-top: 2rem; padding-top: 1rem; }
+  a { color: inherit; text-decoration: none; }
+  button, input, select { font: inherit; }
+  .button {
+    align-items: center; border: 1px solid transparent; border-radius: 8px; box-sizing: border-box; cursor: pointer;
+    display: inline-flex; gap: 8px; justify-content: center; min-height: 40px; padding: 8px 13px;
+    transition: background .15s ease, border-color .15s ease, color .15s ease, transform .1s ease;
+  }
+  .button:active { transform: scale(.98); }
+  .button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+  .button-primary { background: var(--primary); color: var(--primary-foreground); }
+  .button-secondary { background: var(--card); border-color: var(--border); color: var(--foreground); }
+  .button-secondary:hover, .button-ghost:hover { background: var(--accent); color: var(--accent-foreground); }
+  .button-danger { background: var(--destructive-surface); border-color: transparent; color: var(--destructive); }
+  .button-danger:hover { border-color: var(--destructive); }
+  .button-ghost { background: transparent; border-color: transparent; color: var(--muted-foreground); }
+  .button-small { font-size: 12px; min-height: 32px; padding: 5px 9px; }
+  label { font-size: 13px; font-weight: 600; }
+  textarea, input[type="text"] {
+    background: var(--card); border: 1px solid var(--input); border-radius: 8px; box-sizing: border-box;
+    color: var(--foreground); font-family: inherit; font-size: 14px; font-weight: 400; min-height: 40px; outline: none;
+    padding: 8px 10px; width: 100%;
+  }
+  textarea { font-family: ui-monospace, monospace; font-size: 0.9rem; resize: vertical; }
+  textarea:focus, input[type="text"]:focus { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(23, 23, 23, 0.18); }
+  @media (prefers-color-scheme: dark) {
+    textarea:focus, input[type="text"]:focus { box-shadow: 0 0 0 2px rgba(229, 229, 229, 0.16); }
+  }
+  code { background: var(--muted); border-radius: 6px; font-family: ui-monospace, monospace; overflow-wrap: anywhere; padding: 1px 5px; }
+  .discret { color: var(--muted-foreground); }
+  .table-scroll { overflow-x: auto; }
+  .data-table { border-collapse: collapse; width: 100%; }
+  .data-table th, .data-table td {
+    border-bottom: 1px solid var(--border); padding: 10px 12px; text-align: left; vertical-align: middle; white-space: nowrap;
+  }
+  .data-table td:first-child { max-width: 16rem; min-width: 9rem; overflow-wrap: anywhere; white-space: normal; }
+  .data-table code { overflow-wrap: normal; }
+  .data-table th { color: var(--muted-foreground); font-size: 12px; font-weight: 650; text-transform: uppercase; }
+  .notice {
+    background: var(--warning-surface); border: 1px solid var(--warning); border-radius: var(--radius); box-sizing: border-box;
+    color: var(--foreground); margin: 1em 0; padding: 12px 14px;
+  }
+  .notice > :first-child { margin-top: 0; }
+  .notice > :last-child { margin-bottom: 0; }
+  .notice-success { background: var(--success-surface); border-color: var(--success); }
+  .status-badge {
+    align-items: center; border-radius: 999px; box-sizing: border-box; display: inline-flex; font-size: 12px; font-weight: 600;
+    gap: 6px; min-height: 24px; padding: 3px 9px; white-space: nowrap;
+  }
+  .status-retired { background: var(--muted); color: var(--muted-foreground); }
+  .voice {
+    align-items: center; border: 1px solid var(--border); border-radius: var(--radius); box-sizing: border-box; display: flex;
+    flex-wrap: wrap; gap: 0.5rem 1rem; padding: 7px 8px;
+  }
+  .voice + .voice { margin-top: 8px; }
+  .voice label { font-weight: 500; min-width: 6rem; }
+  input[type="radio"] { accent-color: var(--primary); }
 </style>
 </head>
 <body>
