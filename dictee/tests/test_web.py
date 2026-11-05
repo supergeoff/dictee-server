@@ -548,6 +548,12 @@ def test_design_system_message_pages_link_with_a_primary_button(logged_in):
         assert re.search(rf'<a [^>]*class="button button-primary"[^>]*>\s*{label}\s*</a>', page), label
 
 
+def test_design_system_buttons_are_border_box(logged_in):
+    # Sans cela, un lien .button (content-box par défaut) est plus haut qu'un <button> (border-box par défaut).
+    rule = re.search(r"(?m)^\s*\.button\s*\{([^}]*)\}", logged_in.client.get("/").text)  # ni .button-* ni .button:*
+    assert rule is not None and "box-sizing: border-box" in rule.group(1)
+
+
 # --- Garde anti-CSRF ---
 
 
