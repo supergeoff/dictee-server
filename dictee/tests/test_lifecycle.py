@@ -1,3 +1,4 @@
+import asyncio
 import gc
 import logging
 import time
@@ -7,7 +8,17 @@ import pytest
 from conftest import wait_until
 from starlette.requests import Request
 
-from dictee.lifecycle import Trace, cancel_once, elapsed_ms, loggable, run_unless_disconnected, spawn
+from dictee.lifecycle import (
+    CLIENT_CLOSED,
+    Trace,
+    abandon_stream,
+    cancel_once,
+    elapsed_ms,
+    loggable,
+    run_unless_disconnected,
+    spawn,
+)
+from dictee.upload import bounded_request
 
 
 def make_request(receive) -> Request:
@@ -27,6 +38,21 @@ def receive_after(hung_up: anyio.Event, *early: dict):
     return receive
 
 
+def request_with_chunks(chunks: list[bytes]) -> Request:
+    """Requête dont le corps arrive en `chunks`, sans `Content-Length`, comme un envoi par morceaux."""
+    messages = [{"type": "http.request", "body": chunk, "more_body": True} for chunk in chunks]
+    messages.append({"type": "http.request", "body": b"", "more_body": False})
+
+    async def receive():
+        return messages.pop(0)
+
+    return make_request(receive)
+
+
+class TooBig(Exception):
+    """Erreur que lève la lecture d'un corps trop gros, dans les tests de `bounded_request`."""
+
+
 def lines(caplog) -> list[str]:
     return [record.getMessage() for record in caplog.records if record.name == "dictee"]
 
@@ -35,7 +61,7 @@ def test_trace_line_names_the_route_and_leaves_unknown_fields_as_dashes(caplog):
     caplog.set_level(logging.INFO, logger="dictee")
     Trace(route="speech").log()
     assert lines(caplog) == [
-        "user=- route=speech model=- mode=- audio_s=- nemo_ms=- llm_ms=- decision=- mismatch=- status=500"
+        "user=- route=speech model=- mode=- audio_s=- nemo_ms=- llm_ms=- decision=- mismatch=- status=500 task=-"
     ]
 
 
@@ -43,10 +69,11 @@ def test_trace_line_writes_each_field(caplog):
     caplog.set_level(logging.INFO, logger="dictee")
     trace = Trace(route="transcriptions", user="7", model="dictee", mode="clean", audio_s=3.04, nemo_ms=120)
     trace.llm_ms, trace.decision, trace.mismatch, trace.status = 45, "cleaned", 2, 200
+    trace.task = "trn_01JD0000000000000000000000"
     trace.log()
     assert lines(caplog) == [
         "user=7 route=transcriptions model=dictee mode=clean audio_s=3.0 nemo_ms=120 llm_ms=45"
-        " decision=cleaned mismatch=2 status=200"
+        " decision=cleaned mismatch=2 status=200 task=trn_01JD0000000000000000000000"
     ]
 
 
@@ -64,7 +91,7 @@ def test_trace_writes_its_line_once(caplog):
     trace.status = 200
     trace.log()
     (line,) = lines(caplog)
-    assert line.endswith("status=500") and trace.logged
+    assert line.endswith("status=500 task=-") and trace.logged
 
 
 @pytest.mark.parametrize(
@@ -194,3 +221,36 @@ async def test_run_unless_disconnected_raises_the_exception_of_the_coroutine():
 
     with pytest.raises(ValueError, match="no"):
         await run_unless_disconnected(make_request(receive_after(anyio.Event())), job())
+
+
+@pytest.mark.anyio
+async def test_a_bounded_request_refuses_a_body_past_its_limit_without_content_length():
+    request = request_with_chunks([b"a" * 600, b"b" * 600])  # sans Content-Length
+    with pytest.raises(TooBig):
+        await bounded_request(request, 1000, TooBig).body()
+
+
+@pytest.mark.anyio
+async def test_a_bounded_request_reads_a_body_within_its_limit():
+    request = request_with_chunks([b"a" * 600, b"b" * 400])
+    assert await bounded_request(request, 1000, TooBig).body() == b"a" * 600 + b"b" * 400
+
+
+@pytest.mark.anyio
+async def test_abandon_stream_cancels_the_task_and_writes_the_line_once(caplog):
+    caplog.set_level(logging.INFO, logger="dictee")
+    task, trace = asyncio.create_task(asyncio.sleep(60)), Trace(route="transcriptions")
+    await abandon_stream(task, trace)
+    await abandon_stream(task, trace)
+    assert task.cancelling() and trace.status == CLIENT_CLOSED
+    assert len([record for record in caplog.records if "route=transcriptions" in record.getMessage()]) == 1
+
+
+@pytest.mark.anyio
+async def test_abandon_stream_leaves_a_line_already_written_alone(caplog):
+    caplog.set_level(logging.INFO, logger="dictee")
+    task, trace = asyncio.create_task(asyncio.sleep(60)), Trace(route="transcriptions", status=200)
+    trace.log()
+    await abandon_stream(task, trace)
+    assert task.cancelling() and trace.status == 200
+    assert len(lines(caplog)) == 1

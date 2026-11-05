@@ -162,27 +162,42 @@ def _diarized_json(transcript: Transcript) -> dict:
     }
 
 
-def render(transcript: Transcript, fmt: str, *, granularities: frozenset[str]) -> Response:
-    """Rend une transcription dans le format demandé.
+def render_body(transcript: Transcript, fmt: str, *, granularities: frozenset[str]) -> dict | str:
+    """Le corps de la réponse d'une transcription dans le format demandé.
 
-    Quand `transcript.segments` n'est pas `None`, le rendu porte les locuteurs. `granularities` ne sert qu'à
-    `verbose_json` (`word` ajoute les mots, `segment` ajoute les sous-titres). Un format inconnu lève une erreur 400.
+    Un objet pour `json`, `verbose_json` et `diarized_json`, une chaîne pour `text`, `srt` et `vtt`. Quand
+    `transcript.segments` n'est pas `None`, le rendu porte les locuteurs. `granularities` ne sert qu'à `verbose_json`
+    (`word` ajoute les mots, `segment` ajoute les sous-titres). Un format inconnu lève une erreur 400.
     """
     match fmt:
         case "json":
-            return JSONResponse({"text": _plain_text(transcript)})
+            return {"text": _plain_text(transcript)}
         case "text":
-            return PlainTextResponse(_plain_text(transcript))
+            return _plain_text(transcript)
         case "srt":
-            return PlainTextResponse(_srt(transcript))
+            return _srt(transcript)
         case "vtt":
-            return Response(_vtt(transcript), media_type="text/vtt; charset=utf-8")
+            return _vtt(transcript)
         case "verbose_json":
-            return JSONResponse(_verbose_json(transcript, granularities))
+            return _verbose_json(transcript, granularities)
         case "diarized_json":
-            return JSONResponse(_diarized_json(transcript))
+            return _diarized_json(transcript)
         case _:
             raise unsupported_format(fmt)
+
+
+def render(transcript: Transcript, fmt: str, *, granularities: frozenset[str]) -> Response:
+    """Rend une transcription dans le format demandé : le corps de `render_body` dans sa réponse HTTP.
+
+    Un objet part en JSON, une chaîne en texte brut, sauf `vtt` qui a son propre type de contenu. Un format inconnu
+    lève une erreur 400.
+    """
+    body = render_body(transcript, fmt, granularities=granularities)
+    if isinstance(body, dict):
+        return JSONResponse(body)
+    if fmt == "vtt":
+        return Response(body, media_type="text/vtt; charset=utf-8")
+    return PlainTextResponse(body)
 
 
 def _event(event: dict) -> str:

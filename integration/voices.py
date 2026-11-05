@@ -1,14 +1,14 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["httpx==0.28.1"]
+# dependencies = ["httpx==0.28.1", "websockets==17.4"]
 # ///
 """Fait dire la même phrase par chacune des cinq voix de Magpie, pour choisir la voix par défaut (tâche 14).
 
 Prérequis : `make integration` (dictee répond sur http://127.0.0.1:18000).
 Usage : uv run --script integration/voices.py [--no-open]
 
-Le script appelle `POST /v1/audio/speech` de dictee en `mp3` avec la clé de service (`OPENWEBUI_SERVICE_KEY` du `.env`,
-jamais affichée), écrit `.integration/voices/<Voix>.mp3` et ouvre le dossier avec `open` (macOS), sauf avec `--no-open`.
+Le script appelle `POST /v1/audio/speech` de dictee en `mp3` avec la clé de service (`OPENWEBUI_SERVICE_KEY` de
+l'environnement, sinon du `.env`, jamais affichée), écrit `.integration/voices/<Voix>.mp3` et ouvre le dossier avec `open` (macOS), sauf avec `--no-open`.
 Chaque ligne donne la taille du fichier et la durée de la synthèse.
 """
 
@@ -22,7 +22,10 @@ from pathlib import Path
 
 import httpx
 
-ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import nemo_rt  # noqa: E402
+
+ROOT = nemo_rt.ROOT
 OUT = ROOT / ".integration" / "voices"
 BASE_URL = "http://127.0.0.1:18000"
 VOICES = ["John", "Sofia", "Aria", "Jason", "Leo"]
@@ -31,21 +34,12 @@ TEXT = "Bonjour, voici la voix qui lira vos textes. Elle servira aussi au mode a
 MP3_SIGNATURES = (b"ID3", b"\xff\xfb", b"\xff\xf3")
 
 
-def service_key() -> str:
-    """Lit la clé de service dans le .env du dépôt, sans l'afficher."""
-    for line in (ROOT / ".env").read_text().splitlines():
-        name, _, value = line.partition("=")
-        if name.strip() == "OPENWEBUI_SERVICE_KEY":
-            return value.strip()
-    raise SystemExit("OPENWEBUI_SERVICE_KEY absente de .env (lancer `make integration`)")
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--no-open", action="store_true", help="n'ouvre pas le dossier à la fin")
     args = parser.parse_args()
 
-    headers = {"Authorization": f"Bearer {service_key()}"}
+    headers = {"Authorization": f"Bearer {nemo_rt.env_value('OPENWEBUI_SERVICE_KEY')}"}
     OUT.mkdir(parents=True, exist_ok=True)
     failed = False
     with httpx.Client(base_url=BASE_URL, headers=headers, timeout=httpx.Timeout(300.0, connect=10.0)) as http:

@@ -3,108 +3,77 @@ from pathlib import Path
 
 import pytest
 
-from dictee.speakers import assign_speakers, build_segments
-from dictee.types import Segment, Turn, Word
+from dictee.nemo import SPEAKER_KEY
+from dictee.speakers import build_segments, label_speakers
+from dictee.types import Segment, Word
 
 FIXTURES = Path(__file__).parent / "fixtures" / "nemo"
 
 
-def speakers_of(words, turns):
-    return [word.speaker for word in assign_speakers(words, turns)]
+def words_of(*speakers):
+    return [Word(f"w{i}", float(i), i + 0.5, speaker) for i, speaker in enumerate(speakers)]
 
 
-# --- Attribution des mots aux tours ------------------------------------------------------------------------------
+def labels(words):
+    return [word.speaker for word in label_speakers(words)]
 
 
-def test_word_takes_the_speaker_active_at_its_middle():
-    words = [Word("Oui", 0.1, 0.5), Word("non", 0.8, 1.4)]
-    turns = [Turn(0.0, 1.0, 2), Turn(1.0, 2.0, 1)]
-    assert [w.speaker for w in assign_speakers(words, turns)] == ["A", "B"]  # ordre de première apparition
+# --- Étiquettes des personnes ------------------------------------------------------------------------------------
 
 
-def test_word_outside_any_turn_takes_the_nearest():
-    turns = [Turn(0.0, 1.0, 1), Turn(3.0, 4.0, 2)]
-    assert assign_speakers([Word("hm", 1.8, 2.0)], turns)[0].speaker == "A"
+def test_speakers_are_renamed_in_order_of_first_appearance():
+    assert labels(words_of("3", "1", "3", "2")) == ["A", "B", "A", "C"]
 
 
-def test_without_turns_everyone_is_a():
-    assert {w.speaker for w in assign_speakers([Word("a", 0, 1), Word("b", 1, 2)], [])} == {"A"}
+def test_a_word_without_speaker_takes_the_speaker_of_the_word_before():
+    assert labels(words_of("1", None, "2", None)) == ["A", "A", "B", "B"]
 
 
-def test_equidistant_word_takes_the_earlier_turn():
-    # Le milieu du mot (2,0 s) est à 1 s des deux tours ; la liste est à l'envers pour que son ordre ne compte pas.
-    turns = [Turn(3.0, 4.0, 2), Turn(0.0, 1.0, 1)]
-    words = [Word("hm", 1.75, 2.25), Word("ok", 3.25, 3.75)]
-    assert speakers_of(words, turns) == ["A", "B"]
+def test_leading_words_without_speaker_take_the_first_speaker():
+    assert labels(words_of(None, None, "5")) == ["A", "A", "A"]
 
 
-def test_overlapping_turns_give_the_word_to_the_latest_start():
-    turns = [Turn(0.0, 3.0, 1), Turn(1.0, 3.0, 2)]
-    words = [Word("a", 0.25, 0.75), Word("b", 1.5, 2.5)]  # milieux à 0,5 s (un seul tour) puis 2,0 s (les deux)
-    assert speakers_of(words, turns) == ["A", "B"]
+def test_words_without_any_speaker_all_go_to_a():
+    assert labels(words_of(None, None)) == ["A", "A"]
 
 
-def test_overlapping_turns_with_the_same_start_give_the_word_to_the_lower_id():
-    turns = [Turn(0.0, 2.0, 2), Turn(0.0, 2.0, 1), Turn(3.0, 4.0, 2)]
-    words = [Word("a", 0.5, 1.5), Word("b", 3.25, 3.75)]
-    # « a » revient au locuteur 1 et « b » au locuteur 2 : deux étiquettes (une seule si « a » allait au locuteur 2).
-    assert speakers_of(words, turns) == ["A", "B"]
-
-
-def test_turn_bounds_are_inclusive():
-    turns = [Turn(0.0, 1.0, 1), Turn(1.0, 2.0, 2)]
-    words = [Word("x", 0.0, 0.5), Word("y", 0.5, 1.5)]  # le milieu de « y » (1,0 s) borde le tour 1 et le tour 2
-    assert speakers_of(words, turns) == ["A", "B"]
-
-
-def test_labels_follow_the_first_appearance_of_speakers_among_the_words():
-    turns = [Turn(0.0, 1.0, 3), Turn(1.0, 2.0, 1), Turn(2.0, 3.0, 2)]
-    words = [Word("a", 0.0, 1.0), Word("b", 1.0, 2.0), Word("c", 2.0, 3.0), Word("d", 0.0, 1.0)]
-    assert speakers_of(words, turns) == ["A", "B", "C", "A"]
+def test_more_than_26_speakers_go_on_with_s27():
+    assert labels(words_of(*map(str, range(27))))[-1] == "S27"
 
 
 def test_labels_go_on_after_z_with_s27_and_s28():
-    words = [Word(f"w{i}", i, i + 1) for i in range(28)]
-    turns = [Turn(i, i + 1, i + 1) for i in range(28)]
-    labels = speakers_of(words, turns)
-    assert labels[:3] == ["A", "B", "C"]
-    assert labels[24:] == ["Y", "Z", "S27", "S28"]
+    result = labels(words_of(*map(str, range(28))))
+    assert result[:3] == ["A", "B", "C"]
+    assert result[24:] == ["Y", "Z", "S27", "S28"]
 
 
-def test_assign_speakers_returns_new_words_and_leaves_its_input_untouched():
-    words = [Word("a", 0.0, 1.0, "Z"), Word("b", 1.0, 2.0, "Z")]
-    assigned = assign_speakers(words, [Turn(0.0, 2.0, 1)])
-    assert [w.speaker for w in assigned] == ["A", "A"]
-    assert [(w.text, w.start, w.end) for w in assigned] == [("a", 0.0, 1.0), ("b", 1.0, 2.0)]
-    assert [w.speaker for w in words] == ["Z", "Z"]
-    assert all(new is not old for new, old in zip(assigned, words, strict=True))
+def test_label_speakers_returns_new_words_and_leaves_its_input_untouched():
+    words = [Word("a", 0.0, 1.0, "7"), Word("b", 1.0, 2.0, None)]
+    labelled = label_speakers(words)
+    assert [w.speaker for w in labelled] == ["A", "A"]
+    assert [(w.text, w.start, w.end) for w in labelled] == [("a", 0.0, 1.0), ("b", 1.0, 2.0)]
+    assert [w.speaker for w in words] == ["7", None]
+    assert all(new is not old for new, old in zip(labelled, words, strict=True))
 
 
-def test_assign_speakers_keeps_the_order_of_the_words():
-    turns = [Turn(0.0, 1.0, 1), Turn(1.0, 2.0, 2)]
-    words = (Word("un", 0.0, 1.0), Word("deux", 1.0, 2.0), Word("trois", 0.0, 1.0))
-    assert [w.text for w in assign_speakers(words, turns)] == ["un", "deux", "trois"]
+def test_label_speakers_keeps_the_order_of_the_words():
+    words = (Word("un", 0.0, 1.0, "2"), Word("deux", 1.0, 2.0, "1"), Word("trois", 0.0, 1.0, "2"))
+    assert [w.text for w in label_speakers(words)] == ["un", "deux", "trois"]
 
 
-@pytest.mark.parametrize("turns", [[], [Turn(0.0, 1.0, 1)]])
-def test_no_words_gives_an_empty_list(turns):
-    assert assign_speakers([], turns) == []
+def test_no_words_gives_an_empty_list():
+    assert label_speakers([]) == []
 
 
-def test_recorded_turns_attribute_words_and_group_them_into_segments():
-    recorded = json.loads((FIXTURES / "diarization.json").read_text())["segments"]
-    turns = [Turn(start=s["start"], end=s["end"], speaker=s["speaker"]) for s in recorded]
-    words = (
-        Word("Bonjour", 0.5, 1.0),
-        Word("hm", 4.8, 5.2),  # dans le silence entre les deux tours, plus près du premier
-        Word("alors", 5.4, 5.6),  # dans le même silence, plus près du second
-        Word("merci", 6.0, 6.5),
-    )
-    assigned = assign_speakers(words, turns)
-    assert [w.speaker for w in assigned] == ["A", "A", "B", "B"]
-    assert build_segments(assigned) == [
-        Segment("seg_0", 0.5, 5.2, "A", "Bonjour hm"),
-        Segment("seg_1", 5.4, 6.5, "B", "alors merci"),
+def test_recorded_session_words_get_their_labels_and_group_into_segments():
+    events = [json.loads(line) for line in (FIXTURES / "realtime_speakers_events.jsonl").read_text().splitlines()]
+    completed = next(event for event in events if event["type"].endswith(".completed"))
+    # La session numérote les personnes à partir de 1.
+    words = [Word(w["word"], float(w["start"]), float(w["end"]), str(w[SPEAKER_KEY])) for w in completed["words"]]
+    assert {word.speaker for word in words} == {"1", "2"}
+    assert build_segments(label_speakers(words)) == [
+        Segment("seg_0", 0.4, 5.12, "A", "Bonjour, je teste la transcription d'une motron et de sort former ce matin."),
+        Segment("seg_1", 6.8, 10.0, "B", "Très bien, parlons maintenant de la synthèse vocale en français"),
     ]
 
 

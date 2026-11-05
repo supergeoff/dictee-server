@@ -5,7 +5,7 @@
 """Vérifications de la section 12 de la spec sur le vrai NeMo-Speech.cpp.
 
 Prérequis : `make nemo-up` (NeMo répond sur http://127.0.0.1:18001).
-Usage : uv run --script integration/check_nemo.py [--only a,b,c]
+Usage : uv run --script integration/check_nemo.py [--only a,b,c] [--note note.wav]
 
 Chaque contrôle affiche une ligne `OK` ou `ÉCHEC`. Les relevés qui figent le protocole
 vont dans dictee/tests/fixtures/nemo/ ; les fichiers audio produits vont dans .integration/.
@@ -39,7 +39,15 @@ BOOST_PHRASES = ["Nemotron", "Sortformer"]
 BOOST = 3.0
 LONG_SECONDS = 10 * 60
 HOUR_SECONDS = 60 * 60
+MEETING_SECONDS = 2 * 60 * 60
+REST_CHUNK_SECONDS = 30
+CONCURRENT_REQUESTS = 16
+COMPLETED = "conversation.item.input_audio_transcription.completed"
+COMMITTED = "input_audio_buffer.committed"
 MEMORY_LIMIT = 3 * 1024**3
+# PCM 16 kHz de `--note` (un enregistrement réel) : il sert aux mesures, jamais aux relevés, et son texte
+# n'est ni gardé ni affiché.
+NOTE_PCM: bytes | None = None
 VOICES = {"John", "Sofia", "Aria", "Jason", "Leo"}
 
 results: list[tuple[str, bool, str]] = []
@@ -314,20 +322,186 @@ def duration_at(pcm: bytes, rate: int) -> float:
     return len(pcm) / (rate * 2)
 
 
+def fill_to(pcm: bytes, seconds: float, gap: float = 1.0) -> bytes:
+    """Répète `pcm`, séparé par `gap` seconde de silence, puis coupe à `seconds` exactement."""
+    unit = pcm + silence(gap)
+    size = int(seconds * RATE) * 2
+    return (unit * (size // len(unit) + 1))[:size]
+
+
+def rest_form(phrases: list[str], boost: float) -> dict[str, str]:
+    form = {"language": "fr-FR", "response_format": "verbose_json", "timestamp_granularities[]": "word"}
+    if phrases:
+        form["speech_contexts"] = json.dumps([{"phrases": phrases, "boost": boost}])
+    return form
+
+
+def rest_files(pcm: bytes) -> dict:
+    return {"file": ("chunk.wav", nemo_rt.wav_file(pcm, RATE), "audio/wav")}
+
+
+def rest_transcribe(pcm: bytes, phrases: list[str], boost: float) -> tuple[float, httpx.Response]:
+    """Un morceau sur la route REST de NeMo ; rend la durée de la requête et la réponse."""
+    started = time.monotonic()
+    response = httpx.post(
+        f"{nemo_rt.BASE_URL}/v1/audio/transcriptions",
+        data=rest_form(phrases, boost),
+        files=rest_files(pcm),
+        headers=nemo_rt.auth_headers(),
+        timeout=600,
+    )
+    return time.monotonic() - started, response
+
+
+async def concurrent_rest(pcm: bytes, count: int) -> list:
+    async with httpx.AsyncClient(timeout=600) as client:
+
+        async def one():
+            return await client.post(
+                f"{nemo_rt.BASE_URL}/v1/audio/transcriptions",
+                data=rest_form([], 0.0),
+                files=rest_files(pcm),
+                headers=nemo_rt.auth_headers(),
+            )
+
+        return await asyncio.gather(*(one() for _ in range(count)), return_exceptions=True)
+
+
+def check_rest_chunk(dialogue: bytes) -> None:
+    """Contrôle h : un morceau de 30 s sur la route REST, puis la Note et une file pleine."""
+    chunk = fill_to(dialogue, REST_CHUNK_SECONDS)
+    elapsed, response = rest_transcribe(chunk, BOOST_PHRASES, 1.0)
+    if response.status_code != 200:
+        report("h", "Morceau REST", False, f"HTTP {response.status_code} : {response.text[:300]}")
+        return
+    body = response.json()
+    write_json(FIXTURES / "rest_transcription.json", body)
+    words = body.get("words") or []
+    ok = bool(words) and all({"word", "start", "end"} <= set(word) for word in words)
+    keys = sorted(words[0]) if words else []
+    report("h", "Morceau REST", ok, f"{duration(chunk):.0f} s en {elapsed:.1f} s, {len(words)} mots, clés {keys}")
+    note("transcription du dialogue de synthèse : " + body.get("text", ""))
+    sample = NOTE_PCM[: REST_CHUNK_SECONDS * RATE * 2] if NOTE_PCM else chunk
+    if NOTE_PCM:
+        for attempt in range(1, 4):
+            elapsed, response = rest_transcribe(sample, [], 0.0)
+            note(f"Note, 30 premières secondes, essai {attempt} : HTTP {response.status_code} en {elapsed:.1f} s")
+    started = time.monotonic()
+    answers = asyncio.run(concurrent_rest(sample, CONCURRENT_REQUESTS))
+    statuses: dict[str, int] = {}
+    refused = None
+    for answer in answers:
+        label = str(answer.status_code) if isinstance(answer, httpx.Response) else type(answer).__name__
+        statuses[label] = statuses.get(label, 0) + 1
+        if refused is None and isinstance(answer, httpx.Response) and answer.status_code != 200:
+            refused = answer
+    note(f"{CONCURRENT_REQUESTS} requêtes simultanées en {time.monotonic() - started:.1f} s : {statuses}")
+    if refused is not None:
+        note(f"première réponse refusée : HTTP {refused.status_code} {refused.text[:300]}")
+
+
+def speaker_key(word: dict) -> str | None:
+    """Le champ qui porte la personne d'un mot : `speaker` s'il existe, sinon le premier champ qui la nomme."""
+    if "speaker" in word:
+        return "speaker"
+    return next((key for key in word if "speaker" in key), None)
+
+
+def check_meeting(dialogue: bytes) -> None:
+    """Contrôle i : une réunion de 2 heures en temps réel avec personnes, puis le relevé du dialogue."""
+    session = {"sample_rate": RATE, "language": "fr-FR", "word_timestamps": True, "speaker_diarization": True}
+    events, _ = asyncio.run(nemo_rt.scripted_session(session, [("audio", dialogue, False), ("commit",)]))
+    write_jsonl(FIXTURES / "realtime_speakers_events.jsonl", [event for _, event in events])
+    words = [w for _, e in events if e.get("type") == COMPLETED for w in e.get("words") or []]
+    key = next((speaker_key(word) for word in words if speaker_key(word)), None)
+    note(f"dialogue : clé de personne {key!r}, premier mot {json.dumps(words[0], ensure_ascii=False) if words else '-'}")
+    if NOTE_PCM is None:
+        report("i", "Réunion de 2 heures", False, "--note manquant")
+        return
+    meeting = fill_to(NOTE_PCM, MEETING_SECONDS)
+    events, info = asyncio.run(
+        nemo_rt.scripted_session(session, [("audio", meeting, False), ("commit",)], idle_timeout=MEETING_SECONDS)
+    )
+    errors = [e for _, e in events if e.get("type") == "error"]
+    finals = [(t, e) for t, e in events if e.get("type") == COMPLETED]
+    commit_at = info["commit_times"][0] if info["commit_times"] else float("nan")
+    final_at = finals[-1][0] if finals else float("nan")
+    final_size = max((len(json.dumps(e, ensure_ascii=False).encode()) for _, e in finals), default=0)
+    words = [w for _, e in finals for w in e.get("words") or []]
+    key = next((speaker_key(word) for word in words if speaker_key(word)), None)
+    speakers = sorted({str(word[key]) for word in words if key and key in word})
+    del events, finals  # aucun texte de la Note n'est gardé
+    detail = (
+        f"{duration(meeting) / 60:.0f} min d'audio en {info['seconds'] / 60:.1f} min ; "
+        f"du commit au final {final_at - commit_at:.0f} s ; plus long silence {info['max_gap']:.0f} s ; "
+        f"événement final {final_size / 1e6:.2f} Mo ; {len(words)} mots ; clé {key!r} ; personnes {speakers} ; "
+        f"fin {info['ended_by']}"
+    )
+    report("i", "Réunion de 2 heures", bool(words) and key is not None and len(speakers) >= 2 and not errors, detail)
+    if errors:
+        note(f"erreur de NeMo : {errors[0].get('error')}")
+
+
+def check_turns() -> None:
+    """Contrôle j : deux commits dans une session, puis la finalisation seule avec `endpointing_ms`."""
+    first = nemo_rt.parse_wav((WORK / "phrase1.wav").read_bytes())[1]
+    second = nemo_rt.parse_wav((WORK / "phrase2.wav").read_bytes())[1]
+    session = {"sample_rate": RATE, "language": "fr-FR", "word_timestamps": True}
+    steps = [("audio", first, False), ("commit",), ("wait", COMMITTED), ("audio", second, False), ("commit",)]
+    events, info = asyncio.run(nemo_rt.scripted_session(session, steps, idle_timeout=60))
+    write_jsonl(FIXTURES / "realtime_multiturn_events.jsonl", [event for _, event in events])
+    kinds = [event.get("type") for _, event in events]
+    errors = [event.get("error", {}).get("code") for _, event in events if event.get("type") == "error"]
+    many = kinds.count(COMPLETED) >= 2 and kinds.count(COMMITTED) >= 2
+    note(
+        f"deux commits : {kinds.count(COMPLETED)} completed, {kinds.count(COMMITTED)} committed, "
+        f"fin {info['ended_by']}, erreurs {errors}"
+    )
+    endpointing = {**session, "endpointing_ms": 500}
+    steps = [
+        ("audio", first, True),
+        ("audio", silence(2.0), True),
+        ("audio", second, True),
+        ("audio", silence(2.0), True),
+        ("sleep", 10.0),
+        ("commit",),
+    ]
+    events_vad, info_vad = asyncio.run(nemo_rt.scripted_session(endpointing, steps, idle_timeout=60))
+    write_jsonl(FIXTURES / "realtime_endpointing_events.jsonl", [event for _, event in events_vad])
+    commit_at = info_vad["commit_times"][0] if info_vad["commit_times"] else float("inf")
+    before = [t for t, event in events_vad if event.get("type") == COMPLETED and t < commit_at]
+    errors_vad = [event.get("error", {}).get("code") for _, event in events_vad if event.get("type") == "error"]
+    vad = len(before) >= 2
+    note(
+        f"endpointing_ms=500 : {len(before)} completed avant le commit (à {', '.join(f'{t:.1f} s' for t in before)}), "
+        f"commit à {commit_at:.1f} s, fin {info_vad['ended_by']}, erreurs {errors_vad}"
+    )
+    report("j", "Prises de parole", not errors and not errors_vad, f"NEMO_MANY_COMMITS={many}, SERVER_VAD={vad}")
+
+
 CHECKS = {
     "abc": lambda audio: check_realtime(audio),
     "d": lambda audio: check_speakers(audio),
     "e": lambda audio: check_concurrency(audio),
     "f": lambda audio: check_memory(audio),
     "g": lambda audio: check_voices(),
+    "h": lambda audio: check_rest_chunk(audio),
+    "i": lambda audio: check_meeting(audio),
+    "j": lambda audio: check_turns(),
 }
 
 
 def main() -> int:
+    global NOTE_PCM
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--only", default="a,d,e,f,g", help="contrôles à lancer, par exemple a,d (a lance aussi b et c)")
+    parser.add_argument("--note", type=Path, help="WAV PCM16 mono 16 kHz d'un enregistrement réel, pour h et i")
     args = parser.parse_args()
     wanted = {part.strip() for part in args.only.split(",") if part.strip()}
+    if args.note is not None:
+        rate, NOTE_PCM = nemo_rt.parse_wav(args.note.read_bytes())
+        if rate != RATE:
+            raise SystemExit(f"--note doit être à {RATE} Hz, pas {rate} Hz")
 
     ready = wait_ready()
     version = httpx.get(f"{nemo_rt.BASE_URL}/version", timeout=10).text.strip()

@@ -3,7 +3,8 @@ import json
 import pytest
 
 from dictee.errors import ApiError
-from dictee.formats import Cue, build_cues, delta_event, done_event, error_event, render, segment_event
+from dictee.formats import Cue, build_cues, delta_event, done_event, error_event, render, render_body, segment_event
+from dictee.modes import RESPONSE_FORMATS
 from dictee.types import Segment, Transcript, Word
 
 NO_GRANULARITY = frozenset()
@@ -299,6 +300,32 @@ def test_empty_transcript_in_diarized_json_has_no_segments():
 def test_render_refuses_an_unknown_format():
     with pytest.raises(ApiError) as e:
         render(PLAIN, "xml", granularities=NO_GRANULARITY)
+    assert e.value.status == 400 and e.value.param == "response_format"
+
+
+# --- corps de la réponse -------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("fmt", RESPONSE_FORMATS)
+def test_the_body_is_the_one_of_the_rendered_response(fmt):
+    response = render(DIARIZED, fmt, granularities=frozenset({"word", "segment"}))
+    body = render_body(DIARIZED, fmt, granularities=frozenset({"word", "segment"}))
+    assert body == (json.loads(response.body) if isinstance(body, dict) else response.body.decode())
+
+
+@pytest.mark.parametrize("fmt", ["json", "verbose_json", "diarized_json"])
+def test_the_body_of_a_json_format_is_an_object(fmt):
+    assert isinstance(render_body(DIARIZED, fmt, granularities=NO_GRANULARITY), dict)
+
+
+@pytest.mark.parametrize("fmt", ["text", "srt", "vtt"])
+def test_the_body_of_a_text_format_is_a_string(fmt):
+    assert isinstance(render_body(DIARIZED, fmt, granularities=NO_GRANULARITY), str)
+
+
+def test_the_body_refuses_an_unknown_format():
+    with pytest.raises(ApiError) as e:
+        render_body(PLAIN, "xml", granularities=NO_GRANULARITY)
     assert e.value.status == 400 and e.value.param == "response_format"
 
 

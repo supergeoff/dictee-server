@@ -27,9 +27,19 @@ from starlette.responses import Response, StreamingResponse
 from dictee.audio import MAX_SPEED, MIN_SPEED, OUTPUT_FORMATS, encode_stream
 from dictee.auth import require_caller
 from dictee.errors import NEMO_ERRORS, ApiError, nemo_failure, unexpected_error
-from dictee.lifecycle import CLIENT_CLOSED, cancel_once, elapsed_ms, loggable, run_unless_disconnected, spawn
+from dictee.lifecycle import (
+    CLIENT_CLOSED,
+    RequestTrace,
+    abandon_stream,
+    cancel_once,
+    elapsed_ms,
+    loggable,
+    run_unless_disconnected,
+    spawn,
+)
 from dictee.nemo import TTS_SAMPLE_RATE
 from dictee.profile import load_profile
+from dictee.upload import bounded_request
 
 logger = logging.getLogger("dictee")
 
@@ -152,15 +162,15 @@ def resolve_voice(requested: str | None, profile_voice: str, available: Sequence
     return profile_voice
 
 
-@dataclass
-class _Trace:
+@dataclass(kw_only=True)
+class _Trace(RequestTrace):
     """Ce que la ligne de journal d'une requête dit d'elle ; un champ resté inconnu s'écrit `-`.
 
     `model` est le modèle que la requête nomme, rendu sûr par `loggable`. `first_ms` est le délai entre l'arrivée de la
     requête et le premier PCM rendu par NeMo : il compte la lecture des voix (la première fois), le profil et la
     synthèse de la première phrase. `nemo_ms` est le temps cumulé des appels à NeMo (lecture des voix et synthèse de
-    chaque phrase), même ceux qui échouent ou qu'on abandonne. Le statut d'une requête qui s'arrête sur une erreur
-    imprévue reste 500. `log` n'écrit la ligne qu'une fois : la première qui l'appelle la fixe.
+    chaque phrase), même ceux qui échouent ou qu'on abandonne. Le statut et l'écriture unique de la ligne viennent de
+    `RequestTrace`.
     """
 
     user: str = "-"
@@ -171,8 +181,6 @@ class _Trace:
     format: str = "-"
     first_ms: int | None = None
     nemo_ms: int | None = None
-    status: int = 500
-    logged: bool = False
     started: float = field(default_factory=time.monotonic)
 
     @contextlib.contextmanager
@@ -192,10 +200,7 @@ class _Trace:
             self.first_ms = elapsed_ms(self.started)
         return pcm
 
-    def log(self) -> None:
-        if self.logged:
-            return
-        self.logged = True
+    def _write(self) -> None:
         logger.info(
             "user=%s route=speech model=%s chars=%s sentences=%s voice=%s format=%s first_ms=%s nemo_ms=%s status=%d",
             self.user,
@@ -220,17 +225,17 @@ class _Params:
     speed: float
 
 
+def _body_too_large() -> ApiError:
+    message = f"The request body is larger than the limit of {MAX_BODY_BYTES // (1024 * 1024)} MiB."
+    return ApiError(413, message, code="payload_too_large")
+
+
 async def _read_json(request: Request) -> dict[str, Any]:
     """Lit le corps JSON de la requête, borné à `MAX_BODY_BYTES` (413 au-delà).
 
     Un corps illisible ou qui n'est pas un objet JSON donne une erreur 400.
     """
-    body = bytearray()
-    async for chunk in request.stream():
-        body += chunk
-        if len(body) > MAX_BODY_BYTES:
-            message = f"The request body is larger than the limit of {MAX_BODY_BYTES // (1024 * 1024)} MiB."
-            raise ApiError(413, message, code="payload_too_large")
+    body = await bounded_request(request, MAX_BODY_BYTES, _body_too_large).body()
     try:
         data = json.loads(body)
     except (ValueError, RecursionError):
@@ -311,19 +316,6 @@ class _End:
 _END = _End()
 
 
-async def _abandon(encoding: asyncio.Task, trace: _Trace) -> None:
-    """Filet de la réponse, lancé par Starlette quand elle est finie, même annulée.
-
-    Si le client raccroche entre la création de la réponse et le premier octet, le générateur du flux ne démarre
-    jamais et ses `finally` ne courent pas : l'encodage, déjà lancé, serait seul à continuer, avec ffmpeg et ses
-    appels à NeMo.
-    """
-    cancel_once(encoding)
-    if not trace.logged:
-        trace.status = CLIENT_CLOSED
-        trace.log()
-
-
 @dataclass
 class _Synthesis:
     """La synthèse en cours : la voix, le format, le PCM de la première phrase et les phrases qui restent."""
@@ -368,7 +360,7 @@ class _Synthesis:
         return StreamingResponse(
             self._stream(chunks, encoding),
             media_type=OUTPUT_FORMATS[self.fmt],
-            background=BackgroundTask(_abandon, encoding, self.trace),
+            background=BackgroundTask(abandon_stream, encoding, self.trace),
         )
 
     async def _stream(self, chunks: asyncio.Queue[bytes | _End], encoding: asyncio.Task) -> AsyncIterator[bytes]:

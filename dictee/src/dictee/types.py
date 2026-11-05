@@ -27,12 +27,13 @@ class Partial:
 
 
 @dataclass(frozen=True)
-class Turn:
-    """Tour de parole renvoyé par la séparation des locuteurs."""
+class Committed:
+    """NeMo a fini la prise de parole validée par un commit : tous ses textes sont partis avant lui."""
 
-    start: float
-    end: float
-    speaker: int
+
+@dataclass(frozen=True)
+class Cleared:
+    """NeMo a vidé, à la demande du client, l'audio de la prise de parole en cours."""
 
 
 @dataclass(frozen=True)

@@ -22,6 +22,7 @@ import itsdangerous
 import pytest
 from authlib.integrations.starlette_client import OAuthError
 from starlette.requests import Request
+from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from dictee.app import create_app
@@ -505,8 +506,11 @@ def test_forms_require_a_session(transcriptions_client, db, path, data):
 
 
 def test_every_post_route_of_the_page_is_covered_by_the_csrf_tests(client):
-    posts = {route.path for route in client.app.routes if "POST" in route.methods and not route.path.startswith("/v1/")}
-    assert posts == POST_ROUTES
+    # Une route WebSocket n'a pas de méthode : seules les routes HTTP de la page comptent.
+    page_routes = [
+        route for route in client.app.routes if isinstance(route, Route) and not route.path.startswith("/v1/")
+    ]
+    assert {route.path for route in page_routes if "POST" in route.methods} == POST_ROUTES
 
 
 # --- Clés ---

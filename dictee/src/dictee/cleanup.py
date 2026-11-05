@@ -22,6 +22,10 @@ MAX_WORDS = 400
 MIN_RATIO = 0.6
 MAX_RATIO = 1.4
 
+# Décisions qui ne dépendent pas d'une réponse du LLM ratée : le texte reformulé, ou un texte trop court ou trop long
+# qui ne part jamais au LLM. Toute autre décision est un repli sur le texte brut qu'un nouvel essai peut corriger.
+SETTLED_DECISIONS = frozenset({"cleaned", "short", "long"})
+
 _OPENING_TAG = "<transcript>"
 _CLOSING_TAG = "</transcript>"
 

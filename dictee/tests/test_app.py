@@ -1,15 +1,20 @@
 import logging
+import time
 from pathlib import Path
 
 import anyio
 import httpx
+from conftest import audio_task
+from starlette.routing import WebSocketRoute
 from starlette.testclient import TestClient
 
 from dictee.app import create_app
 from dictee.db import Database
 from dictee.errors import ApiError
-from dictee.modes import MODELS
-from dictee.transcribe import LongAudioGate
+from dictee.modes import MODELS, Mode
+from dictee.processing import task_dir
+from dictee.runner import LongLane, TaskRunner
+from dictee.taskstore import TaskStatus, TaskStore
 
 
 def test_health(client):
@@ -37,10 +42,14 @@ def test_v1_routes_require_a_key(client, service_headers):
 
 def test_every_v1_route_refuses_a_call_without_a_key(client):
     # Garde pour les routes à venir : toute route /v1 ajoutée à l'app doit exiger une clé
-    # avant de lire le corps de la requête.
+    # avant de lire le corps de la requête. Une route WebSocket répond par l'erreur d'OpenAI avant tout événement.
     v1_routes = [route for route in client.app.routes if route.path.startswith("/v1/")]
     assert v1_routes
     for route in v1_routes:
+        if isinstance(route, WebSocketRoute):
+            with client.websocket_connect(route.path) as ws:
+                assert ws.receive_json()["error"]["code"] == "invalid_api_key", f"{route.path} opened without a key"
+            continue
         for method in route.methods - {"HEAD"}:
             r = client.request(method, route.path)
             assert r.status_code == 401, f"{method} {route.path} answered {r.status_code} without a key"
@@ -143,10 +152,45 @@ def test_app_builds_the_nemo_client_over_an_injected_http_client(settings, monke
     anyio.run(http.aclose)
 
 
-def test_app_has_one_long_audio_gate_set_from_the_settings(settings):
+def test_app_starts_its_task_runner_and_creates_the_task_folder(settings):
     app = create_app(settings)
-    assert isinstance(app.state.gate, LongAudioGate)
-    assert app.state.gate.threshold_s == settings.long_audio_seconds
+    assert isinstance(app.state.store, TaskStore)
+    assert isinstance(app.state.lane, LongLane)
+    assert not hasattr(app.state, "gate")  # la file des tâches longues sert aussi les flux : plus de porte à part
+    assert not settings.tasks_dir.exists()
+    with TestClient(app):
+        assert isinstance(app.state.runner, TaskRunner)
+        assert settings.tasks_dir.is_dir()
+        # Une place pour la tâche qui tourne, `max_queued_long` pour celles qui attendent.
+        places = [app.state.lane.reserve() for _ in range(settings.max_queued_long + 1)]
+        assert app.state.lane.full and len(places) == settings.max_queued_long + 1
+
+
+def test_app_resumes_an_unfinished_task_at_startup_with_its_own_clients(settings, services, fake_nemo, fake_llm):
+    task = audio_task(services, 3.0, mode=Mode.CLEAN)
+    app = create_app(settings, nemo=fake_nemo, http=fake_llm.http)
+    with TestClient(app):
+        deadline = time.monotonic() + 5.0
+        while app.state.store.get(task.id).status is not TaskStatus.COMPLETED and time.monotonic() < deadline:
+            time.sleep(0.01)
+        done = app.state.store.get(task.id)
+    assert done.status is TaskStatus.COMPLETED
+    assert (done.result.text, done.result.cleaned) == ("Bonjour à tous. Salut.", fake_llm.reply)
+    assert not task_dir(settings, task.id).exists()
+
+
+def test_app_stops_its_task_runner_at_shutdown_and_leaves_the_task_to_resume(settings, services, fake_nemo, fake_llm):
+    task = audio_task(services, 3.0)
+    held = anyio.Event()
+    fake_nemo.release = held
+    app = create_app(settings, nemo=fake_nemo, http=fake_llm.http)
+    with TestClient(app):
+        deadline = time.monotonic() + 5.0
+        while not fake_nemo.chunk_calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert fake_nemo.chunk_calls
+    assert services.store.get(task.id).status is TaskStatus.IN_PROGRESS
+    assert (task_dir(settings, task.id) / "audio.wav").exists()
 
 
 async def _fail(request):

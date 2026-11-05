@@ -158,15 +158,80 @@ def set_user_version(db_path, version: int) -> None:
         conn.close()
 
 
-def test_the_schema_is_created_at_version_1(db, db_path):
-    assert user_version(db_path) == 1
+def table_names(db_path) -> set[str]:
+    conn = sqlite3.connect(db_path)
+    try:
+        return {row[0] for row in conn.execute("select name from sqlite_master where type = 'table'")}
+    finally:
+        conn.close()
+
+
+# Le schéma tel que la version 1 le créait, recopié ici pour que le test de migration ne suive pas celui du code.
+VERSION_1_SCHEMA = """
+create table users (
+    id integer primary key,
+    sub text not null unique,
+    email text not null unique,
+    name text not null,
+    created_at text not null,
+    last_login_at text not null
+);
+create table api_keys (
+    id integer primary key,
+    user_id integer not null references users (id),
+    label text not null,
+    prefix text not null,
+    hash text not null unique,
+    created_at text not null,
+    last_used_at text,
+    revoked_at text
+);
+create index api_keys_user_id on api_keys (user_id);
+create table settings (
+    user_id integer primary key references users (id),
+    glossary text not null default '',
+    instructions text not null default '',
+    voice text not null default ''
+);
+"""
+
+
+def write_version_1_database(directory, *, email: str):
+    """Écrit une base comme la version 1 la laissait : ses trois tables, un compte et `user_version` à 1."""
+    path = directory / "dictee.db"
+    conn = sqlite3.connect(path)
+    try:
+        with conn:
+            conn.executescript(VERSION_1_SCHEMA)
+            conn.execute(
+                "insert into users (sub, email, name, created_at, last_login_at) values (?, ?, ?, ?, ?)",
+                ("sub-1", email, "Alice", "2026-10-31T10:00:00+00:00", "2026-10-31T10:00:00+00:00"),
+            )
+            conn.execute("pragma user_version = 1")
+    finally:
+        conn.close()
+    return path
+
+
+def test_the_schema_is_created_at_version_2(db, db_path):
+    assert user_version(db_path) == 2
+    assert {"tasks", "task_chunks"} <= table_names(db_path)
+
+
+def test_a_version_1_database_gains_the_task_tables_and_keeps_its_accounts(tmp_path):
+    path = write_version_1_database(tmp_path, email="alice@example.test")
+    assert not {"tasks", "task_chunks"} & table_names(path)
+    database = Database(str(path))
+    assert user_version(path) == 2
+    assert {"tasks", "task_chunks"} <= table_names(path)
+    assert database.user_by_email("alice@example.test") is not None
 
 
 def test_a_database_created_before_the_versioning_gets_its_version_when_opened(db, db_path):
     uid = db.upsert_user("sub-1", "a@example.org", "A")
     set_user_version(db_path, 0)
     reopened = Database(db_path)
-    assert user_version(db_path) == 1
+    assert user_version(db_path) == 2
     assert reopened.user_by_email("a@example.org") == uid
 
 

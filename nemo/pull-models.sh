@@ -5,14 +5,16 @@
 # retélécharge pas un fichier déjà vérifié.
 #
 # Un redéploiement ne dépend pas de Hugging Face quand les modèles sont déjà là : si les
-# liens de /models/current pointent vers les dépôt, révision et fichier attendus, et si le
-# fichier témoin pins.txt porte ces mêmes épinglages, le script sort en 0 sans appel réseau.
+# liens de /models/current pointent vers les dépôt, révision et fichier attendus, si le
+# fichier témoin pins.txt porte ces mêmes épinglages et si chaque fichier lié a encore la
+# taille que le témoin a relevée, le script sort en 0 sans appel réseau.
 # Sinon il interroge Hugging Face, avec trois nouveaux essais sur les erreurs passagères.
 set -eu
 
 MODEL_DIR="${NEMO_SPEECH_MODEL_DIR:-/models}"
 INDEX=/opt/nemo-speech/share/nemo-speech/model-index.json
-# Fichier témoin : les épinglages du dernier lancement réussi, un par lien de current/.
+# Fichier témoin : les épinglages du dernier lancement réussi, un par lien de current/, avec
+# la taille du fichier lié.
 WITNESS="$MODEL_DIR/pins.txt"
 
 # L'index de NeMo-Speech.cpp 0.3.0 épingle deux révisions qui ne conviennent pas à dictee.
@@ -83,7 +85,7 @@ codec_revision="$(index_revision "$CODEC_REPO")"
 
 # expected_pins
 # Les épinglages attendus, une ligne "lien<TAB>dépôt<TAB>révision<TAB>nom" par lien de
-# current/. Le même texte sert de fichier témoin.
+# current/. Le fichier témoin reprend ces lignes et y ajoute la taille du fichier lié.
 expected_pins() {
   printf '%s\t%s\t%s\t%s\n' \
     asr.gguf "$ASR_REPO" "$ASR_REVISION" "$ASR_FILE" \
@@ -93,15 +95,48 @@ expected_pins() {
     tokenizer "$MAGPIE_REPO" "$MAGPIE_REVISION" tokenizer
 }
 
+# linked_size CHEMIN
+# La taille en octets du fichier lié, ou "-" pour un dossier (le tokenizer de Magpie, que
+# `pull` extrait du .nemo et vérifie lui-même).
+linked_size() {
+  if [ -d "$1" ]; then
+    printf '%s\n' -
+  else
+    stat -L -c %s "$1"
+  fi
+}
+
+# witness_pins
+# Le texte du fichier témoin : les épinglages attendus, chacun suivi de la taille du
+# fichier que son lien de current/ désigne. `nemo-speech pull` a vérifié cette taille
+# avant que le témoin soit écrit.
+witness_pins() {
+  expected_pins | while IFS="$(printf '\t')" read -r link repo revision name; do
+    printf '%s\t%s\t%s\t%s\t%s\n' "$link" "$repo" "$revision" "$name" \
+      "$(linked_size "$MODEL_DIR/current/$link")"
+  done
+}
+
 # models_in_place
 # Réussit si le fichier témoin porte les épinglages attendus et si chaque lien de current/
-# pointe vers un fichier présent, au bon dépôt, à la bonne révision et sous le bon nom.
+# pointe vers un fichier présent, au bon dépôt, à la bonne révision, sous le bon nom et à
+# la taille que le témoin a relevée. Un fichier tronqué (une copie interrompue, un disque
+# plein) se voit ainsi sans appel réseau : le script le nomme, puis retélécharge.
 models_in_place() {
-  [ -f "$WITNESS" ] && [ "$(cat "$WITNESS")" = "$(expected_pins)" ] || return 1
-  expected_pins | while IFS="$(printf '\t')" read -r link repo revision name; do
-    target="$(readlink "$MODEL_DIR/current/$link")" || exit 1
-    { [ -e "$target" ] && path_matches "$target" "$repo" "$revision" "$name"; } || exit 1
-  done
+  [ -f "$WITNESS" ] && [ "$(cut -f 1-4 "$WITNESS")" = "$(expected_pins)" ] || return 1
+  while IFS="$(printf '\t')" read -r link repo revision name size; do
+    target="$(readlink "$MODEL_DIR/current/$link")" || return 1
+    { [ -e "$target" ] && path_matches "$target" "$repo" "$revision" "$name"; } || return 1
+    if [ -z "$size" ]; then
+      echo "le témoin ne relève pas la taille de $link (témoin d'une version antérieure du script)" >&2
+      return 1
+    fi
+    actual="$(linked_size "$target")"
+    if [ "$actual" != "$size" ]; then
+      echo "taille inattendue pour $link ($target) : $actual octets au lieu de $size" >&2
+      return 1
+    fi
+  done < "$WITNESS"
 }
 
 if models_in_place; then
@@ -192,7 +227,7 @@ link_model diar.gguf "$diar_path"
 link_model tts.gguf "$tts_path"
 link_model codec.gguf "$codec_path"
 link_model tokenizer "$tokenizer_path"
-expected_pins > "$WITNESS.tmp"
+witness_pins > "$WITNESS.tmp"
 mv "$WITNESS.tmp" "$WITNESS"
 
 echo "modèles prêts dans $MODEL_DIR/current :"

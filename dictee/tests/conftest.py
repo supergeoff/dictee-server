@@ -1,15 +1,29 @@
+import math
+import struct
 import subprocess
+import threading
+import time
+import wave
 from pathlib import Path
 
 import anyio
 import pytest
-from fakes import FINALS, TURNS, FakeLlm, FakeNemo
+import uvicorn
+from fakes import FINALS, FakeLlm, FakeNemo
 from openai import OpenAI
 from starlette.testclient import TestClient
+from taskdata import make
 
+from dictee import processing
 from dictee.app import create_app
 from dictee.db import Database
+from dictee.modes import Mode
+from dictee.processing import Services, task_audio
+from dictee.profile import GlossaryEntry
 from dictee.settings import Settings
+from dictee.taskstore import TaskParams, TaskStore
+
+RATE = 16000
 
 REQUIRED_ENV = {
     "NEMO_API_KEY": "test-nemo-key",
@@ -83,8 +97,60 @@ def db(db_path):
 
 
 @pytest.fixture
+def store(db):
+    """Registre des tâches sur la base du test."""
+    return TaskStore(db)
+
+
+@pytest.fixture
+def services(store, fake_nemo, settings, fake_llm):
+    """Ce que le traitement d'une tâche utilise : le registre, le faux NeMo, les réglages et le client du faux LiteLLM."""
+    return Services(store, fake_nemo, settings, fake_llm.http)
+
+
+def write_wav(path, seconds: float, frequency: int = 400) -> None:
+    """WAV canonique mono 16 kHz d'un sinus à `frequency` Hz : sans silence, ffmpeg n'y repère aucune coupe."""
+    # Une fréquence entière fait un nombre entier de périodes par seconde : les secondes se mettent bout à bout sans
+    # raccord.
+    samples = (round(8000 * math.sin(2 * math.pi * frequency * n / RATE)) for n in range(RATE))
+    one_second = struct.pack(f"<{RATE}h", *samples)
+    pcm = (one_second * math.ceil(seconds))[: round(seconds * RATE) * 2]
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(RATE)
+        wav.writeframes(pcm)
+
+
+def audio_task(services, seconds: float, mode: Mode = Mode.RAW):
+    """Une tâche en file de `seconds` secondes, dont le WAV est déjà à sa place."""
+    params = TaskParams("fr-FR", mode, (GlossaryEntry("Nemotron"),), 1.0, "Corrige." if mode is Mode.CLEAN else None)
+    task = make(services.store, params=params, duration=seconds)
+    audio = task_audio(services.settings, task.id)
+    audio.parent.mkdir(parents=True)
+    write_wav(audio, seconds)
+    return task
+
+
+@pytest.fixture
+def no_retry_delays(monkeypatch):
+    """Retire les pauses des reprises auprès de NeMo : ni attente entre deux essais, ni attente de son retour.
+
+    Sans `autouse` : un fichier de tests l'applique à tous ses tests par `pytestmark`, un test seul par son argument.
+    """
+    monkeypatch.setattr(processing, "RETRY_DELAYS_S", (0, 0, 0))
+    monkeypatch.setattr(processing, "READY_POLL_S", 0)
+
+
+@pytest.fixture
 def service_headers(settings):
     return {"Authorization": f"Bearer {settings.openwebui_service_key}"}
+
+
+def personal_headers(db: Database, email: str) -> tuple[dict[str, str], int]:
+    """Crée le compte de `email` avec une clé personnelle ; rend les en-têtes d'un appel à son nom et son numéro."""
+    user_id = db.upsert_user(f"sub-{email}", email, email.partition("@")[0])
+    return {"Authorization": f"Bearer {db.create_key(user_id, 'tests')}"}, user_id
 
 
 @pytest.fixture
@@ -96,7 +162,7 @@ def client(settings):
 
 @pytest.fixture
 def fake_nemo():
-    return FakeNemo(finals=FINALS, turns=TURNS)
+    return FakeNemo(finals=FINALS)
 
 
 @pytest.fixture
@@ -112,6 +178,35 @@ def transcriptions_client(settings, fake_nemo, fake_llm):
     app = create_app(settings, nemo=fake_nemo, http=fake_llm.http)
     with TestClient(app, base_url="https://testserver") as test_client:
         yield test_client
+
+
+@pytest.fixture
+def live_client(transcriptions_client):
+    """Client de la dictée en direct : la même app, qui parle au faux NeMo ; il ouvre ses WebSocket dans un fil à part."""
+    return transcriptions_client
+
+
+@pytest.fixture
+def live_server(settings, fake_nemo, fake_llm):
+    """URL de base d'un vrai serveur uvicorn de l'app sur le faux NeMo, sur un port libre de 127.0.0.1, dans un fil.
+
+    Le client temps réel du SDK d'OpenAI ouvre sa connexion par `websockets.sync` : il lui faut un vrai serveur, que
+    `TestClient` ne fournit pas. `log_config=None` laisse la configuration des journaux du processus de test intacte.
+    """
+    app = create_app(settings, nemo=fake_nemo, http=fake_llm.http)
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_config=None, log_level="warning"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not server.started:
+            assert thread.is_alive() and time.monotonic() < deadline, "uvicorn did not start"
+            time.sleep(0.01)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        thread.join(5)
 
 
 @pytest.fixture
