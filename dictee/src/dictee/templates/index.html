@@ -6,7 +6,7 @@
   <form method="post" action="/logout">{{ csrf_field() }}<button class="button button-ghost" type="submit">Se déconnecter</button></form>
 </header>
 {% if saved %}
-<p class="notice" role="status">Modifications enregistrées.</p>
+<p class="notice notice-success" role="status">Modifications enregistrées.</p>
 {% endif %}
 
 <h2 id="cles">Clés</h2>
@@ -18,7 +18,8 @@
 </div>
 {% endif %}
 {% if keys %}
-<table>
+<div class="table-scroll">
+<table class="data-table">
   <thead><tr><th>Libellé</th><th>Clé</th><th>Créée le</th><th>Dernier usage</th><th></th></tr></thead>
   <tbody>
   {% for key in keys %}
@@ -29,7 +30,7 @@
       <td>{{ key.last_used_at[:10] if key.last_used_at else "jamais" }}</td>
       <td>
         {% if key.revoked_at %}
-          révoquée le {{ key.revoked_at[:10] }}
+          <span class="status-badge status-retired">révoquée le {{ key.revoked_at[:10] }}</span>
         {% else %}
           <form method="post" action="/keys/{{ key.id }}/revoke">{{ csrf_field() }}<button class="button button-danger button-small" type="submit">Révoquer</button></form>
         {% endif %}
@@ -38,6 +39,7 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% else %}
 <p class="discret">Aucune clé pour le moment.</p>
 {% endif %}

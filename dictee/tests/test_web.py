@@ -554,6 +554,29 @@ def test_design_system_buttons_are_border_box(logged_in):
     assert rule is not None and "box-sizing: border-box" in rule.group(1)
 
 
+def test_design_system_notices_use_their_variants(logged_in, fake_nemo):
+    def has_success_variant(page: str) -> bool:
+        return re.search(r'class="[^"]*notice-success', page) is not None  # la feuille de style le nomme toujours
+
+    saved = logged_in.client.get("/?saved=1").text
+    assert re.search(r'class="notice notice-success"[^>]*>\s*Modifications enregistrées', saved)
+    created = logged_in.post("/keys", {"label": "Android"}).text
+    assert 'class="notice" role="alert"' in created and not has_success_variant(created)
+    logged_in.client.app.state.voices = None
+    fake_nemo.error = NemoUnavailable("down")
+    down = logged_in.client.get("/").text
+    assert re.search(r'class="notice"[^>]*>\s*La liste des voix', down) and not has_success_variant(down)
+
+
+def test_design_system_key_table_scrolls_on_its_own_and_marks_revoked_keys(logged_in):
+    page = logged_in.post("/keys", {"label": "x" * 100}).text  # 100 caractères : la limite des libellés
+    assert re.search(r'<div class="table-scroll">\s*<table class="data-table">', page)
+    key_id = re.search(r'action="/keys/(\d+)/revoke"', page).group(1)
+    page = logged_in.post(f"/keys/{key_id}/revoke").text
+    assert re.search(r'class="status-badge status-retired"[^>]*>\s*révoquée le', page)
+    assert "Révoquer" not in page
+
+
 # --- Garde anti-CSRF ---
 
 

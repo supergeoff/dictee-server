@@ -59,12 +59,32 @@
     textarea:focus, input[type="text"]:focus { box-shadow: 0 0 0 2px rgba(229, 229, 229, 0.16); }
   }
   code { background: var(--muted); border-radius: 6px; font-family: ui-monospace, monospace; overflow-wrap: anywhere; padding: 1px 5px; }
-  table { border-collapse: collapse; width: 100%; }
-  th, td { border-bottom: 1px solid var(--border); padding: 0.4rem; text-align: left; }
   .discret { color: var(--muted-foreground); }
-  .notice { background: var(--warning-surface); border-radius: 4px; padding: 0.6rem 0.8rem; }
-  .voice { align-items: center; display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; padding: 0.3rem 0; }
-  .voice label { min-width: 6rem; }
+  .table-scroll { overflow-x: auto; }
+  .data-table { border-collapse: collapse; width: 100%; }
+  .data-table th, .data-table td {
+    border-bottom: 1px solid var(--border); padding: 10px 12px; text-align: left; vertical-align: middle;
+  }
+  .data-table th { color: var(--muted-foreground); font-size: 12px; font-weight: 650; text-transform: uppercase; }
+  .notice {
+    background: var(--warning-surface); border: 1px solid var(--warning); border-radius: var(--radius); box-sizing: border-box;
+    color: var(--foreground); margin: 1em 0; padding: 12px 14px;
+  }
+  .notice > :first-child { margin-top: 0; }
+  .notice > :last-child { margin-bottom: 0; }
+  .notice-success { background: var(--success-surface); border-color: var(--success); }
+  .status-badge {
+    align-items: center; border-radius: 999px; box-sizing: border-box; display: inline-flex; font-size: 12px; font-weight: 600;
+    gap: 6px; min-height: 24px; padding: 3px 9px; white-space: nowrap;
+  }
+  .status-retired { background: var(--muted); color: var(--muted-foreground); }
+  .voice {
+    align-items: center; border: 1px solid var(--border); border-radius: var(--radius); box-sizing: border-box; display: flex;
+    flex-wrap: wrap; gap: 0.5rem 1rem; padding: 7px 8px;
+  }
+  .voice + .voice { margin-top: 8px; }
+  .voice label { font-weight: 500; min-width: 6rem; }
+  input[type="radio"] { accent-color: var(--primary); }
 </style>
 </head>
 <body>
