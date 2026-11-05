@@ -1586,7 +1586,12 @@ Effacer `.integration/verif-taches/` sur le Mac (Call, Note, glossaire, enregist
   - Scénario 3 (mode `dictee` en arrière-plan, `docker restart verif-dictee` à 2,1 %, après environ cinq morceaux) : réussi. dictee redevient sain 2 s après le redémarrage, l'avancement relu vaut 2,1 % avant comme après et ne recule plus ensuite, et la tâche finit `completed` en 2824 s (47,1 min). Sa ligne porte `chunks=241`, `starts=2` et `retries=0`. NeMo ne journalise pas ses requêtes REST, donc leur nombre n'a pas été compté. Les pics sont de 2350 Mio pour NeMo et de 325 Mio pour dictee.
   - Scénario 4 (dictée en direct par le contrôle `live`) : réussi. 9 mots sur 12 sont retrouvés (75 %), le texte final arrive 2,3 s après le début de l'audio et `cleared` 106 ms après `clear`. Les pics sont de 2385 Mio pour NeMo et de 271 Mio pour dictee.
   - Sur l'ensemble, NeMo culmine à 2385 Mio (sous 3 Gio) et dictee à 325 Mio (sous 512 Mio). Conteneurs, réseau, volume, images et fichiers du VPS ont été supprimés à la fin.
-- Vérifications après déploiement.
+- Vérifications après déploiement : le 5 novembre 2026, après la fusion de la pull request n° 1 (squash c717e84), le compose brut de `dictee` dans Dokploy, que le dépôt ne relit pas, a reçu le `stop_grace_period: 30s` de `compose.yaml`, puis le déploiement a construit les images depuis `main`.
+  - Déploiement : terminé en 72 s, `models` sorti avec le code 0 en 8 s, nemo et dictee sains sans redémarrage, délai d'arrêt de dictee à 30 s, base en version 2 avec le compte et la clé conservés.
+  - Réponses par l'adresse publique avec la clé de service, relevées avant et après le déploiement : statuts, types de contenu, clés JSON et liste des modèles identiques, et la phrase de test retrouvée à 11 mots sur 11 pour chaque format.
+  - Scénario 4 sur la production : `cleared` reçu en 112 ms, 10 mots sur 12 retrouvés (83 %).
+  - Scénario 1 sur la production : tâche en arrière-plan acceptée en 3,3 s, `completed` en 3043 s avec 3 personnes et 497 segments, `starts=1` et `retries=0`. Les pics sont de 1790 Mio pour NeMo et de 224 Mio pour dictee, sans redémarrage ni arrêt par manque de mémoire.
+  - Non fait : la requête comme Dictate demande une clé personnelle, que le contrôleur n'a pas. Une dictée réelle depuis l'application la remplace.
 
 ### Tâche 16 : restes de la revue du premier plan (carte STK-50)
 
