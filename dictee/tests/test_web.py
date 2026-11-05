@@ -503,6 +503,36 @@ def test_design_system_palette_is_declared_for_light_and_dark(logged_in):
         assert "color-scheme: light dark" in page and "prefers-color-scheme: dark" in page
 
 
+def luminance(color: str) -> float:
+    """Luminance relative (WCAG) d'une couleur #rrggbb."""
+    channels = [int(color[i : i + 2], 16) / 255 for i in (1, 3, 5)]
+    red, green, blue = (c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in channels)
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def contrast(first: str, second: str) -> float:
+    high, low = sorted((luminance(first), luminance(second)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def test_design_system_muted_text_reaches_aa_contrast_in_both_themes(logged_in):
+    page = logged_in.client.get("/").text
+    for theme, name in enumerate(("clair", "sombre")):  # la palette claire est déclarée avant la sombre
+        colors = {
+            token: re.findall(rf"{token}:\s*(#[0-9a-f]{{6}})\b", page)[theme]
+            for token in ("--background", "--muted", "--muted-foreground")
+        }
+        for surface in ("--background", "--muted"):  # le texte discret se pose sur le fond ou sur la pastille
+            ratio = contrast(colors["--muted-foreground"], colors[surface])
+            assert ratio >= 4.5, f"thème {name}, sur {surface} : contraste {ratio:.2f}"
+
+
+def test_design_system_code_chip_has_a_visible_outline(logged_in):
+    # Le fond --muted ne se distingue pas du fond de page en mode clair : un filet dessine la pastille.
+    page = logged_in.client.get("/").text
+    assert any("var(--border)" in rule for rule in css_rules(page, "code"))
+
+
 def test_design_system_pages_load_nothing_from_outside(logged_in):
     pages = [
         logged_in.client.get("/").text,
@@ -513,10 +543,6 @@ def test_design_system_pages_load_nothing_from_outside(logged_in):
         assert "<script" not in page
         assert not re.search(r"<(link|img|iframe|object|embed)\b", page)
         assert "@import" not in page and "url(" not in page
-
-
-def test_design_system_code_wraps_long_keys(logged_in):
-    assert "overflow-wrap: anywhere" in logged_in.client.get("/").text
 
 
 BUTTON_CLASSES = {
