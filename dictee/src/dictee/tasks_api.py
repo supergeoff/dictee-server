@@ -45,8 +45,8 @@ def task_error(task: TaskRecord) -> ApiError:
 def task_object(task: TaskRecord) -> dict:
     """L'objet tâche des routes de lecture et d'annulation (section 6.3 de la spec).
 
-    `duration` et `progress` sont arrondis au millième. `output` n'existe qu'une fois la tâche terminée avec succès :
-    c'est la réponse rendue dans le `response_format` et les granularités de la création. `error` n'existe que pour une
+    `duration` et `progress` sont arrondis au millième. `output` vaut `null` jusqu'à la réussite de la tâche, puis c'est
+    la réponse rendue dans le `response_format` et les granularités de la création. `error` vaut `null` sauf pour une
     tâche en échec.
     """
     output = None
