@@ -79,7 +79,7 @@ async def test_payload(settings, recorder):
     assert str(req.url) == f"{settings.litellm_url}/chat/completions"
     assert req.headers["Authorization"] == f"Bearer {settings.litellm_api_key}"
     body = json.loads(req.content)
-    assert body["model"] == "simple-low" and body["temperature"] == 0
+    assert body["model"] == "simple" and body["temperature"] == 0
     assert "reasoning_effort" not in body
     assert body["messages"] == [
         {"role": "system", "content": DEFAULT_INSTRUCTIONS + "\nGlossary:\n- Nemotron"},

@@ -44,7 +44,7 @@ Chaque membre de la famille règle son espace sur une petite page de configurati
 | Construction | Dokploy construit les services depuis ce dépôt, en contexte git sur `main`, car NVIDIA ne publie pas d'image CPU. |
 | Version de NeMo | Un argument de build du compose. L'updater du dimanche apprendra à suivre les releases GitHub (carte Kaneo STK-43, hors de ce dépôt). |
 | Identité Open WebUI | L'en-tête `X-OpenWebUI-User-Email`, accepté seulement avec la clé de service d'Open WebUI. Le jeton signé d'Open WebUI remplacerait cet en-tête et casserait l'attribution de LiteLLM, donc il reste inactif. |
-| Modèle de reformulation | La case `simple-low` de la grille linéaire de LiteLLM, lue dans `CLEANUP_MODEL`. |
+| Modèle de reformulation | La case `simple` de la grille linéaire de LiteLLM, lue dans `CLEANUP_MODEL`. |
 
 ## 4. Architecture et déploiement
 
@@ -104,7 +104,7 @@ Le `.env` reste dans Dokploy, trié par ordre alphabétique.
 
 | Variable | Service | Rôle |
 |---|---|---|
-| `CLEANUP_MODEL` | dictee | Case LiteLLM de la reformulation, `simple-low` |
+| `CLEANUP_MODEL` | dictee | Case LiteLLM de la reformulation, `simple` |
 | `DEFAULT_VOICE` | dictee | Voix Magpie par défaut |
 | `GLOSSARY_BOOST` | dictee | Force du renforcement des termes du glossaire, `1.0` par défaut : la plus haute force mesurée qui n'insère aucun mot que personne n'a dit |
 | `LITELLM_API_KEY` | dictee | Clé LiteLLM de dictee |
