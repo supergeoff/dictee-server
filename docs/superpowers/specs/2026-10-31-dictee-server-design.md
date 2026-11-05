@@ -50,7 +50,7 @@ Chaque membre de la famille règle son espace sur une petite page de configurati
 
 ### 4.1 Compose
 
-On réécrit le compose `dictee` existant au lieu d'en créer un nouveau. Le service garde ainsi son nom réseau `ai-dictee-tltwgv-dictee-1`, déjà connu d'Open WebUI. Le compose reste en mode raw dans Dokploy et suit les conventions de la stack : `restart: unless-stopped` (`"no"` pour un service d'initialisation), `env_file: .env` sur chaque service, `expose` au lieu de `ports`, tags explicites, volumes nommés en bas par ordre alphabétique.
+On réécrit le compose `dictee` existant au lieu d'en créer un nouveau. Le service garde ainsi son nom réseau `ai-dictee-tltwgv-dictee-1`, déjà connu d'Open WebUI. Le compose reste en mode raw dans Dokploy, qui en est la seule source : le dépôt n'en garde pas de copie, seulement `compose.integration.yaml`, un compose de test autonome qui reprend ses services et ses limites. Le compose de Dokploy suit les conventions de la stack : `restart: unless-stopped` (`"no"` pour un service d'initialisation), `env_file: .env` sur chaque service, `expose` au lieu de `ports`, tags explicites, volumes nommés en bas par ordre alphabétique.
 
 | Service | Rôle | Construction | Mémoire | Réseaux |
 |---|---|---|---|---|
@@ -66,7 +66,7 @@ Volumes : `dictee-data` porte la base SQLite de dictee et, le temps d'une tâche
 
 `nemo/Dockerfile` part d'une image Debian slim à tag explicite. Il reçoit `NEMO_VERSION` en argument de build, télécharge l'archive `nemo-speech-${NEMO_VERSION}-linux-x86_64-cpu.tar.gz` de la release GitHub de NVIDIA et compare son empreinte SHA-256 avec celle que GitHub publie pour cette pièce jointe. Une empreinte différente arrête le build. L'image contient `curl`, dont `nemo-speech pull` a besoin, et tourne sous un utilisateur non root.
 
-Le compose écrit la version une seule fois, dans `args` du bloc `x-nemo-build` (`NEMO_VERSION: "0.3.0"`), que `models` et `nemo` reprennent par une ancre YAML : les deux images ne peuvent pas partir de versions différentes. C'est cette ligne que l'updater réécrira quand STK-43 sera fait.
+Le compose de Dokploy écrit la version une seule fois, dans `args` du bloc `x-nemo-build` (`NEMO_VERSION: "0.3.0"`), que `models` et `nemo` reprennent par une ancre YAML : les deux images ne peuvent pas partir de versions différentes. C'est cette ligne que l'updater réécrira quand STK-43 sera fait. `compose.integration.yaml` la répète pour les tests : avant de lancer `make integration`, on l'aligne sur celle du compose de Dokploy si elle a changé.
 
 ### 4.3 Modèles
 
@@ -427,7 +427,7 @@ Les consignes par défaut reprennent celles de l'ancien proxy, déjà neutres, e
 
 Une GitHub Action lance ces tests sur chaque pull request.
 
-**Test d'intégration.** `make integration` lance le compose en local avec les vrais modèles et de courts extraits audio sans contenu personnel. Il tourne sur la machine de Geoff et pas dans la CI, parce que les modèles pèsent 1,3 Go.
+**Test d'intégration.** `make integration` lance le compose de test (`compose.integration.yaml`) en local avec les vrais modèles et de courts extraits audio sans contenu personnel. Il se joue à la demande, pas à chaque changement, sur la machine de Geoff et pas dans la CI, parce que les modèles pèsent 1,3 Go.
 
 ## 9. Bascule
 

@@ -8,7 +8,8 @@ import uvicorn
 from dictee.app import create_app
 from dictee.settings import Settings
 
-# Délai laissé aux requêtes en cours à l'arrêt, plus court que le `stop_grace_period` de dictee dans compose.yaml.
+# Délai laissé aux requêtes en cours à l'arrêt, plus court que le `stop_grace_period` de dictee dans le compose de
+# Dokploy.
 GRACEFUL_SHUTDOWN_S = 20
 
 
@@ -32,7 +33,7 @@ def main() -> None:
     configure_logging()
     # Pas de journal d'accès : les journaux ne portent jamais de contenu des requêtes. À l'arrêt, uvicorn laisse
     # `GRACEFUL_SHUTDOWN_S` secondes aux requêtes en cours, puis arrête l'app : la boucle de travail des tâches s'arrête
-    # ainsi avant le SIGKILL que Docker envoie à la fin de `stop_grace_period` (30 s dans compose.yaml).
+    # ainsi avant le SIGKILL que Docker envoie à la fin de `stop_grace_period` (30 s dans le compose de Dokploy).
     uvicorn.run(
         create_app(settings),
         host="0.0.0.0",
