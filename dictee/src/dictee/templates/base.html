@@ -63,8 +63,10 @@
   .table-scroll { overflow-x: auto; }
   .data-table { border-collapse: collapse; width: 100%; }
   .data-table th, .data-table td {
-    border-bottom: 1px solid var(--border); padding: 10px 12px; text-align: left; vertical-align: middle;
+    border-bottom: 1px solid var(--border); padding: 10px 12px; text-align: left; vertical-align: middle; white-space: nowrap;
   }
+  .data-table td:first-child { max-width: 16rem; min-width: 9rem; overflow-wrap: anywhere; white-space: normal; }
+  .data-table code { overflow-wrap: normal; }
   .data-table th { color: var(--muted-foreground); font-size: 12px; font-weight: 650; text-transform: uppercase; }
   .notice {
     background: var(--warning-surface); border: 1px solid var(--warning); border-radius: var(--radius); box-sizing: border-box;

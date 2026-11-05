@@ -577,6 +577,30 @@ def test_design_system_key_table_scrolls_on_its_own_and_marks_revoked_keys(logge
     assert "Révoquer" not in page
 
 
+def css_rules(page: str, selector: str) -> list[str]:
+    """Corps des règles de la feuille de style dont la liste de sélecteurs contient exactement ce sélecteur."""
+    style = re.search(r"<style>(.*?)</style>", page, re.S).group(1)
+    return [
+        body
+        for selectors, body in re.findall(r"([^{}]+)\{([^}]*)\}", style)
+        if selector in [part.strip() for part in selectors.split(",")]
+    ]
+
+
+def test_design_system_key_table_rows_stay_on_one_line(logged_in):
+    page = logged_in.client.get("/").text
+    assert any("white-space: nowrap" in rule for rule in css_rules(page, ".data-table td"))
+    assert any("overflow-x: auto" in rule for rule in css_rules(page, ".table-scroll"))
+    # Le libellé fait exception : il se replie et casse une longue suite sans espace, dans une largeur bornée,
+    # et garde un plancher pour ne pas s'écraser sur la largeur de son en-tête.
+    label = " ".join(css_rules(page, ".data-table td:first-child"))
+    assert "white-space: normal" in label and "overflow-wrap: anywhere" in label
+    assert "max-width" in label and "min-width" in label
+    # Une clé du tableau reste d'un bloc ; celle de l'encart, hors tableau, garde le repli n'importe où.
+    assert any("overflow-wrap: normal" in rule for rule in css_rules(page, ".data-table code"))
+    assert any("overflow-wrap: anywhere" in rule for rule in css_rules(page, "code"))
+
+
 # --- Garde anti-CSRF ---
 
 
