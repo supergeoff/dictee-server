@@ -47,7 +47,7 @@ class Settings:
     public_url: str
     session_secret: str
     nemo_url: str = "http://nemo:8000"
-    cleanup_model: str = "simple-low"
+    cleanup_model: str = "simple"
     default_voice: str = "Leo"
     # Force du glossaire : la plus haute sans insertion sur le corpus de `integration/boost.py` (spec 7.6, tâche 13).
     glossary_boost: float = 1.0

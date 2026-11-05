@@ -8,7 +8,7 @@ from dictee.settings import Settings
 
 def test_defaults_apply_when_optional_variables_are_missing():
     s = Settings.from_env(REQUIRED_ENV)
-    assert s.cleanup_model == "simple-low"
+    assert s.cleanup_model == "simple"
     assert s.long_audio_seconds == 600.0
     assert s.max_upload_mb == 300
     assert s.nemo_url == "http://nemo:8000"

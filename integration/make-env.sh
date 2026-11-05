@@ -4,7 +4,7 @@
 set -eu
 
 cat <<EOF
-CLEANUP_MODEL=simple-low
+CLEANUP_MODEL=simple
 DEFAULT_VOICE=Leo
 LITELLM_API_KEY=sk-test-not-a-real-key
 LITELLM_URL=http://127.0.0.1:9
