@@ -72,8 +72,8 @@ def compose_base() -> list[str]:
 
 
 def compose(*args: str) -> subprocess.CompletedProcess[str]:
-    """Lance docker compose (plugin) ou docker-compose (binaire seul) sur les deux fichiers."""
-    cmd = [*compose_base(), "-f", "compose.yaml", "-f", "compose.integration.yaml", *args]
+    """Lance docker compose (plugin) ou docker-compose (binaire seul) sur le compose d'intégration."""
+    cmd = [*compose_base(), "-f", "compose.integration.yaml", *args]
     return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
 
 

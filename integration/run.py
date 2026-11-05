@@ -4,7 +4,7 @@
 # ///
 """Test d'intégration de bout en bout de dictee, sur la stack complète et les vrais modèles (spec, section 8).
 
-Prérequis : `make integration`, qui démarre la stack (`compose.yaml` et `compose.integration.yaml`), attend `/health`
+Prérequis : `make integration`, qui démarre la stack (`compose.integration.yaml`), attend `/health`
 puis lance ce script. Usage : uv run --script integration/run.py [--only a,b,c]
 
 `--only` rejoue seulement les contrôles nommés, avec ceux dont ils dépendent, sur une stack déjà démarrée : pratique
@@ -93,16 +93,9 @@ SEND_MIN_RATE = 1024**2
 # CPU de nemo (en pourcents d'un cœur) au-dessus duquel il travaille, et au-dessous duquel il est au repos.
 BUSY_CPU = 50.0
 IDLE_CPU = 10.0
+# Limites de mémoire de nemo et de dictee : celles du compose de Dokploy, reprises par compose.integration.yaml.
 NEMO_MEMORY_LIMIT = 3 * 1024**3
 DICTEE_MEMORY_LIMIT = 512 * 1024**2
-# Version de NeMo-Speech.cpp dans compose.yaml : un tag explicite x.y.z (AGENTS.md), sans la répéter ici.
-EXPLICIT_VERSION = r"\d+\.\d+\.\d+"
-# Règles de compose.yaml : service -> (restart, limite de mémoire en octets).
-COMPOSE_RULES = {
-    "models": ("no", 512 * 1024**2),
-    "nemo": ("unless-stopped", NEMO_MEMORY_LIMIT),
-    "dictee": ("unless-stopped", DICTEE_MEMORY_LIMIT),
-}
 # Début de chaque format de synthèse (dictee/tests/test_audio.py, tâche 5). Le `pcm` n'a pas de signature.
 SIGNATURES = {
     "mp3": (b"ID3", b"\xff\xfb", b"\xff\xf3"),
@@ -513,65 +506,6 @@ def task_lines(lines: list[str], task_id: str) -> list[str]:
 def request_lines(lines: list[str]) -> list[str]:
     """Les lignes des requêtes de transcription, une par requête, qui finissent par la tâche servie."""
     return [line for line in lines if "route=transcriptions" in line]
-
-
-def declared_volumes() -> list[str]:
-    """Les volumes nommés de `compose.yaml`, dans l'ordre du fichier (`config` rend les clés triées)."""
-    names: list[str] = []
-    inside = False
-    for line in (ROOT / "compose.yaml").read_text().splitlines():
-        if re.match(r"^[^\s#]", line):
-            inside = line.startswith("volumes:")
-        elif inside and (match := re.match(r"^  ([\w.-]+):", line)):
-            names.append(match.group(1))
-    return names
-
-
-def memory_limit(service: dict) -> int | None:
-    limit = service.get("deploy", {}).get("resources", {}).get("limits", {}).get("memory", service.get("mem_limit"))
-    return None if limit is None else int(limit)
-
-
-def check_compose(state: State) -> str:
-    command = [*check_nemo.compose_base(), "-f", "compose.yaml", "config", "--no-env-resolution", "--format", "json"]
-    done = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
-    expect(done.returncode == 0, f"`config` a échoué : {done.stderr.strip()[:300]}")
-    config = json.loads(done.stdout)
-    services = config.get("services", {})
-    expect(set(services) == set(COMPOSE_RULES), f"services {sorted(services)} au lieu de {sorted(COMPOSE_RULES)}")
-    problems: list[str] = []
-    for name, (restart, memory) in COMPOSE_RULES.items():
-        service = services[name]
-        if service.get("restart") != restart:
-            problems.append(f"{name} : restart {service.get('restart')!r} au lieu de {restart!r}")
-        entries = service.get("env_file", [])
-        env_files = [Path(entry["path"] if isinstance(entry, dict) else entry).name for entry in entries]
-        if env_files != [".env"]:
-            problems.append(f"{name} : env_file {env_files} au lieu de ['.env']")
-        if "ports" in service:
-            problems.append(f"{name} : publie des ports")
-        if memory_limit(service) != memory:
-            problems.append(f"{name} : limite de mémoire {memory_limit(service)} octets au lieu de {memory}")
-    versions: dict[str, object] = {}
-    vague = []
-    for name in ("models", "nemo"):
-        versions[name] = services[name].get("build", {}).get("args", {}).get("NEMO_VERSION")
-        if not isinstance(versions[name], str) or not re.fullmatch(EXPLICIT_VERSION, versions[name]):
-            vague.append(name)
-            problems.append(f"{name} : NEMO_VERSION {versions[name]!r} n'est pas une version explicite (x.y.z)")
-    if not vague and len(set(versions.values())) > 1:
-        problems.append(f"NEMO_VERSION différente entre models et nemo : {versions}")
-    info("NEMO_VERSION lue dans compose.yaml : " + ", ".join(f"{name} {version}" for name, version in versions.items()))
-    volumes = declared_volumes()
-    if volumes != sorted(volumes):
-        problems.append(f"volumes {volumes} pas dans l'ordre alphabétique")
-    if set(volumes) != set(config.get("volumes", {})):
-        problems.append(f"volumes lus dans le fichier {volumes} différents de ceux de `config`")
-    expect(not problems, " ; ".join(problems))
-    return (
-        f"{len(services)} services, restart, env_file, ports, mémoire, même version explicite de NeMo et volumes "
-        "conformes"
-    )
 
 
 def check_health(state: State) -> str:
@@ -1184,7 +1118,6 @@ def check_restart(state: State) -> str:
 # (clé, titre, fonction, contrôles requis avant, mesure sans échec). Les contrôles longs sont à la fin, et `restart`,
 # qui redémarre dictee, en dernier.
 CHECKS: list[tuple[str, str, Callable[[State], str], tuple[str, ...], bool]] = [
-    ("compose", "Conventions du compose", check_compose, (), False),
     ("health", "GET /health", check_health, (), False),
     ("synthesis", "Synthèse des deux phrases en wav", check_synthesis, ("health",), False),
     ("transcription", "Transcription dictee du dialogue", check_transcription, ("synthesis",), False),

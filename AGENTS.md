@@ -1,6 +1,6 @@
 # dictee-server : règles du dépôt
 
-Ce dépôt porte dictee, le point d'entrée audio de la stack de Geoff, et le compose Dokploy qui le fait tourner avec NeMo-Speech.cpp. Les specs en cours sont `docs/superpowers/specs/2026-10-31-dictee-server-design.md`, la référence de ce que dictee fait, et `docs/superpowers/specs/2026-11-01-taches-transcription-design.md`, qui garde l'histoire des tâches enregistrées, du découpage en morceaux et de la dictée en direct.
+Ce dépôt porte dictee, le point d'entrée audio de la stack de Geoff, et l'image NeMo-Speech.cpp qui l'accompagne. Le compose qui les fait tourner vit dans Dokploy, seule source des composes : le dépôt n'en garde qu'un compose de test, `compose.integration.yaml`. Les specs en cours sont `docs/superpowers/specs/2026-10-31-dictee-server-design.md`, la référence de ce que dictee fait, et `docs/superpowers/specs/2026-11-01-taches-transcription-design.md`, qui garde l'histoire des tâches enregistrées, du découpage en morceaux et de la dictée en direct.
 
 ## Principes
 
@@ -9,14 +9,14 @@ Ce dépôt porte dictee, le point d'entrée audio de la stack de Geoff, et le co
 - Rien de personnel dans le dépôt, qui est public : ni glossaire, ni consignes propres à quelqu'un, ni email. Les valeurs par défaut restent neutres, et chacun règle son espace sur la page.
 - Aucun secret dans le dépôt. Le `.env` reste dans Dokploy.
 - dictee garde l'audio d'une tâche jusqu'à sa fin et son texte 24 heures après, et ses journaux n'en contiennent jamais.
-- Les versions sont des tags explicites. La version de NeMo-Speech.cpp est un argument de build du compose, et ce dépôt ne la répète nulle part ailleurs.
+- Les versions sont des tags explicites. La version de NeMo-Speech.cpp est un argument de build du compose de Dokploy, et le dépôt ne la répète que dans `compose.integration.yaml` : avant de lancer `make integration`, on l'aligne sur celle du compose de Dokploy si elle a changé.
 
 ## Méthode
 
 - Le travail suit le plan tâche par tâche, dans l'ordre. Chaque tâche commence par un test qui échoue, puis le code, puis le test qui passe, puis un commit.
 - Une tâche ne présuppose jamais le résultat d'une tâche précédente sans l'avoir vérifié. Quand un critère d'abandon est atteint, on s'arrête et on rapporte à Geoff.
 - On n'annonce jamais qu'une tâche est terminée sans une preuve observée : test lancé, fichier relu, appel exécuté.
-- Le travail se fait sur une branche, et Geoff fusionne lui-même sur `main`. Dokploy construit depuis `main`, donc une fusion change ce que le prochain déploiement construit.
+- Le travail se fait sur une branche, et Geoff fusionne lui-même sur `main`. Dokploy construit les images depuis `main`, donc une fusion change ce que le prochain déploiement construit, mais elle ne déploie rien et ne change pas le compose : un changement de compose se fait dans Dokploy.
 - Toute écriture dans Dokploy, PocketID, Open WebUI, LiteLLM ou GitHub hors du dépôt attend l'accord explicite de Geoff. Les lectures sont libres.
 
 ## Commandes
@@ -24,7 +24,7 @@ Ce dépôt porte dictee, le point d'entrée audio de la stack de Geoff, et le co
 | Commande | Effet |
 |---|---|
 | `make test` | Lance `pytest`, avec un faux NeMo et un faux LiteLLM, sans réseau. |
-| `make integration` | Lance le compose en local avec les vrais modèles sur de courts extraits audio. Elle ne tourne pas dans la CI. |
+| `make integration` | Lance le compose de test en local avec les vrais modèles sur de courts extraits audio. Elle se joue à la demande, pas à chaque changement, et ne tourne pas dans la CI. |
 
 ## Écriture
 

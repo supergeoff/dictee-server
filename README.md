@@ -8,7 +8,7 @@ La spec est dans [`docs/superpowers/specs/2026-10-31-dictee-server-design.md`](d
 
 ## Mise en route
 
-Il faut Docker et `make`. Le déploiement en production passe par Dokploy, qui construit le compose depuis `main` et garde le `.env` : la spec le décrit (section 4).
+Il faut Docker et `make`. Le compose de production vit dans Dokploy, seule source des composes : Dokploy construit les images depuis `main` et garde le `.env`, et la spec le décrit (section 4). Le dépôt ne garde qu'un compose de test, `compose.integration.yaml`, que `make integration` lance en local.
 
 Le `.env` porte les variables suivantes, dont la spec donne le rôle (section 4.5) : `CLEANUP_MODEL`, `DEFAULT_VOICE`, `GLOSSARY_BOOST`, `LITELLM_API_KEY`, `LITELLM_URL`, `LONG_AUDIO_SECONDS`, `MAX_QUEUED_LONG`, `MAX_UPLOAD_MB`, `NEMO_API_KEY`, `NEMO_ASR_THREADS`, `NEMO_TTS_NO_CFG`, `NEMO_TTS_THREADS`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_ISSUER`, `OPENWEBUI_SERVICE_KEY`, `PUBLIC_URL`, `SESSION_SECRET` et `TASK_RETENTION_HOURS`. En local, `make integration` en fabrique un de banc avec `integration/make-env.sh` s'il manque, et git l'ignore.
 
