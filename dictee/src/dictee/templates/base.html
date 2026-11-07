@@ -8,106 +8,25 @@
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <style>
-  /* La palette et les composants viennent du design system du MCP broker. Le thème suit le système
-     sans aucun script, puisque la politique de sécurité de la page n'en autorise pas. Le gris discret est un peu
-     plus foncé en clair qu'au broker (#6b6b6b au lieu de #737373), pour atteindre un contraste de 4,5 sur les fonds clairs. */
-  :root {
-    color-scheme: light dark;
-    --background: #f5f5f5; --foreground: #0a0a0a; --card: #ffffff; --muted: #f1f1f1; --muted-foreground: #6b6b6b;
-    --border: #d7d7d7; --input: #e5e5e5; --primary: #171717; --primary-foreground: #fafafa;
-    --accent: #ededed; --accent-foreground: #171717;
-    --success: #047857; --success-surface: #d1fae5; --warning: #b45309; --warning-surface: #fef3c7;
-    --destructive: #b91c1c; --destructive-surface: #fee2e2; --radius: 10px;
-    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --background: #0d0d0d; --foreground: #fafafa; --card: #171717; --muted: #212121; --muted-foreground: #b3b3b3;
-      --border: #ffffff1a; --input: #ffffff26; --primary: #e5e5e5; --primary-foreground: #171717;
-      --accent: #262626; --accent-foreground: #fafafa;
-      --success: #34d399; --success-surface: #064e3b66; --warning: #fbbf24; --warning-surface: #78350f66;
-      --destructive: #f87171; --destructive-surface: #7f1d1d66;
-    }
-  }
-  body { background: var(--background); color: var(--foreground); font-size: 14px; line-height: 1.5; margin: 0; }
-  main { margin: 0 auto; max-width: 46rem; padding: 16px; }
-  header { align-items: center; display: flex; justify-content: space-between; }
-  h1 { font-size: 28px; font-weight: 650; }
-  /* La marque reprend l'en-tête de l'app Android : l'icône de 32 px (son carré incliné occupe 512 des 608 unités de sa
-     boîte), puis le nom en capitales espacées, en gras, à 16 px. */
-  .brand {
-    align-items: center; display: flex; font-size: 16px; font-weight: 700; gap: 10px; letter-spacing: 0.06em;
-    line-height: 20px; margin: 12px 0; text-transform: uppercase;
-  }
-  .brand img { display: block; height: 32px; width: 32px; }
-  /* En sombre, le carré (#0a0a0a) se confond avec le fond de la page : un liseré, qui suit sa forme, le dessine. */
-  @media (prefers-color-scheme: dark) {
-    .brand img { filter: drop-shadow(0 0 1px #ffffff99); }
-  }
-  h2 { border-top: 1px solid var(--border); font-size: 16px; font-weight: 650; margin-top: 2rem; padding-top: 1rem; }
-  a { color: inherit; text-decoration: none; }
-  button, input, select { font: inherit; }
-  .button {
-    align-items: center; border: 1px solid transparent; border-radius: 8px; box-sizing: border-box; cursor: pointer;
-    display: inline-flex; gap: 8px; justify-content: center; min-height: 40px; padding: 8px 13px;
-    transition: background .15s ease, border-color .15s ease, color .15s ease, transform .1s ease;
-  }
-  .button:active { transform: scale(.98); }
-  .button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-  .button-primary { background: var(--primary); color: var(--primary-foreground); }
-  .button-secondary { background: var(--card); border-color: var(--border); color: var(--foreground); }
-  .button-secondary:hover, .button-ghost:hover { background: var(--accent); color: var(--accent-foreground); }
-  .button-danger { background: var(--destructive-surface); border-color: transparent; color: var(--destructive); }
-  .button-danger:hover { border-color: var(--destructive); }
-  .button-ghost { background: transparent; border-color: transparent; color: var(--muted-foreground); }
-  .button-small { font-size: 12px; min-height: 32px; padding: 5px 9px; }
-  label { font-size: 13px; font-weight: 600; }
-  textarea, input[type="text"] {
-    background: var(--card); border: 1px solid var(--input); border-radius: 8px; box-sizing: border-box;
-    color: var(--foreground); font-family: inherit; font-size: 14px; font-weight: 400; min-height: 40px; outline: none;
-    padding: 8px 10px; width: 100%;
-  }
-  textarea { font-family: ui-monospace, monospace; font-size: 0.9rem; resize: vertical; }
-  textarea:focus, input[type="text"]:focus { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(23, 23, 23, 0.18); }
-  @media (prefers-color-scheme: dark) {
-    textarea:focus, input[type="text"]:focus { box-shadow: 0 0 0 2px rgba(229, 229, 229, 0.16); }
-  }
-  code {
-    background: var(--muted); border-radius: 6px; box-shadow: inset 0 0 0 1px var(--border); font-family: ui-monospace, monospace;
-    overflow-wrap: anywhere; padding: 1px 5px;
-  }
-  .discret { color: var(--muted-foreground); }
-  .table-scroll { overflow-x: auto; }
-  .data-table { border-collapse: collapse; width: 100%; }
-  .data-table th, .data-table td {
-    border-bottom: 1px solid var(--border); padding: 10px 12px; text-align: left; vertical-align: middle; white-space: nowrap;
-  }
-  .data-table td:first-child { max-width: 16rem; min-width: 9rem; overflow-wrap: anywhere; white-space: normal; }
-  .data-table code { overflow-wrap: normal; }
-  .data-table th { color: var(--muted-foreground); font-size: 12px; font-weight: 650; text-transform: uppercase; }
-  .notice {
-    background: var(--warning-surface); border: 1px solid var(--warning); border-radius: var(--radius); box-sizing: border-box;
-    color: var(--foreground); margin: 1em 0; padding: 12px 14px;
-  }
-  .notice > :first-child { margin-top: 0; }
-  .notice > :last-child { margin-bottom: 0; }
-  .notice-success { background: var(--success-surface); border-color: var(--success); }
-  .status-badge {
-    align-items: center; border-radius: 999px; box-sizing: border-box; display: inline-flex; font-size: 12px; font-weight: 600;
-    gap: 6px; min-height: 24px; padding: 3px 9px; white-space: nowrap;
-  }
-  .status-retired { background: var(--muted); color: var(--muted-foreground); }
-  .voice {
-    align-items: center; border: 1px solid var(--border); border-radius: var(--radius); box-sizing: border-box; display: flex;
-    flex-wrap: wrap; gap: 0.5rem 1rem; padding: 7px 8px;
-  }
-  .voice + .voice { margin-top: 8px; }
-  .voice label { font-weight: 500; min-width: 6rem; }
-  input[type="radio"] { accent-color: var(--primary); }
+{# Stack UI est copié par scripts/sync-stack-ui.sh : le thème suit le système sans aucun script (la politique de
+   sécurité des pages n'en autorise pas), et la police Figtree vient de la route /fonts/ de l'application. #}
+{% include "stack-ui/stack-ui.css" %}
+
+/* Compléments propres à dictee : ce que Stack UI documente ou laisse à la page sans le fournir. */
+/* Stack UI aligne l'en-tête sur le haut ; la marque (32 px) et le bouton (44 px) se centrent l'un sur l'autre. */
+@media (min-width: 861px) {
+  .page-header { align-items: center; }
+}
+.stack > p { margin: 0; }
+audio { max-width: 100%; }
+/* Le carré noir de la marque se confond avec le fond sombre de la page : un liseré, qui suit sa forme, le dessine. */
+@media (prefers-color-scheme: dark) {
+  .brand-wordmark img { filter: drop-shadow(0 0 1px #ffffff99); }
+}
 </style>
 </head>
 <body>
-<main>
+<main class="column">
 {% block content %}{% endblock %}
 </main>
 </body>

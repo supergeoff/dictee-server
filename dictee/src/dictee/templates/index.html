@@ -1,88 +1,117 @@
 {% extends "base.html" %}
 {% block content %}
 {% macro csrf_field() %}<input type="hidden" name="csrf" value="{{ csrf }}">{% endmacro %}
-<header>
-  <h1 class="brand"><img src="/icon.svg" alt="" width="32" height="32">Dictée</h1>
+<header class="page-header">
+  <h1 class="brand brand-wordmark"><img src="/icon.svg" alt="" width="32" height="32">Dictée</h1>
   <form method="post" action="/logout">{{ csrf_field() }}<button class="button button-ghost" type="submit">Se déconnecter</button></form>
 </header>
+<div class="stack">
 {% if saved %}
 <p class="notice notice-success" role="status">Modifications enregistrées.</p>
 {% endif %}
 
-<h2 id="cles">Clés</h2>
-<p>Une clé permet à une application d'utiliser dictee en votre nom. Adresse à indiquer dans l'application : <code>{{ api_url }}</code></p>
+<section class="card">
+  <div class="card-header"><div>
+    <h2 class="card-title" id="cles">Clés</h2>
+    <p class="card-description">Une clé permet à une application d'utiliser dictee en votre nom. Adresse à indiquer dans l'application : <code class="code">{{ api_url }}</code></p>
+  </div></div>
+  <div class="stack">
 {% if new_key %}
-<div class="notice" role="alert">
-  <p><strong>Nouvelle clé.</strong> Copiez-la maintenant : elle ne sera plus affichée ensuite.</p>
-  <p><code>{{ new_key }}</code></p>
-</div>
+    <div class="notice notice-warning" role="alert">
+      <div class="notice-text">
+        <p><strong>Nouvelle clé.</strong> Copiez-la maintenant : elle ne sera plus affichée ensuite.</p>
+        <p><code class="code">{{ new_key }}</code></p>
+      </div>
+    </div>
 {% endif %}
 {% if keys %}
-<div class="table-scroll">
-<table class="data-table">
-  <thead><tr><th>Libellé</th><th>Clé</th><th>Créée le</th><th>Dernier usage</th><th></th></tr></thead>
-  <tbody>
-  {% for key in keys %}
-    <tr>
-      <td>{{ key.label }}</td>
-      <td><code>{{ key.prefix }}…</code></td>
-      <td>{{ key.created_at[:10] }}</td>
-      <td>{{ key.last_used_at[:10] if key.last_used_at else "jamais" }}</td>
-      <td>
-        {% if key.revoked_at %}
-          <span class="status-badge status-retired">révoquée le {{ key.revoked_at[:10] }}</span>
-        {% else %}
-          <form method="post" action="/keys/{{ key.id }}/revoke">{{ csrf_field() }}<button class="button button-danger button-small" type="submit">Révoquer</button></form>
-        {% endif %}
-      </td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
-</div>
+    <div class="table-scroll">
+    <table class="data-table data-table-compact">
+      <thead><tr><th>Libellé</th><th>Clé</th><th>Créée le</th><th>Dernier usage</th><th></th></tr></thead>
+      <tbody>
+      {% for key in keys %}
+        <tr>
+          <td>{{ key.label }}</td>
+          <td><code class="code">{{ key.prefix }}…</code></td>
+          <td>{{ key.created_at[:10] }}</td>
+          <td>{{ key.last_used_at[:10] if key.last_used_at else "jamais" }}</td>
+          <td>
+            {% if key.revoked_at %}
+              <span class="badge">révoquée le {{ key.revoked_at[:10] }}</span>
+            {% else %}
+              <form method="post" action="/keys/{{ key.id }}/revoke">{{ csrf_field() }}<button class="button button-danger button-small" type="submit">Révoquer</button></form>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
 {% else %}
-<p class="discret">Aucune clé pour le moment.</p>
+    <p class="muted">Aucune clé pour le moment.</p>
 {% endif %}
-<form method="post" action="/keys">
-  {{ csrf_field() }}
-  <p><label>Libellé de la nouvelle clé<br><input type="text" name="label" maxlength="100" required></label></p>
-  <p><button class="button button-primary" type="submit">Créer une clé</button></p>
-</form>
-
-<h2 id="glossaire">Glossaire</h2>
-<p>Un terme par ligne. Pour aider la reconnaissance, ajoutez entre parenthèses les formes sous lesquelles il est parfois mal entendu : <code>Sortformer (souvent entendu : sort former, sortie former)</code>. Les lignes qui commencent par # sont ignorées.</p>
-<form method="post" action="/settings">
-  {{ csrf_field() }}
-  <p><textarea name="glossary" rows="10" maxlength="20000" aria-label="Glossaire">{{ glossary }}</textarea></p>
-  <p><button class="button button-primary" type="submit">Enregistrer le glossaire</button></p>
-</form>
-
-<h2 id="consignes">Consignes de reformulation</h2>
-<p>Ces consignes guident la reformulation d'une dictée. Tant que vous n'y touchez pas, ce sont les consignes par défaut, affichées ici.</p>
-<form method="post" action="/settings">
-  {{ csrf_field() }}
-  <p><textarea name="instructions" rows="12" maxlength="20000" aria-label="Consignes de reformulation">{{ instructions }}</textarea></p>
-  <p><button class="button button-primary" type="submit">Enregistrer les consignes</button></p>
-</form>
-<form method="post" action="/settings/reset-instructions">
-  {{ csrf_field() }}
-  <p><button class="button button-secondary" type="submit">Revenir aux consignes par défaut</button></p>
-</form>
-
-<h2 id="voix">Voix</h2>
-<p>Voix qui lit vos textes. Chaque lecteur donne un court aperçu de la voix.</p>
-{% if voices %}
-<form method="post" action="/settings">
-  {{ csrf_field() }}
-  {% for voice in voices %}
-  <div class="voice">
-    <label><input type="radio" name="voice" value="{{ voice }}"{% if voice == current_voice %} checked{% endif %}> {{ voice }}</label>
-    <audio controls preload="none" src="/voice/preview?voice={{ voice|urlencode }}"></audio>
+    <form class="form-grid" method="post" action="/keys">
+      {{ csrf_field() }}
+      <div class="field">
+        <label for="label">Libellé de la nouvelle clé</label>
+        <input class="input" id="label" type="text" name="label" maxlength="100" required>
+      </div>
+      <div class="actions"><button class="button button-primary" type="submit">Créer une clé</button></div>
+    </form>
   </div>
-  {% endfor %}
-  <p><button class="button button-primary" type="submit">Enregistrer la voix</button></p>
-</form>
+</section>
+
+<section class="card">
+  <div class="card-header"><div>
+    <h2 class="card-title" id="glossaire">Glossaire</h2>
+    <p class="card-description">Un terme par ligne. Pour aider la reconnaissance, ajoutez entre parenthèses les formes sous lesquelles il est parfois mal entendu : <code class="code">Sortformer (souvent entendu : sort former, sortie former)</code>. Les lignes qui commencent par # sont ignorées.</p>
+  </div></div>
+  <form class="form-grid" method="post" action="/settings">
+    {{ csrf_field() }}
+    <textarea class="input input-mono" name="glossary" rows="10" maxlength="20000" aria-label="Glossaire">{{ glossary }}</textarea>
+    <div class="actions"><button class="button button-primary" type="submit">Enregistrer le glossaire</button></div>
+  </form>
+</section>
+
+<section class="card">
+  <div class="card-header"><div>
+    <h2 class="card-title" id="consignes">Consignes de reformulation</h2>
+    <p class="card-description">Ces consignes guident la reformulation d'une dictée. Tant que vous n'y touchez pas, ce sont les consignes par défaut, affichées ici.</p>
+  </div></div>
+  <div class="stack">
+    <form class="form-grid" method="post" action="/settings">
+      {{ csrf_field() }}
+      <textarea class="input input-mono" name="instructions" rows="12" maxlength="20000" aria-label="Consignes de reformulation">{{ instructions }}</textarea>
+      <div class="actions"><button class="button button-primary" type="submit">Enregistrer les consignes</button></div>
+    </form>
+    <form method="post" action="/settings/reset-instructions">
+      {{ csrf_field() }}
+      <div class="actions"><button class="button button-secondary" type="submit">Revenir aux consignes par défaut</button></div>
+    </form>
+  </div>
+</section>
+
+<section class="card">
+  <div class="card-header"><div>
+    <h2 class="card-title" id="voix">Voix</h2>
+    <p class="card-description">Voix qui lit vos textes. Chaque lecteur donne un court aperçu de la voix.</p>
+  </div></div>
+{% if voices %}
+  <form class="form-grid" method="post" action="/settings">
+    {{ csrf_field() }}
+    <div class="list">
+    {% for voice in voices %}
+      <div class="list-row">
+        <label class="check"><input type="radio" name="voice" value="{{ voice }}"{% if voice == current_voice %} checked{% endif %}><span class="check-text"><b>{{ voice }}</b></span></label>
+        <audio controls preload="none" src="/voice/preview?voice={{ voice|urlencode }}"></audio>
+      </div>
+    {% endfor %}
+    </div>
+    <div class="actions"><button class="button button-primary" type="submit">Enregistrer la voix</button></div>
+  </form>
 {% else %}
-<p class="notice">La liste des voix est indisponible pour le moment. Réessayez dans un instant.</p>
+  <p class="notice notice-warning">La liste des voix est indisponible pour le moment. Réessayez dans un instant.</p>
 {% endif %}
+</section>
+</div>
 {% endblock %}

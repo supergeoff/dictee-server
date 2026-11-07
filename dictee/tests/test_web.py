@@ -494,20 +494,60 @@ def test_html_responses_are_not_cached_and_carry_a_content_security_policy(logge
         assert page.headers["cache-control"] == "no-store"
 
 
-# --- Habillage ---
+# --- Habillage : Stack UI ---
 
-TOKENS = (
-    "--background", "--foreground", "--card", "--muted", "--muted-foreground", "--border", "--input",
-    "--primary", "--primary-foreground", "--accent", "--accent-foreground", "--success", "--success-surface",
-    "--warning", "--warning-surface", "--destructive", "--destructive-surface",
+PALETTE_TOKENS = (
+    "--background", "--foreground", "--card", "--card-foreground", "--muted", "--muted-foreground", "--border",
+    "--input", "--primary", "--primary-foreground", "--accent", "--accent-foreground", "--success",
+    "--success-surface", "--warning", "--warning-surface", "--destructive", "--destructive-surface", "--info",
+    "--info-surface", "--focus", "--field-bg", "--button-primary-bg", "--button-secondary-bg", "--button-danger-bg",
 )  # fmt: skip
+# Les classes d'avant Stack UI : la table « Correspondance des anciens noms » de son README dit ce qui les remplace.
+OLD_CLASSES = {"status-badge", "status-retired", "status-saved", "discret", "voice"}
 
 
-def test_design_system_palette_is_declared_for_light_and_dark(logged_in):
+def stylesheet(page: str) -> str:
+    return re.search(r"<style>(.*?)</style>", page, re.S).group(1)
+
+
+def declarations(block: str) -> dict[str, str]:
+    return dict(re.findall(r"(--[\w-]+):\s*([^;]+);", block))
+
+
+def palettes(page: str) -> dict[str, dict[str, str]]:
+    """Jetons déclarés pour le thème clair, puis pour le thème sombre que choisit le réglage du système."""
+    css = stylesheet(page)
+    light = re.search(r':root, \[data-theme="light"\] \{(.*?)\n\}', css, re.S)
+    dark = re.search(r"@media \(prefers-color-scheme: dark\) \{\s*:root:not\(\[data-theme\]\) \{(.*?)\n  \}", css, re.S)
+    assert light is not None and dark is not None
+    return {"light": declarations(light.group(1)), "dark": declarations(dark.group(1))}
+
+
+def resolve(tokens: dict[str, str], name: str) -> str:
+    """Valeur d'un jeton, en suivant les `var(--autre)` jusqu'à une couleur."""
+    value = tokens[name]
+    while found := re.fullmatch(r"var\((--[\w-]+)\)", value):
+        value = tokens[found.group(1)]
+    return value
+
+
+def classes_of(page: str) -> set[str]:
+    return {name for value in re.findall(r'\bclass="([^"]*)"', page) for name in value.split()}
+
+
+def tag_of(page: str, name: str) -> str:
+    """Balise ouvrante du champ nommé `name`."""
+    return re.search(rf'<(?:input|textarea)\b[^>]*\bname="{name}"[^>]*>', page).group(0)
+
+
+def test_pages_declare_the_stack_ui_palettes_for_light_and_dark(logged_in):
     for page in (logged_in.client.get("/").text, logged_in.post("/logout").text):
-        for token in TOKENS:
-            assert page.count(f"{token}:") == 2, token  # une déclaration en clair, une en sombre
-        assert "color-scheme: light dark" in page and "prefers-color-scheme: dark" in page
+        found = palettes(page)
+        for theme in ("light", "dark"):
+            for token in PALETTE_TOKENS:
+                assert token in found[theme], (theme, token)
+        assert "color-scheme: light;" in page and "color-scheme: dark;" in page
+        assert '<meta name="color-scheme" content="light dark">' in page
 
 
 def luminance(color: str) -> float:
@@ -522,25 +562,14 @@ def contrast(first: str, second: str) -> float:
     return (high + 0.05) / (low + 0.05)
 
 
-def test_design_system_muted_text_reaches_aa_contrast_in_both_themes(logged_in):
-    page = logged_in.client.get("/").text
-    for theme, name in enumerate(("clair", "sombre")):  # la palette claire est déclarée avant la sombre
-        colors = {
-            token: re.findall(rf"{token}:\s*(#[0-9a-f]{{6}})\b", page)[theme]
-            for token in ("--background", "--muted", "--muted-foreground")
-        }
-        for surface in ("--background", "--muted"):  # le texte discret se pose sur le fond ou sur la pastille
-            ratio = contrast(colors["--muted-foreground"], colors[surface])
-            assert ratio >= 4.5, f"thème {name}, sur {surface} : contraste {ratio:.2f}"
+def test_stack_ui_muted_text_reaches_aa_contrast_in_both_themes(logged_in):
+    for theme, tokens in palettes(logged_in.client.get("/").text).items():
+        for surface in ("--background", "--card", "--muted"):
+            ratio = contrast(resolve(tokens, "--muted-foreground"), resolve(tokens, surface))
+            assert ratio >= 4.5, f"thème {theme}, sur {surface} : contraste {ratio:.2f}"
 
 
-def test_design_system_code_chip_has_a_visible_outline(logged_in):
-    # Le fond --muted ne se distingue pas du fond de page en mode clair : un filet dessine la pastille.
-    page = logged_in.client.get("/").text
-    assert any("var(--border)" in rule for rule in css_rules(page, "code"))
-
-
-def test_design_system_pages_load_nothing_from_outside(logged_in):
+def test_pages_load_nothing_from_outside(logged_in):
     pages = [
         logged_in.client.get("/").text,
         logged_in.post("/keys", {"label": "x"}).text,
@@ -552,7 +581,9 @@ def test_design_system_pages_load_nothing_from_outside(logged_in):
         # L'icône est un <link> et un <img> : ils ne pointent que vers un chemin de dictee, jamais vers un autre site.
         for url in re.findall(r'<(?:link|img)\b[^>]*\b(?:href|src)="([^"]*)"', page):
             assert url.startswith("/") and not url.startswith("//"), url
-        assert "@import" not in page and "url(" not in page
+        assert "@import" not in page
+        # La seule ressource que le style nomme est la police, servie par dictee.
+        assert re.findall(r"url\(([^)]*)\)", stylesheet(page)) == ['"/fonts/Figtree-Variable.ttf"']
 
 
 def test_the_security_policy_only_adds_fonts_of_the_same_origin_to_the_previous_one(logged_in):
@@ -617,21 +648,16 @@ def test_pages_declare_the_icon_and_show_it_before_the_title(logged_in):
     for page in (logged_in.client.get("/").text, logged_in.post("/logout").text):
         assert '<link rel="icon" href="/icon.svg" type="image/svg+xml">' in page
         assert '<link rel="apple-touch-icon" href="/apple-touch-icon.png">' in page
-        assert re.search(r'<h1[^>]*>\s*<img src="/icon\.svg" alt="" width="\d+" height="\d+">\s*Dictée\s*</h1>', page)
+        brand = r'<h1 class="brand brand-wordmark">\s*<img src="/icon\.svg" alt="" width="\d+" height="\d+">\s*Dictée\s*</h1>'
+        assert re.search(brand, page)
 
 
-def test_design_system_icon_has_an_outline_in_dark_mode(logged_in):
+def test_the_icon_has_an_outline_in_dark_mode(logged_in):
     # Son carré (#0a0a0a) se confond avec le fond sombre de la page : sans liseré, il ne reste qu'un D blanc isolé.
+    # Stack UI documente ce liseré sans le fournir : c'est un complément local de la page.
     page = logged_in.client.get("/").text
-    dark_rule = re.search(r"@media \(prefers-color-scheme: dark\) \{\s*\.brand img \{([^}]*)\}", page)
+    dark_rule = re.search(r"@media \(prefers-color-scheme: dark\) \{\s*\.brand-wordmark img \{([^}]*)\}", page)
     assert dark_rule is not None and "drop-shadow(" in dark_rule.group(1)
-
-
-def test_design_system_brand_title_is_uppercase_like_the_app_header(logged_in):
-    # Le titre reprend celui de l'en-tête de l'app Android : capitales espacées, en gras, à 16 px.
-    rule = " ".join(css_rules(logged_in.client.get("/").text, ".brand"))
-    for declaration in ("text-transform: uppercase", "letter-spacing: 0.06em", "font-size: 16px", "font-weight: 700"):
-        assert declaration in rule, declaration
 
 
 BUTTON_CLASSES = {
@@ -650,71 +676,89 @@ def button_classes(page: str, label: str) -> str | None:
     return found.group(1) if found else None
 
 
-def test_design_system_buttons_carry_the_broker_classes(logged_in):
+def test_buttons_carry_the_stack_ui_classes(logged_in):
     page = logged_in.post("/keys", {"label": "Android"}).text  # une clé existe, donc « Révoquer » est affiché
     for label, classes in BUTTON_CLASSES.items():
         assert button_classes(page, label) == classes, label
 
 
-def test_design_system_message_pages_link_with_a_primary_button(logged_in):
+def test_message_pages_link_with_a_primary_button(logged_in):
     refused = logged_in.client.post("/keys", data={"label": "x"})  # 403 : pas de jeton
     logged_out = logged_in.post("/logout").text
     for page, label in ((logged_out, "Se connecter"), (refused.text, "Retour à la page de configuration")):
         assert re.search(rf'<a [^>]*class="button button-primary"[^>]*>\s*{label}\s*</a>', page), label
 
 
-def test_design_system_buttons_are_border_box(logged_in):
-    # Sans cela, un lien .button (content-box par défaut) est plus haut qu'un <button> (border-box par défaut).
-    rule = re.search(r"(?m)^\s*\.button\s*\{([^}]*)\}", logged_in.client.get("/").text)  # ni .button-* ni .button:*
-    assert rule is not None and "box-sizing: border-box" in rule.group(1)
+def test_pages_are_a_single_column(logged_in):
+    for page in (logged_in.client.get("/").text, logged_in.post("/logout").text):
+        assert '<main class="column">' in page
 
 
-def test_design_system_notices_use_their_variants(logged_in, fake_nemo):
-    def has_success_variant(page: str) -> bool:
-        return re.search(r'class="[^"]*notice-success', page) is not None  # la feuille de style le nomme toujours
+def test_fields_use_the_stack_ui_input(logged_in):
+    page = logged_in.client.get("/").text
+    assert 'class="input"' in tag_of(page, "label")
+    # Le glossaire et les consignes sont du texte à structure fixe : ils prennent la variante à chasse fixe.
+    for name in ("glossary", "instructions"):
+        assert 'class="input input-mono"' in tag_of(page, name), name
+    assert re.search(r'<label for="label">\s*Libellé de la nouvelle clé\s*</label>', page)
 
+
+def test_code_is_marked_with_the_stack_ui_class(logged_in):
+    page = logged_in.post("/keys", {"label": "Android"}).text  # l'adresse de l'API, la clé nouvelle et le préfixe
+    codes = re.findall(r"<code\b([^>]*)>", page)
+    assert len(codes) >= 4 and all('class="code"' in attributes for attributes in codes)
+
+
+def test_notices_use_their_variants(logged_in, fake_nemo):
     saved = logged_in.client.get("/?saved=1").text
-    assert re.search(r'class="notice notice-success"[^>]*>\s*Modifications enregistrées', saved)
+    assert re.search(r'class="notice notice-success" role="status"[^>]*>\s*(?:<[^>]+>\s*)*Modifications enregistrées', saved)
     created = logged_in.post("/keys", {"label": "Android"}).text
-    assert 'class="notice" role="alert"' in created and not has_success_variant(created)
+    assert re.search(r'class="notice notice-warning" role="alert"', created)
+    assert "notice-success" not in re.sub(r"<style>.*?</style>", "", created, flags=re.S)
     logged_in.client.app.state.voices = None
     fake_nemo.error = NemoUnavailable("down")
     down = logged_in.client.get("/").text
-    assert re.search(r'class="notice"[^>]*>\s*La liste des voix', down) and not has_success_variant(down)
+    assert re.search(r'class="notice notice-warning"[^>]*>\s*(?:<[^>]+>\s*)*La liste des voix', down)
 
 
-def test_design_system_key_table_scrolls_on_its_own_and_marks_revoked_keys(logged_in):
+def test_key_table_scrolls_on_its_own_and_marks_revoked_keys(logged_in):
     page = logged_in.post("/keys", {"label": "x" * 100}).text  # 100 caractères : la limite des libellés
-    assert re.search(r'<div class="table-scroll">\s*<table class="data-table">', page)
+    assert re.search(r'<div class="table-scroll">\s*<table class="data-table data-table-compact">', page)
     key_id = re.search(r'action="/keys/(\d+)/revoke"', page).group(1)
     page = logged_in.post(f"/keys/{key_id}/revoke").text
-    assert re.search(r'class="status-badge status-retired"[^>]*>\s*révoquée le', page)
+    assert re.search(r'<span class="badge">\s*révoquée le', page)
     assert "Révoquer" not in page
 
 
-def css_rules(page: str, selector: str) -> list[str]:
-    """Corps des règles de la feuille de style dont la liste de sélecteurs contient exactement ce sélecteur."""
-    style = re.search(r"<style>(.*?)</style>", page, re.S).group(1)
-    style = re.sub(r"/\*.*?\*/", "", style, flags=re.S)  # un commentaire avant une règle ne s'ajoute pas à son sélecteur
-    return [
-        body
-        for selectors, body in re.findall(r"([^{}]+)\{([^}]*)\}", style)
-        if selector in [part.strip() for part in selectors.split(",")]
-    ]
-
-
-def test_design_system_key_table_rows_stay_on_one_line(logged_in):
+def test_voices_are_list_rows_that_keep_their_player(logged_in):
     page = logged_in.client.get("/").text
-    assert any("white-space: nowrap" in rule for rule in css_rules(page, ".data-table td"))
-    assert any("overflow-x: auto" in rule for rule in css_rules(page, ".table-scroll"))
-    # Le libellé fait exception : il se replie et casse une longue suite sans espace, dans une largeur bornée,
-    # et garde un plancher pour ne pas s'écraser sur la largeur de son en-tête.
-    label = " ".join(css_rules(page, ".data-table td:first-child"))
-    assert "white-space: normal" in label and "overflow-wrap: anywhere" in label
-    assert "max-width" in label and "min-width" in label
-    # Une clé du tableau reste d'un bloc ; celle de l'encart, hors tableau, garde le repli n'importe où.
-    assert any("overflow-wrap: normal" in rule for rule in css_rules(page, ".data-table code"))
-    assert any("overflow-wrap: anywhere" in rule for rule in css_rules(page, "code"))
+    rows = re.findall(r'<div class="list-row">(.*?)</div>', page, re.S)
+    assert len(rows) >= 2
+    for row in rows:
+        assert '<input type="radio" name="voice"' in row and "<audio controls" in row
+
+
+def test_empty_keys_say_so_in_muted_text(logged_in):
+    assert re.search(r'class="muted"[^>]*>\s*Aucune clé pour le moment', logged_in.client.get("/").text)
+
+
+def test_no_class_from_before_stack_ui_is_left(logged_in, fake_nemo):
+    key_page = logged_in.post("/keys", {"label": "Android"}).text
+    key_id = re.search(r"/keys/(\d+)/revoke", key_page).group(1)
+    revoked = logged_in.post(f"/keys/{key_id}/revoke").text
+    logged_in.client.app.state.voices = None
+    fake_nemo.error = NemoUnavailable("down")
+    pages = [
+        logged_in.client.get("/").text,
+        revoked,
+        logged_in.client.get("/?saved=1").text,
+        logged_in.post("/logout").text,
+    ]
+    for page in pages:
+        assert not classes_of(page) & OLD_CLASSES
+        css = stylesheet(page)
+        for name in OLD_CLASSES:
+            assert f".{name}" not in css, name
 
 
 # --- Garde anti-CSRF ---
