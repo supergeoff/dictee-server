@@ -1,7 +1,7 @@
 # Pages web : reprise du design system du MCP broker
 
 - **Date** : 5 novembre 2026
-- **Statut** : à valider par Geoff
+- **Statut** : remplacée par `2026-11-07-pages-stack-ui-design.md` (reprise de Stack UI, qui ajoute `font-src 'self'` à la politique de sécurité)
 - **Dépôt** : `supergeoff/dictee-server`, branche `feat/ds-broker-pages`
 - **Point de départ** : `main` au commit `0c00e00`
 
