@@ -12,17 +12,8 @@
    sécurité des pages n'en autorise pas), et la police Figtree vient de la route /fonts/ de l'application. #}
 {% include "stack-ui/stack-ui.css" %}
 
-/* Compléments propres à dictee : ce que Stack UI documente ou laisse à la page sans le fournir. */
-/* Stack UI aligne l'en-tête sur le haut ; la marque (32 px) et le bouton (44 px) se centrent l'un sur l'autre. */
-@media (min-width: 861px) {
-  .page-header { align-items: center; }
-}
-.stack > p { margin: 0; }
+/* Compléments propres à dictee : ce que Stack UI ne couvre pas. */
 audio { max-width: 100%; }
-/* Le carré noir de la marque se confond avec le fond sombre de la page : un liseré, qui suit sa forme, le dessine. */
-@media (prefers-color-scheme: dark) {
-  .brand-wordmark img { filter: drop-shadow(0 0 1px #ffffff99); }
-}
 </style>
 </head>
 <body>

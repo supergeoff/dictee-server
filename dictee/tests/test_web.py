@@ -520,7 +520,9 @@ def palettes(page: str) -> dict[str, dict[str, str]]:
     light = re.search(r':root, \[data-theme="light"\] \{(.*?)\n\}', css, re.S)
     dark = re.search(r"@media \(prefers-color-scheme: dark\) \{\s*:root:not\(\[data-theme\]\) \{(.*?)\n  \}", css, re.S)
     assert light is not None and dark is not None
-    return {"light": declarations(light.group(1)), "dark": declarations(dark.group(1))}
+    # Les primitives (échelle de gris, teintes) ne sont déclarées qu'une fois, avec le thème clair, et valent pour les deux.
+    primitives = declarations(light.group(1))
+    return {"light": primitives, "dark": {**primitives, **declarations(dark.group(1))}}
 
 
 def resolve(tokens: dict[str, str], name: str) -> str:
@@ -654,10 +656,26 @@ def test_pages_declare_the_icon_and_show_it_before_the_title(logged_in):
 
 def test_the_icon_has_an_outline_in_dark_mode(logged_in):
     # Son carré (#0a0a0a) se confond avec le fond sombre de la page : sans liseré, il ne reste qu'un D blanc isolé.
-    # Stack UI documente ce liseré sans le fournir : c'est un complément local de la page.
+    # Stack UI fournit ce liseré (pour le réglage du système comme pour `data-theme`) : la page ne le redéfinit pas.
+    css = re.sub(r"/\*.*?\*/", "", stylesheet(logged_in.client.get("/").text), flags=re.S)
+    outlines = re.findall(r"([^{}]*\.brand-wordmark img)\s*\{[^}]*drop-shadow\(", css)
+    assert [selector.strip() for selector in outlines] == [
+        '[data-theme="dark"] .brand-wordmark img',
+        ":root:not([data-theme]) .brand-wordmark img",
+    ]
+
+
+def test_page_headers_are_centered_by_stack_ui(logged_in):
+    for page in (logged_in.client.get("/").text, logged_in.post("/logout").text):
+        assert '<header class="page-header page-header-center">' in page
+
+
+def test_local_additions_are_only_what_stack_ui_does_not_cover(logged_in):
     page = logged_in.client.get("/").text
-    dark_rule = re.search(r"@media \(prefers-color-scheme: dark\) \{\s*\.brand-wordmark img \{([^}]*)\}", page)
-    assert dark_rule is not None and "drop-shadow(" in dark_rule.group(1)
+    local = stylesheet(page).split("/* Compléments propres à dictee")[1]
+    assert "audio { max-width: 100%; }" in local
+    for covered in ("drop-shadow", ".stack", ".page-header", "align-items"):
+        assert covered not in re.sub(r"/\*.*?\*/", "", local, flags=re.S), covered
 
 
 BUTTON_CLASSES = {
