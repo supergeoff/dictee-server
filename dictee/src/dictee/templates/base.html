@@ -33,9 +33,13 @@
   main { margin: 0 auto; max-width: 46rem; padding: 16px; }
   header { align-items: center; display: flex; justify-content: space-between; }
   h1 { font-size: 28px; font-weight: 650; }
-  /* La marque : l'icône (son carré incliné occupe 512 des 608 unités de sa boîte) puis le nom. */
-  .brand { align-items: center; display: flex; gap: 10px; }
-  .brand img { display: block; height: 36px; width: 36px; }
+  /* La marque reprend l'en-tête de l'app Android : l'icône de 32 px (son carré incliné occupe 512 des 608 unités de sa
+     boîte), puis le nom en capitales espacées, en gras, à 16 px. */
+  .brand {
+    align-items: center; display: flex; font-size: 16px; font-weight: 700; gap: 10px; letter-spacing: 0.06em;
+    line-height: 20px; margin: 12px 0; text-transform: uppercase;
+  }
+  .brand img { display: block; height: 32px; width: 32px; }
   /* En sombre, le carré (#0a0a0a) se confond avec le fond de la page : un liseré, qui suit sa forme, le dessine. */
   @media (prefers-color-scheme: dark) {
     .brand img { filter: drop-shadow(0 0 1px #ffffff99); }

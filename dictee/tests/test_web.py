@@ -574,7 +574,7 @@ def test_pages_declare_the_icon_and_show_it_before_the_title(logged_in):
     for page in (logged_in.client.get("/").text, logged_in.post("/logout").text):
         assert '<link rel="icon" href="/icon.svg" type="image/svg+xml">' in page
         assert '<link rel="apple-touch-icon" href="/apple-touch-icon.png">' in page
-        assert re.search(r'<h1[^>]*>\s*<img src="/icon\.svg" alt="" width="\d+" height="\d+">\s*dictee\s*</h1>', page)
+        assert re.search(r'<h1[^>]*>\s*<img src="/icon\.svg" alt="" width="\d+" height="\d+">\s*Dictée\s*</h1>', page)
 
 
 def test_design_system_icon_has_an_outline_in_dark_mode(logged_in):
@@ -582,6 +582,13 @@ def test_design_system_icon_has_an_outline_in_dark_mode(logged_in):
     page = logged_in.client.get("/").text
     dark_rule = re.search(r"@media \(prefers-color-scheme: dark\) \{\s*\.brand img \{([^}]*)\}", page)
     assert dark_rule is not None and "drop-shadow(" in dark_rule.group(1)
+
+
+def test_design_system_brand_title_is_uppercase_like_the_app_header(logged_in):
+    # Le titre reprend celui de l'en-tête de l'app Android : capitales espacées, en gras, à 16 px.
+    rule = " ".join(css_rules(logged_in.client.get("/").text, ".brand"))
+    for declaration in ("text-transform: uppercase", "letter-spacing: 0.06em", "font-size: 16px", "font-weight: 700"):
+        assert declaration in rule, declaration
 
 
 BUTTON_CLASSES = {
@@ -645,6 +652,7 @@ def test_design_system_key_table_scrolls_on_its_own_and_marks_revoked_keys(logge
 def css_rules(page: str, selector: str) -> list[str]:
     """Corps des règles de la feuille de style dont la liste de sélecteurs contient exactement ce sélecteur."""
     style = re.search(r"<style>(.*?)</style>", page, re.S).group(1)
+    style = re.sub(r"/\*.*?\*/", "", style, flags=re.S)  # un commentaire avant une règle ne s'ajoute pas à son sélecteur
     return [
         body
         for selectors, body in re.findall(r"([^{}]+)\{([^}]*)\}", style)
