@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>dictee</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <style>
   /* La palette et les composants viennent du design system du MCP broker. Le thème suit le système
      sans aucun script, puisque la politique de sécurité de la page n'en autorise pas. Le gris discret est un peu
@@ -31,6 +33,13 @@
   main { margin: 0 auto; max-width: 46rem; padding: 16px; }
   header { align-items: center; display: flex; justify-content: space-between; }
   h1 { font-size: 28px; font-weight: 650; }
+  /* La marque : l'icône (son carré incliné occupe 512 des 608 unités de sa boîte) puis le nom. */
+  .brand { align-items: center; display: flex; gap: 10px; }
+  .brand img { display: block; height: 36px; width: 36px; }
+  /* En sombre, le carré (#0a0a0a) se confond avec le fond de la page : un liseré, qui suit sa forme, le dessine. */
+  @media (prefers-color-scheme: dark) {
+    .brand img { filter: drop-shadow(0 0 1px #ffffff99); }
+  }
   h2 { border-top: 1px solid var(--border); font-size: 16px; font-weight: 650; margin-top: 2rem; padding-top: 1rem; }
   a { color: inherit; text-decoration: none; }
   button, input, select { font: inherit; }

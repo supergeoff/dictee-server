@@ -8,7 +8,9 @@ La session est le cookie signé de `SessionMiddleware` ; elle ne garde que `user
 distingue deux comptes ayant porté le même numéro après une remise à zéro de la base) et `csrf`. Chaque `POST` exige une
 session et le jeton anti-CSRF, présent dans chaque formulaire. Une clé nouvelle n'existe en clair que dans la réponse
 au `POST /keys` : elle n'est ni rangée dans la session, ni journalisée. Les réponses HTML ne sont jamais mises en
-cache et portent une politique de sécurité qui n'autorise ni script, ni image, ni ressource d'un autre site.
+cache et portent une politique de sécurité qui n'autorise aucun script ni aucune ressource d'un autre site : les
+images (l'icône) et les sons (l'aperçu des voix) viennent de dictee. L'icône se sert sans session, car le navigateur la
+demande aussi sur la page de connexion et sur les pages de refus.
 
 Le journal ne garde d'une connexion que le numéro du compte, jamais l'email, le nom, un jeton ni un réglage.
 """
@@ -20,6 +22,7 @@ import re
 import secrets
 import sqlite3
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from importlib.resources import files
 
 from authlib.integrations.starlette_client import OAuth
 from jinja2 import Environment, PackageLoader, StrictUndefined
@@ -53,11 +56,16 @@ MAX_KEY_ID = 2**63 - 1
 # Les pages portent une clé en clair après `POST /keys` : le navigateur ne doit rien en garder.
 PAGE_HEADERS = {
     "Content-Security-Policy": (
-        "default-src 'none'; style-src 'unsafe-inline'; media-src 'self'; form-action 'self'; "
+        "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; media-src 'self'; form-action 'self'; "
         "frame-ancestors 'none'; base-uri 'none'"
     ),
     "Cache-Control": "no-store",
 }
+# L'icône et sa version tactile (180 px sur fond plein, car iOS remplit en noir ce qui est transparent), tirée d'icon.svg.
+# Elles ne changent qu'avec une nouvelle image du serveur : le navigateur peut les garder un jour.
+ICON = files("dictee").joinpath("static/icon.svg").read_bytes()
+TOUCH_ICON = files("dictee").joinpath("static/apple-touch-icon.png").read_bytes()
+ICON_HEADERS = {"Cache-Control": "public, max-age=86400"}
 HOME_LINK = ("/", "Retour à la page de configuration")
 LOGIN_LINK = ("/login", "Se connecter")
 LOGIN_FAILED = "La connexion avec PocketID a échoué."
@@ -115,6 +123,14 @@ def _message(request: Request, status: int, message: str, link: tuple[str, str])
 
 async def handle_web_error(request: Request, exc: WebError) -> Response:
     return _message(request, exc.status, exc.message, exc.link)
+
+
+async def icon(request: Request) -> Response:
+    return Response(ICON, media_type="image/svg+xml", headers=ICON_HEADERS)
+
+
+async def touch_icon(request: Request) -> Response:
+    return Response(TOUCH_ICON, media_type="image/png", headers=ICON_HEADERS)
 
 
 def build_oauth(settings: Settings) -> OAuth:

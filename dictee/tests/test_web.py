@@ -9,6 +9,7 @@ import logging
 import re
 import socket
 import sqlite3
+import struct
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -34,7 +35,7 @@ from dictee.web import MAX_FORM_BYTES, PREVIEW_TEXT, PreviewCache, _mp3_response
 USERINFO = {"sub": "sub-1", "email": "a@example.org", "name": "A"}
 MP3_MAGIC = (b"ID3", b"\xff\xfb", b"\xff\xf3")
 CONTENT_SECURITY_POLICY = (
-    "default-src 'none'; style-src 'unsafe-inline'; media-src 'self'; form-action 'self'; "
+    "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; media-src 'self'; form-action 'self'; "
     "frame-ancestors 'none'; base-uri 'none'"
 )
 # Chaque route POST de la page, avec de quoi la soumettre : la garde du dernier test de ce fichier les compte.
@@ -541,8 +542,46 @@ def test_design_system_pages_load_nothing_from_outside(logged_in):
     ]
     for page in pages:
         assert "<script" not in page
-        assert not re.search(r"<(link|img|iframe|object|embed)\b", page)
+        assert not re.search(r"<(iframe|object|embed)\b", page)
+        # L'icône est un <link> et un <img> : ils ne pointent que vers un chemin de dictee, jamais vers un autre site.
+        for url in re.findall(r'<(?:link|img)\b[^>]*\b(?:href|src)="([^"]*)"', page):
+            assert url.startswith("/") and not url.startswith("//"), url
         assert "@import" not in page and "url(" not in page
+
+
+# --- Icône ---
+
+
+def test_the_icon_is_served_without_a_session_and_can_be_cached(client):
+    icon = client.get("/icon.svg")
+    assert icon.status_code == 200
+    assert icon.headers["content-type"].startswith("image/svg+xml")
+    assert icon.text.lstrip().startswith("<svg")
+    assert "max-age=" in icon.headers["cache-control"] and "no-store" not in icon.headers["cache-control"]
+
+
+def test_the_touch_icon_is_a_180_pixel_png_served_without_a_session(client):
+    icon = client.get("/apple-touch-icon.png")
+    assert icon.status_code == 200
+    assert icon.headers["content-type"] == "image/png"
+    assert icon.content[:8] == b"\x89PNG\r\n\x1a\n"
+    assert struct.unpack(">II", icon.content[16:24]) == (180, 180)  # largeur et hauteur de l'en-tête IHDR
+    assert "max-age=" in icon.headers["cache-control"] and "no-store" not in icon.headers["cache-control"]
+
+
+def test_pages_declare_the_icon_and_show_it_before_the_title(logged_in):
+    # La page de configuration et la page de message partagent le gabarit : les deux portent la marque.
+    for page in (logged_in.client.get("/").text, logged_in.post("/logout").text):
+        assert '<link rel="icon" href="/icon.svg" type="image/svg+xml">' in page
+        assert '<link rel="apple-touch-icon" href="/apple-touch-icon.png">' in page
+        assert re.search(r'<h1[^>]*>\s*<img src="/icon\.svg" alt="" width="\d+" height="\d+">\s*dictee\s*</h1>', page)
+
+
+def test_design_system_icon_has_an_outline_in_dark_mode(logged_in):
+    # Son carré (#0a0a0a) se confond avec le fond sombre de la page : sans liseré, il ne reste qu'un D blanc isolé.
+    page = logged_in.client.get("/").text
+    dark_rule = re.search(r"@media \(prefers-color-scheme: dark\) \{\s*\.brand img \{([^}]*)\}", page)
+    assert dark_rule is not None and "drop-shadow(" in dark_rule.group(1)
 
 
 BUTTON_CLASSES = {
