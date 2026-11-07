@@ -1,7 +1,7 @@
 # Compose de test local, autonome : `make integration` construit les images depuis le dépôt et publie les ports sur
 # 127.0.0.1. Le compose qui fait tourner dictee en production vit dans Dokploy, seule source des composes. Celui-ci en
 # reprend les services et les limites de mémoire. La version de NeMo-Speech.cpp n'y est pas écrite : elle vient de la
-# variable NEMO_VERSION, que `make integration` exige (NEMO_VERSION=0.3.0 make integration, avec la valeur du compose
+# variable NEMO_VERSION, que `make integration` exige (NEMO_VERSION=<version> make integration, avec la valeur du compose
 # de Dokploy).
 x-nemo-build: &nemo-build
   context: ./nemo

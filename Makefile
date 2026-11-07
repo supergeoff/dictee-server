@@ -7,14 +7,15 @@ COMPOSE_FILES = -f compose.integration.yaml
 .env:
 	sh integration/make-env.sh > .env
 
-# La version de NeMo-Speech.cpp n'est écrite nulle part dans ce dépôt : elle vient du compose de Dokploy, seule source.
-# On la donne à chaque lancement qui construit l'image : NEMO_VERSION=0.3.0 make integration.
-check-nemo-version:
-	@test -n "$(NEMO_VERSION)" || { echo "NEMO_VERSION est requise : la version du compose dictee de Dokploy (NEMO_VERSION=0.3.0 make integration)" >&2; exit 1; }
-
 # Démarre seulement models et nemo, sans dictee : pratique pour travailler sur les modèles ou sur NeMo seul.
 nemo-up: check-nemo-version .env
 	$(COMPOSE) $(COMPOSE_FILES) up -d --build models nemo
+
+# La version de NeMo-Speech.cpp n'est écrite nulle part dans ce dépôt : elle vient du compose de Dokploy, seule source.
+# On la donne à chaque lancement qui construit l'image : NEMO_VERSION=<version> make integration.
+# Le contrôle teste la variable d'environnement, celle que compose reçoit.
+check-nemo-version:
+	@test -n "$$NEMO_VERSION" || { echo "NEMO_VERSION est requise : la valeur de NEMO_VERSION dans les args du compose dictee de Dokploy (NEMO_VERSION=<version> make integration)" >&2; exit 1; }
 
 down:
 	$(COMPOSE) $(COMPOSE_FILES) down

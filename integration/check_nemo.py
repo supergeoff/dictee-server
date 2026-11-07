@@ -4,7 +4,7 @@
 # ///
 """Vérifications de la section 12 de la spec sur le vrai NeMo-Speech.cpp.
 
-Prérequis : `make nemo-up` (NeMo répond sur http://127.0.0.1:18001).
+Prérequis : `NEMO_VERSION=<version> make nemo-up` (NeMo répond sur http://127.0.0.1:18001).
 Usage : uv run --script integration/check_nemo.py [--only a,b,c] [--note note.wav]
 
 Chaque contrôle affiche une ligne `OK` ou `ÉCHEC`. Les relevés qui figent le protocole
