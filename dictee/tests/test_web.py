@@ -13,6 +13,7 @@ import struct
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib.resources import files
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlsplit
@@ -35,6 +36,11 @@ from dictee.web import MAX_FORM_BYTES, PREVIEW_TEXT, PreviewCache, _mp3_response
 USERINFO = {"sub": "sub-1", "email": "a@example.org", "name": "A"}
 MP3_MAGIC = (b"ID3", b"\xff\xfb", b"\xff\xf3")
 CONTENT_SECURITY_POLICY = (
+    "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; font-src 'self'; media-src 'self'; "
+    "form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+)
+# La politique d'avant la reprise de Stack UI : la nouvelle ne lui ajoute que `font-src 'self'`, pour la police Figtree.
+PREVIOUS_CONTENT_SECURITY_POLICY = (
     "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; media-src 'self'; form-action 'self'; "
     "frame-ancestors 'none'; base-uri 'none'"
 )
@@ -547,6 +553,43 @@ def test_design_system_pages_load_nothing_from_outside(logged_in):
         for url in re.findall(r'<(?:link|img)\b[^>]*\b(?:href|src)="([^"]*)"', page):
             assert url.startswith("/") and not url.startswith("//"), url
         assert "@import" not in page and "url(" not in page
+
+
+def test_the_security_policy_only_adds_fonts_of_the_same_origin_to_the_previous_one(logged_in):
+    def directives(policy: str) -> set[str]:
+        return {directive.strip() for directive in policy.split(";")}
+
+    page = logged_in.client.get("/")
+    assert directives(page.headers["content-security-policy"]) == directives(PREVIOUS_CONTENT_SECURITY_POLICY) | {
+        "font-src 'self'"
+    }
+
+
+# --- Police ---
+
+
+def test_the_font_is_served_without_a_session_and_can_be_cached(client):
+    font = client.get("/fonts/Figtree-Variable.ttf")
+    assert font.status_code == 200
+    assert font.headers["content-type"] == "font/ttf"
+    assert "max-age=" in font.headers["cache-control"] and "no-store" not in font.headers["cache-control"]
+    assert font.content == files("dictee").joinpath("static/fonts/Figtree-Variable.ttf").read_bytes()
+    assert font.content[:4] == b"\x00\x01\x00\x00"  # signature d'un fichier TrueType
+    assert len(font.content) > 10_000
+
+
+def test_the_font_licence_travels_with_the_font():
+    assert "SIL OPEN FONT LICENSE" in files("dictee").joinpath("static/fonts/OFL.txt").read_text()
+
+
+def test_the_vendored_stack_ui_names_its_version_and_points_the_font_at_the_application():
+    folder = files("dictee").joinpath("templates/stack-ui")
+    version = folder.joinpath("VERSION").read_text().strip()
+    css = folder.joinpath("stack-ui.css").read_text()
+    assert re.fullmatch(r"[0-9a-f]{7,40}", version)
+    assert version in css.splitlines()[0]  # l'en-tête dit de quel commit la copie vient
+    assert 'url("/fonts/Figtree-Variable.ttf")' in css and 'url("fonts/' not in css
+    assert "{{" not in css and "{%" not in css and "{#" not in css  # Jinja l'inclut sans le lire comme un gabarit
 
 
 # --- Icône ---
