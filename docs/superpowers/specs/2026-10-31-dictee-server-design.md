@@ -66,7 +66,7 @@ Volumes : `dictee-data` porte la base SQLite de dictee et, le temps d'une tâche
 
 `nemo/Dockerfile` part d'une image Debian slim à tag explicite. Il reçoit `NEMO_VERSION` en argument de build, télécharge l'archive `nemo-speech-${NEMO_VERSION}-linux-x86_64-cpu.tar.gz` de la release GitHub de NVIDIA et compare son empreinte SHA-256 avec celle que GitHub publie pour cette pièce jointe. Une empreinte différente arrête le build. L'image contient `curl`, dont `nemo-speech pull` a besoin, et tourne sous un utilisateur non root.
 
-Le compose de Dokploy écrit la version une seule fois, dans `args` du bloc `x-nemo-build` (`NEMO_VERSION: "0.3.0"`), que `models` et `nemo` reprennent par une ancre YAML : les deux images ne peuvent pas partir de versions différentes. C'est cette ligne que l'updater réécrira quand STK-43 sera fait. `compose.integration.yaml` la répète pour les tests : avant de lancer `make integration`, on l'aligne sur celle du compose de Dokploy si elle a changé.
+Le compose de Dokploy écrit la version une seule fois, dans `args` du bloc `x-nemo-build` (`NEMO_VERSION: "0.3.0"`), que `models` et `nemo` reprennent par une ancre YAML : les deux images ne peuvent pas partir de versions différentes. C'est cette ligne que l'updater réécrira quand STK-43 sera fait. `compose.integration.yaml` ne la répète pas : `make integration` la reçoit de la variable `NEMO_VERSION`, avec la valeur du compose de Dokploy.
 
 ### 4.3 Modèles
 

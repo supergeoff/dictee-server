@@ -40,7 +40,7 @@ def env_value(name: str) -> str:
             key, _, value = line.partition("=")
             if key.strip() == name:
                 return value.strip()
-    raise RuntimeError(f"{name} absente de l'environnement et de .env (lancer `make nemo-up` ou `make integration`)")
+    raise RuntimeError(f"{name} absente de l'environnement et de .env (lancer `NEMO_VERSION=<version> make nemo-up` ou `make integration`)")
 
 
 def api_key() -> str:

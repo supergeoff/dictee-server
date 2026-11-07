@@ -15,7 +15,7 @@ Le `.env` porte les variables suivantes, dont la spec donne le rôle (section 4.
 | Commande | Effet |
 |---|---|
 | `make test` | Lance `pytest` dans une image Docker, avec un faux NeMo et un faux LiteLLM, sans réseau. |
-| `make integration` | Construit et lance la stack complète avec les vrais modèles (le premier lancement les télécharge), attend `/health`, puis joue `integration/run.py`. Elle demande `uv`, laisse la stack démarrée et ne tourne pas dans la CI. |
+| `make integration` | Construit et lance la stack complète avec les vrais modèles (le premier lancement les télécharge), attend `/health`, puis joue `integration/run.py`. Elle demande `uv` et la variable `NEMO_VERSION`, la version de NeMo-Speech.cpp du compose de Dokploy (`NEMO_VERSION=<version> make integration`), laisse la stack démarrée et ne tourne pas dans la CI. |
 | `make down` | Arrête la stack ; les volumes restent. |
 
 ## Utiliser l'API
