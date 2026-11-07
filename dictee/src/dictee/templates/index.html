@@ -2,7 +2,7 @@
 {% block content %}
 {% macro csrf_field() %}<input type="hidden" name="csrf" value="{{ csrf }}">{% endmacro %}
 <header>
-  <h1 class="brand"><img src="/icon.svg" alt="" width="36" height="36">dictee</h1>
+  <h1 class="brand"><img src="/icon.svg" alt="" width="32" height="32">Dictée</h1>
   <form method="post" action="/logout">{{ csrf_field() }}<button class="button button-ghost" type="submit">Se déconnecter</button></form>
 </header>
 {% if saved %}
