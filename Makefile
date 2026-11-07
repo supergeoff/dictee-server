@@ -2,13 +2,18 @@
 COMPOSE ?= $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
 COMPOSE_FILES = -f compose.integration.yaml
 
-.PHONY: down integration nemo-up test
+.PHONY: check-nemo-version down integration nemo-up test
 
 .env:
 	sh integration/make-env.sh > .env
 
+# La version de NeMo-Speech.cpp n'est écrite nulle part dans ce dépôt : elle vient du compose de Dokploy, seule source.
+# On la donne à chaque lancement qui construit l'image : NEMO_VERSION=0.3.0 make integration.
+check-nemo-version:
+	@test -n "$(NEMO_VERSION)" || { echo "NEMO_VERSION est requise : la version du compose dictee de Dokploy (NEMO_VERSION=0.3.0 make integration)" >&2; exit 1; }
+
 # Démarre seulement models et nemo, sans dictee : pratique pour travailler sur les modèles ou sur NeMo seul.
-nemo-up: .env
+nemo-up: check-nemo-version .env
 	$(COMPOSE) $(COMPOSE_FILES) up -d --build models nemo
 
 down:
@@ -24,7 +29,7 @@ test:
 # Lance la stack complète avec les vrais modèles, attend /health (300 s au plus), puis joue integration/run.py.
 # La stack reste démarrée à la fin : `make down` l'arrête. Le script reçoit le binaire compose du Makefile.
 # Pour rejouer un seul contrôle sur la stack démarrée : uv run --script integration/run.py --only hangup (--help).
-integration: .env
+integration: check-nemo-version .env
 	$(COMPOSE) $(COMPOSE_FILES) up -d --build
 	@echo "Attente de dictee sur /health (300 s au plus)..."
 	@waited=0; \

@@ -9,7 +9,7 @@ Ce dépôt porte dictee, le point d'entrée audio de la stack de Geoff, et l'ima
 - Rien de personnel dans le dépôt, qui est public : ni glossaire, ni consignes propres à quelqu'un, ni email. Les valeurs par défaut restent neutres, et chacun règle son espace sur la page.
 - Aucun secret dans le dépôt. Le `.env` reste dans Dokploy.
 - dictee garde l'audio d'une tâche jusqu'à sa fin et son texte 24 heures après, et ses journaux n'en contiennent jamais.
-- Les versions sont des tags explicites. La version de NeMo-Speech.cpp est un argument de build du compose de Dokploy, et le dépôt ne la répète que dans `compose.integration.yaml` : avant de lancer `make integration`, on l'aligne sur celle du compose de Dokploy si elle a changé.
+- Les versions sont des tags explicites. La version de NeMo-Speech.cpp est un argument de build du compose de Dokploy, et le dépôt ne l'écrit nulle part : `make integration` la reçoit de la variable `NEMO_VERSION` (`NEMO_VERSION=0.3.0 make integration`). L'updater de dokployconfig peut la changer dans Dokploy : on relit alors la valeur du compose avant de lancer `make integration`.
 
 ## Méthode
 
