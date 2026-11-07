@@ -154,6 +154,7 @@ Le WAV décodé vit sur le disque, dans le dossier `tasks` à côté de la base 
 | `GET /` | Page de configuration |
 | `GET /login`, `GET /auth/callback`, `POST /logout` | Connexion PocketID |
 | `GET /icon.svg`, `GET /apple-touch-icon.png` | Icône de dictee (onglet, écran d'accueil, en-tête des pages), servie sans session |
+| `GET /fonts/Figtree-Variable.ttf` | Police des pages (design system Stack UI), servie sans session |
 
 Les routes des tâches et de la dictée en direct demandent la même clé que les autres routes `/v1` (section 5.4).
 

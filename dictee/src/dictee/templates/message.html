@@ -1,6 +1,10 @@
 {% extends "base.html" %}
 {% block content %}
-<h1 class="brand"><img src="/icon.svg" alt="" width="32" height="32">Dictée</h1>
-<p>{{ message }}</p>
-<p><a class="button button-primary" href="{{ link_url }}">{{ link_text }}</a></p>
+<header class="page-header page-header-center">
+  <h1 class="brand brand-wordmark"><img src="/icon.svg" alt="" width="32" height="32">Dictée</h1>
+</header>
+<section class="card stack">
+  <p>{{ message }}</p>
+  <div class="actions"><a class="button button-primary" href="{{ link_url }}">{{ link_text }}</a></div>
+</section>
 {% endblock %}
