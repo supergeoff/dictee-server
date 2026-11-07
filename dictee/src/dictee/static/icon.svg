@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-48 -48 608 608">
+  <!-- carré de fond incliné : sa rotation se fait autour de son centre (256, 256), qui reste celui de la viewBox -->
+  <g transform="rotate(-10 256 256)">
+    <rect width="512" height="512" rx="110" fill="#0a0a0a"/>
+  </g>
+  <!-- D droit, barres rattachées. Son encombrement va de 112 à 400 en x et de 96 à 416 en y : centre (256, 256).
+       Les deux barres (218 à 244, puis 268 à 294) sont centrées sur l'axe horizontal du D, y = 256. -->
+  <path fill="#ffffff" fill-rule="evenodd" d="M112 96 h128 a160 160 0 0 1 0 320 H112 z
+    M176 176 h56 a80 80 0 0 1 0 160 h-56 z"/>
+  <rect x="176" y="218" width="74"  height="26" fill="#ffffff"/>
+  <rect x="176" y="268" width="100" height="26" fill="#ffffff"/>
+</svg>
