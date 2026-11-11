@@ -12,6 +12,7 @@ from starlette.responses import JSONResponse
 from dictee.auth import require_caller
 from dictee.errors import ApiError
 from dictee.formats import render_body
+from dictee.modes import RESPONSE_FORMATS, Mode, unsupported_format
 from dictee.taskstore import TaskRecord, TaskStatus
 
 # Statut HTTP et type d'erreur de l'API selon le code d'échec d'une tâche. Tout autre code (`server_error`,
@@ -42,16 +43,17 @@ def task_error(task: TaskRecord) -> ApiError:
     return ApiError(status, task.error_message, type=error_type, code=task.error_code)
 
 
-def task_object(task: TaskRecord) -> dict:
-    """L'objet tâche des routes de lecture et d'annulation (section 6.3 de la spec).
-
-    `duration` et `progress` sont arrondis au millième. `output` vaut `null` jusqu'à la réussite de la tâche, puis c'est
-    la réponse rendue dans le `response_format` et les granularités de la création. `error` vaut `null` sauf pour une
-    tâche en échec.
-    """
+def task_object(
+    task: TaskRecord, *, response_format: str | None = None, granularities: frozenset[str] | None = None
+) -> dict:
+    """L'objet tâche, rendu selon la requête ou, par défaut, les réglages enregistrés à sa création."""
     output = None
     if task.status is TaskStatus.COMPLETED and task.result is not None:
-        output = render_body(task.result.transcript(), task.response_format, granularities=task.granularities)
+        output = render_body(
+            task.result.transcript(),
+            task.response_format if response_format is None else response_format,
+            granularities=task.granularities if granularities is None else granularities,
+        )
     error = None
     if task.status is TaskStatus.FAILED:
         error = {"code": task.error_code, "message": task.error_message}
@@ -81,8 +83,28 @@ def _visible_task(request: Request) -> TaskRecord:
 
 
 async def get_task(request: Request) -> JSONResponse:
-    """`GET /v1/audio/transcriptions/{task_id}` : l'objet de la tâche."""
-    return JSONResponse(task_object(_visible_task(request)))
+    """`GET /v1/audio/transcriptions/{task_id}` : l'objet de la tâche, au format demandé ou à son format initial."""
+    task = _visible_task(request)
+    query = request.query_params
+    response_format = query.get("response_format")
+    if response_format is not None:
+        if response_format not in RESPONSE_FORMATS:
+            raise unsupported_format(response_format)
+        if (task.params.mode is Mode.RAW and response_format == "diarized_json") or (
+            task.params.mode is Mode.CLEAN and response_format not in ("json", "text")
+        ):
+            raise ApiError(
+                400,
+                "The requested format is incompatible with the task's processing mode.",
+                param="response_format",
+                code="incompatible_response_format",
+            )
+    values = [*query.getlist("timestamp_granularities[]"), *query.getlist("timestamp_granularities")]
+    effective_format = task.response_format if response_format is None else response_format
+    if values and (effective_format != "verbose_json" or set(values) - {"word", "segment"}):
+        raise ApiError(400, "Unsupported timestamp granularities.", param="timestamp_granularities")
+    granularities = frozenset(values) if values else (frozenset({"segment"}) if response_format is not None else None)
+    return JSONResponse(task_object(task, response_format=response_format, granularities=granularities))
 
 
 async def cancel_task(request: Request) -> JSONResponse:
