@@ -1,6 +1,6 @@
 # Plan de correction du contrat de transcription
 
-> **Pour l'exécution :** utiliser le skill `executing-plans` tâche par tâche. Les cases suivent l'avancement de l'exécution.
+> Ce plan est conservé comme document historique après la livraison. Les cases reproduisent le plan initial et ne constituent pas un suivi de l'exécution.
 
 **Objectif :** rendre un VTT à dictee-app même lorsque son envoi rejoint une tâche créée dans un autre format, sans retranscrire l'audio.
 
