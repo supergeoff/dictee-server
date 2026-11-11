@@ -55,11 +55,11 @@ Avec `background=true`, dictee répond tout de suite avec l'objet de la tâche, 
 # Lancer la tâche : la réponse porte son identifiant, `trn_…`.
 curl https://<adresse>/v1/audio/transcriptions \
   -H "Authorization: Bearer dk_…" \
-  -F file=@reunion.m4a -F model=dictee-diarize -F response_format=diarized_json \
+  -F file=@reunion.mp3 -F model=dictee-diarize -F response_format=vtt \
   -F background=true
 
-# Lire son état et, une fois terminée, son résultat.
-curl https://<adresse>/v1/audio/transcriptions/trn_… -H "Authorization: Bearer dk_…"
+# Lire son état et, une fois terminée, son résultat VTT, même si la tâche a d'abord été créée en JSON.
+curl 'https://<adresse>/v1/audio/transcriptions/trn_…?response_format=vtt' -H "Authorization: Bearer dk_…"
 
 # L'annuler.
 curl -X POST https://<adresse>/v1/audio/transcriptions/trn_…/cancel -H "Authorization: Bearer dk_…"
@@ -69,11 +69,15 @@ L'objet de la tâche donne :
 
 - `status`, qui vaut `queued` (en file), `in_progress` (en cours), `completed` (réussie), `failed` (en échec) ou `cancelled` (annulée) ;
 - `progress`, de 0 à 1 : la part des morceaux traités, ou la part de l'audio envoyée à NeMo pour une réunion ;
-- `output`, une fois la tâche réussie : la réponse dans le `response_format` demandé à la création, un objet JSON pour `json`, `verbose_json` et `diarized_json`, un texte pour `text`, `srt` et `vtt` ;
+- `output`, une fois la tâche réussie : la réponse dans le format demandé par l'envoi ou le GET, un objet JSON pour `json`, `verbose_json` et `diarized_json`, un texte pour `text`, `srt` et `vtt` ; le VTT avec locuteurs porte des balises comme `<v A>` ;
 - `error`, pour une tâche en échec : un `code` et un `message` ;
 - `created_at`, `completed_at` et `expires_at`, des dates en secondes Unix, ainsi que `duration`, la durée de l'audio en secondes.
 
-L'annulation est sans effet sur une tâche déjà finie, et la répéter ne change rien. Une tâche n'est visible que de son propriétaire : pour tout autre appelant, comme pour un identifiant inconnu ou effacé, la réponse est 404.
+Le POST en arrière-plan rend `output` dans le format demandé par cet envoi, même s'il rejoint une tâche déjà terminée. Le GET accepte `response_format` pour choisir le format de sa réponse ; sans ce paramètre, il garde le format demandé à la création de la tâche. Le changement de format ne modifie pas la tâche et ne relance pas la transcription.
+
+Une lecture ne refait pas le traitement : une tâche brute refuse `diarized_json`, et une tâche reformulée n'accepte que `json` et `text`. Une tâche avec locuteurs accepte tous les formats. Une demande incompatible reçoit une erreur 400 `incompatible_response_format`. Pour `verbose_json`, le GET accepte `timestamp_granularities[]=word` et `timestamp_granularities[]=segment`, seuls ou ensemble. Sans granularité, un format explicitement demandé utilise `segment` ; sans aucune option, les granularités de création restent utilisées. Une granularité inconnue ou demandée pour un autre format est refusée.
+
+L'annulation arrête la tâche partagée par tous les envois qui l'ont rejointe. Elle est sans effet sur une tâche déjà finie, et la répéter ne change rien. Une tâche n'est visible que de son propriétaire : pour tout autre appelant, comme pour un identifiant inconnu ou effacé, la réponse est 404.
 
 Une tâche survit à un redémarrage de dictee. Une tâche en morceaux reprend au premier morceau non terminé, et une réunion repart du début. Quand NeMo ne répond pas pendant une tâche, dictee attend son retour et réessaie trois fois au plus, puis la tâche passe en `failed`. Un fichier renvoyé identique (même compte, mêmes octets, même langue, même mode, même glossaire et même force de glossaire, plus les mêmes consignes de reformulation pour `dictee-clean`) rejoint la tâche en file ou en cours, et reçoit le résultat d'une tâche réussie sans retraitement. C'est le mode qui compte et non le nom du modèle : deux noms de modèle qui donnent le même mode rejoignent la même tâche. Une tâche en échec ou annulée ne se rejoint pas, pas plus qu'une tâche `dictee-clean` dont la reformulation s'est repliée sur le texte brut parce que le LLM n'a pas répondu ou que sa réponse a été écartée ; l'envoi crée alors une nouvelle tâche.
 
