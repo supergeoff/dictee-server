@@ -273,9 +273,13 @@ Une transcription de fichier sans `stream` crée une tâche, ou en rejoint une i
 - `duration` est la durée de l'audio, en secondes.
 - `progress` va de 0 à 1 : c'est la part des morceaux traités pour un fichier entier, et la part de l'audio envoyée à NeMo pour une réunion.
 - `error` vaut `{"code", "message"}` pour une tâche en échec, et `null` sinon. Le code est `overloaded`, `upstream_error`, `interrupted`, ou `server_error` pour une panne imprévue (section 5.5).
-- `output` est toujours présent et vaut `null` tant que la tâche n'a pas réussi. Une fois la tâche réussie, c'est la réponse rendue dans le `response_format` et les granularités de la requête qui a créé la tâche, même quand une requête identique la rejoint ensuite : un objet pour `json`, `verbose_json` et `diarized_json`, une chaîne pour `text`, `srt` et `vtt`.
+- `output` est toujours présent et vaut `null` tant que la tâche n'a pas réussi. Une fois la tâche réussie, c'est un objet pour `json`, `verbose_json` et `diarized_json`, ou une chaîne pour `text`, `srt` et `vtt`. Le VTT d'une tâche avec locuteurs porte des balises de voix comme `<v A>`.
 
-L'annulation arrête la tâche, efface son audio et rend l'objet au statut `cancelled`. Elle est idempotente et sans effet sur une tâche déjà finie, que l'objet rend telle qu'elle est.
+Le POST en arrière-plan rend `output` dans le format et les granularités de sa propre requête, même lorsqu'il rejoint une tâche déjà finie. Le GET accepte `response_format` et, pour `verbose_json`, `timestamp_granularities[]=word` et `timestamp_granularities[]=segment` répétés. Sans option, le GET garde le format et les granularités de création ; avec un format explicite et sans granularité, il prend `segment`. Des granularités inconnues ou demandées pour un autre format reçoivent une erreur 400. Les choix de rendu ne modifient pas la tâche et ne relancent pas la transcription.
+
+Une lecture ne modifie pas le traitement effectué. Une tâche brute refuse `diarized_json`, une tâche reformulée n'accepte que `json` et `text`, et une tâche avec locuteurs accepte tous les formats. Une combinaison incompatible reçoit HTTP 400 `incompatible_response_format`.
+
+L'annulation arrête la tâche partagée par tous les envois qui l'ont rejointe, efface son audio et rend l'objet au statut `cancelled`. Elle est idempotente et sans effet sur une tâche déjà finie, que l'objet rend telle qu'elle est.
 
 Une tâche n'est visible que de son propriétaire, le compte que désigne la clé (le compte par défaut pour la clé de service d'Open WebUI sans email connu). Pour tout autre appelant, l'identifiant répond 404, comme un identifiant inconnu ou effacé.
 

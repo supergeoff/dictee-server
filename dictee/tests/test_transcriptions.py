@@ -1349,6 +1349,32 @@ def test_an_identical_upload_joins_the_running_task(ask, transcriptions_client, 
     assert len([call for call in fake_nemo.calls if "chunk" in call]) == 1
 
 
+def test_background_rejoin_renders_requested_vtt_without_transcribing_again(ask, fake_nemo):
+    first = ask(model="dictee-diarize", response_format="json").json()
+    assert first["text"]
+    calls = len(fake_nemo.calls)
+    joined = ask(model="dictee-diarize", response_format="vtt", background="true").json()
+    assert joined["status"] == "completed"
+    assert joined["output"].startswith("WEBVTT\n")
+    assert "<v A>" in joined["output"]
+    assert len(fake_nemo.calls) == calls
+
+
+def test_background_rejoin_vtt_while_running(ask, transcriptions_client, fake_nemo, service_headers):
+    fake_nemo.release = anyio.Event()
+    first = ask(model="dictee-diarize", response_format="json", background="true").json()
+    joined = ask(model="dictee-diarize", response_format="vtt", background="true").json()
+    assert joined["id"] == first["id"]
+    assert joined["status"] in ("queued", "in_progress") and joined["output"] is None
+    release(transcriptions_client, fake_nemo)
+    assert poll_task(transcriptions_client, service_headers, first["id"])["status"] == "completed"
+    vtt = transcriptions_client.get(
+        f"{URL}/{first['id']}", headers=service_headers, params={"response_format": "vtt"}
+    ).json()["output"]
+    assert vtt.startswith("WEBVTT\n") and "<v A>" in vtt and "<v B>" in vtt
+    assert len([call for call in fake_nemo.calls if call.get("speakers")]) == 1
+
+
 def test_an_identical_upload_gets_the_finished_result_without_nemo(ask, fake_nemo):
     ask()
     calls = len(fake_nemo.calls)

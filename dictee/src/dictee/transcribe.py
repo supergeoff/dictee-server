@@ -484,7 +484,7 @@ async def _handle(request: Request, trace: Trace) -> Response:
     trace.task = task.id
     trace.audio_s = task.duration
     if params.background:
-        return JSONResponse(task_object(task))
+        return JSONResponse(task_object(task, response_format=params.response_format, granularities=params.granularities))
     # `wait` n'est jamais réveillé après l'arrêt du runner : la garde du client qui raccroche la borne. Un client parti
     # laisse la tâche aller à son terme.
     finished = await run_unless_disconnected(request, state.runner.wait(task.id))

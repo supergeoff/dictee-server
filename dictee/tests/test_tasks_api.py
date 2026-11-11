@@ -1,12 +1,14 @@
 """Objet tâche, lecture et annulation d'une tâche de transcription."""
 
 import time
+from dataclasses import replace
 
 import pytest
 from conftest import personal_headers
-from taskdata import NOW, RESULT, make
+from taskdata import NOW, RAW, RESULT, make
 
 from dictee.errors import ApiError
+from dictee.modes import Mode
 from dictee.tasks_api import task_error, task_not_found, task_object
 from dictee.taskstore import TaskStatus
 
@@ -133,6 +135,103 @@ def test_the_read_gives_the_object_of_the_task(transcriptions_client, service_he
     done = store.complete(make(store, owner=None, now=now).id, RESULT, now, 86_400)
     response = transcriptions_client.get(f"/v1/audio/transcriptions/{done.id}", headers=service_headers)
     assert (response.status_code, response.json()) == (200, task_object(done))
+
+
+def test_get_vtt_renders_diarized_task_without_changing_its_default(transcriptions_client, service_headers):
+    store, now = app_store(transcriptions_client), int(time.time())
+    params = replace(RAW, mode=Mode.DIARIZE)
+    task = make(store, owner=None, params=params, response_format="json", now=now)
+    done = store.complete(task.id, RESULT, now, 86_400)
+    url = f"/v1/audio/transcriptions/{done.id}"
+    response = transcriptions_client.get(url, headers=service_headers, params={"response_format": "vtt"})
+    assert response.status_code == 200
+    assert response.json()["output"].startswith("WEBVTT\n")
+    assert "<v A>" in response.json()["output"] and "<v B>" in response.json()["output"]
+    assert isinstance(transcriptions_client.get(url, headers=service_headers).json()["output"], dict)
+    assert store.get(done.id).response_format == "json"
+
+
+def test_get_alternate_formats_keeps_stored_settings(transcriptions_client, service_headers):
+    store, now = app_store(transcriptions_client), int(time.time())
+    task = make(store, owner=None, params=replace(RAW, mode=Mode.DIARIZE), now=now)
+    done = store.complete(task.id, RESULT, now, 86_400)
+    url = f"/v1/audio/transcriptions/{done.id}"
+    for fmt in ("json", "vtt", "json"):
+        body = transcriptions_client.get(url, headers=service_headers, params={"response_format": fmt}).json()
+        assert body["id"] == done.id and body["expires_at"] == done.expires_at
+        assert isinstance(body["output"], dict if fmt == "json" else str)
+    saved = store.get(done.id)
+    assert (saved.response_format, saved.granularities) == ("json", frozenset({"segment"}))
+
+
+def test_get_rejects_formats_incompatible_with_processing(transcriptions_client, service_headers):
+    store, now = app_store(transcriptions_client), int(time.time())
+    raw = make(store, owner=None, now=now)
+    clean = make(store, owner=None, params=replace(raw.params, mode=Mode.CLEAN), now=now)
+    for task, bad, good in ((raw, "diarized_json", "vtt"), (clean, "vtt", "text")):
+        store.complete(task.id, RESULT, now, 86_400)
+        url = f"/v1/audio/transcriptions/{task.id}"
+        response = transcriptions_client.get(url, headers=service_headers, params={"response_format": bad})
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "incompatible_response_format"
+        assert transcriptions_client.get(url, headers=service_headers, params={"response_format": good}).status_code == 200
+
+
+def test_get_verbose_json_granularities(transcriptions_client, service_headers):
+    store, now = app_store(transcriptions_client), int(time.time())
+    task = make(store, owner=None, response_format="verbose_json", granularities=frozenset({"word"}), now=now)
+    store.complete(task.id, RESULT, now, 86_400)
+    url = f"/v1/audio/transcriptions/{task.id}"
+    words = transcriptions_client.get(url, headers=service_headers, params={
+        "response_format": "verbose_json", "timestamp_granularities[]": "word"
+    }).json()["output"]
+    segments = transcriptions_client.get(url, headers=service_headers, params={
+        "response_format": "verbose_json", "timestamp_granularities[]": "segment"
+    }).json()["output"]
+    default = transcriptions_client.get(url, headers=service_headers).json()["output"]
+    assert "words" in words and "segments" not in words
+    assert "segments" in segments and "words" not in segments
+    assert "words" in default and "segments" not in default
+
+
+def test_get_options_validate_without_disclosing_task(transcriptions_client, service_headers, db):
+    store, now = app_store(transcriptions_client), int(time.time())
+    owner_headers, owner = personal_headers(db, "owner@example.test")
+    other_headers, _ = personal_headers(db, "other@example.test")
+    task = make(store, owner=owner, now=now)
+    store.complete(task.id, RESULT, now, 86_400)
+    url = f"/v1/audio/transcriptions/{task.id}"
+    assert transcriptions_client.get(url, headers=owner_headers, params={"response_format": "bad"}).status_code == 400
+    assert transcriptions_client.get(url, headers=owner_headers, params={
+        "response_format": "verbose_json", "timestamp_granularities[]": "bad"
+    }).status_code == 400
+    assert transcriptions_client.get(url, headers=owner_headers, params={
+        "response_format": "vtt", "timestamp_granularities[]": "word"
+    }).status_code == 400
+    assert transcriptions_client.get(url, headers=other_headers, params={"response_format": "bad"}).status_code == 404
+    assert transcriptions_client.get("/v1/audio/transcriptions/trn_unknown", headers=owner_headers,
+                                     params={"response_format": "bad"}).status_code == 404
+    expired = make(store, owner=owner, now=NOW)
+    store.complete(expired.id, RESULT, NOW, 60)
+    assert transcriptions_client.get(f"/v1/audio/transcriptions/{expired.id}", headers=owner_headers,
+                                     params={"response_format": "bad"}).status_code == 404
+    assert transcriptions_client.get(url, params={"response_format": "bad"}).status_code == 401
+
+
+def test_get_vtt_keeps_unfinished_and_terminal_states(transcriptions_client, service_headers):
+    store, now = app_store(transcriptions_client), int(time.time())
+    params = replace(RAW, mode=Mode.DIARIZE)
+    queued = make(store, owner=None, params=params, now=now)
+    failed = make(store, owner=None, params=params, now=now)
+    cancelled = make(store, owner=None, params=params, now=now)
+    store.fail(failed.id, "upstream_error", "test failure", now, 86_400)
+    store.cancel(cancelled.id, now, 86_400)
+    for task, expected in ((queued, "queued"), (failed, "failed"), (cancelled, "cancelled")):
+        body = transcriptions_client.get(f"/v1/audio/transcriptions/{task.id}", headers=service_headers,
+                                        params={"response_format": "vtt"}).json()
+        assert body["status"] == expected and body["output"] is None
+        if expected == "failed":
+            assert body["error"] == {"code": "upstream_error", "message": "test failure"}
 
 
 def test_another_caller_gets_the_same_404_as_an_unknown_id(transcriptions_client, db):
