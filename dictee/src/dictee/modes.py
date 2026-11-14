@@ -8,7 +8,6 @@ from dictee.errors import ApiError
 MODELS = ("dictee", "dictee-clean", "dictee-diarize")
 RESPONSE_FORMATS = ("json", "text", "srt", "vtt", "verbose_json", "diarized_json")
 
-DEFAULT_LANGUAGE = "fr"
 # Une langue absente ou `auto` : NeMo détecte la langue. La réponse la dit alors `und`, le code ISO d'une langue
 # indéterminée, car NeMo 0.3.0 ne rapporte pas celle qu'il a détectée.
 AUTO_LANGUAGE = "auto"

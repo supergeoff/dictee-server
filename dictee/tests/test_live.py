@@ -89,6 +89,34 @@ def test_the_session_in_force_reaches_nemo(live_client, fake_nemo, db):
     assert options["phrases"] == ["Nemotron", "Kubernetes"] and "prompt" not in options
 
 
+def test_a_live_session_detects_the_language_by_default(live_client, service_headers, fake_nemo):
+    with open_live(live_client, service_headers) as ws:
+        until(ws, "session.created")
+        update(ws)
+        session = until(ws, "session.updated")[-1]["session"]["audio"]["input"]
+        ws.send_json({"type": "input_audio_buffer.append", "audio": pcm_b64(0.5, 24000)})
+        ws.send_json({"type": "input_audio_buffer.commit"})
+        until(ws, COMPLETED)
+    assert session["transcription"]["language"] is None
+    assert fake_nemo.live_sessions[0].options["language"] == "auto"
+
+
+@pytest.mark.parametrize(
+    "transcription",
+    [{"languages": ["auto"]}, {"language": "auto"}, {"language": None}, {"language": "und"}],
+)
+def test_a_live_session_asked_for_auto_detects_the_language(live_client, service_headers, fake_nemo, transcription):
+    with open_live(live_client, service_headers) as ws:
+        until(ws, "session.created")
+        update(ws, transcription=transcription)
+        session = until(ws, "session.updated")[-1]["session"]["audio"]["input"]
+        ws.send_json({"type": "input_audio_buffer.append", "audio": pcm_b64(0.5, 24000)})
+        ws.send_json({"type": "input_audio_buffer.commit"})
+        until(ws, COMPLETED)
+    assert session["transcription"]["language"] is None
+    assert fake_nemo.live_sessions[0].options["language"] == "auto"
+
+
 def test_appended_audio_reaches_nemo_decoded(live_client, service_headers, fake_nemo):
     pcm = bytes(range(256)) * 8
     with open_live(live_client, service_headers) as ws:
@@ -393,7 +421,7 @@ def test_a_refused_setting_names_its_field_and_leaves_the_session_as_it_was(
         update(ws)
         session = until(ws, "session.updated")[-1]["session"]["audio"]["input"]
     assert (error["code"], error["param"], error["event_id"]) == ("invalid_value", param, "evt_client_1")
-    assert (session["format"]["rate"], session["transcription"]["language"]) == (24000, "fr")
+    assert (session["format"]["rate"], session["transcription"]["language"]) == (24000, None)
 
 
 def test_the_session_cannot_change_once_its_audio_has_started(live_client, service_headers):
