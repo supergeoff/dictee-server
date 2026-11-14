@@ -32,7 +32,7 @@ Chaque appel porte une clé dans l'en-tête `Authorization: Bearer <clé>`. Une 
 | `dictee-clean` | Le texte reformulé par un LLM (un modèle de langage). Si la reformulation échoue, dictee rend le texte brut. |
 | `dictee-diarize` | Le texte avec ses locuteurs, nommés A, B, C dans l'ordre de leur première prise de parole. Le format `diarized_json` donne les mêmes locuteurs, quel que soit le modèle. |
 
-Le champ `response_format` vaut `json` par défaut, et accepte `text`, `srt`, `vtt`, `verbose_json` et `diarized_json`. Le champ `language` vaut `fr` par défaut. Le champ `prompt` est accepté et ignoré : dictee ne le transmet jamais à NeMo, car NeMo en ferait une phrase renforcée qui ajoute des mots que personne n'a dits. Le glossaire de l'utilisateur tient ce rôle, avec une force prudente.
+Le champ `response_format` vaut `json` par défaut, et accepte `text`, `srt`, `vtt`, `verbose_json` et `diarized_json`. Le champ `language` est facultatif : sans lui, ou avec `auto`, NeMo détecte la langue, française ou anglaise ou les deux dans le même audio, et les réponses détaillées (`verbose_json`) annoncent alors `und`. Une langue envoyée (`fr`, `en`) est respectée. NeMo peut perdre les premiers mots d'une langue au moment où l'audio en change. Le champ `prompt` est accepté et ignoré : dictee ne le transmet jamais à NeMo, car NeMo en ferait une phrase renforcée qui ajoute des mots que personne n'a dits. Le glossaire de l'utilisateur tient ce rôle, avec une force prudente.
 
 ```bash
 curl https://<adresse>/v1/audio/transcriptions \
@@ -89,7 +89,7 @@ dictee efface l'audio d'une tâche dès sa fin. Son texte reste lisible 24 heure
 
 Le client ouvre la connexion avec sa clé, puis :
 
-- règle la session par `session.update` : audio PCM16 (de l'audio brut sur 16 bits, en mono) à une fréquence de 8000 à 96000 Hz, 24000 par défaut, langue (`fr` par défaut) et `keywords`, des mots à renforcer en plus du glossaire de son compte ;
+- règle la session par `session.update` : audio PCM16 (de l'audio brut sur 16 bits, en mono) à une fréquence de 8000 à 96000 Hz, 24000 par défaut, langue (détectée par défaut, annoncée par une langue nulle dans la session) et `keywords`, des mots à renforcer en plus du glossaire de son compte ;
 - envoie l'audio encodé en base64 (une écriture du binaire en texte) par `input_audio_buffer.append` ;
 - valide chaque prise de parole par `input_audio_buffer.commit`.
 
@@ -126,5 +126,6 @@ La dictée en direct ne rend que le texte brut, sans reformulation ni locuteurs.
 | Tâches longues | 1 en cours et 3 en attente, puis 429 `long_audio_busy` | `MAX_QUEUED_LONG` |
 | Conservation d'un résultat | 24 heures après la fin de la tâche | `TASK_RETENTION_HOURS` |
 | Session de dictée en direct | 2 heures d'audio reçu, ou 30 minutes sans événement du client | Constantes du code |
+| Silence de NeMo pendant une réunion | 300 secondes sans événement ni trame d'audio acceptée, puis `upstream_error` | Constantes du code |
 
 Une tâche est longue quand son audio dépasse `LONG_AUDIO_SECONDS`. Une tâche courte part tout de suite, sans attendre les longues, alors que les tâches longues passent une à la fois, dans l'ordre d'arrivée.

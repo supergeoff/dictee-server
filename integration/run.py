@@ -555,6 +555,29 @@ def check_transcription(state: State) -> str:
     return f"{detail}, {state.rest_seconds:.1f} s"
 
 
+def check_language(state: State) -> str:
+    """Un audio anglais, envoyé sans langue puis avec `language=en`, rend les mêmes mots-clés.
+
+    La synthèse de dictee ne parle que français : la phrase anglaise passe par celle de NeMo, sur son port d'essai.
+    """
+    pcm = check_nemo.synth_pcm(check_nemo.EN_PHRASE_1, "en-US")
+    keywords = ["morning", "language"]
+    parts: list[str] = []
+    for label, fields in (("sans langue", {}), ("language=en", {"language": "en"})):
+        wav = nemo_rt.wav_file(mark(pcm), check_nemo.RATE)
+        response = state.http.post(
+            TRANSCRIPTIONS,
+            data={"model": "dictee", "response_format": "json", **fields},
+            files={"file": ("audio.wav", wav, "audio/wav")},
+        )
+        expect(response.status_code == 200, f"{label} : HTTP {response.status_code} {response.text[:200]}")
+        heard = words(response.json().get("text", ""))
+        found = [keyword for keyword in keywords if keyword in heard]
+        expect(found == keywords, f"{label} : mots-clés retrouvés {found} sur {keywords}, {len(heard)} mots")
+        parts.append(f"{label} : {len(found)} mots-clés sur {len(keywords)}, {len(heard)} mots")
+    return ", ".join(parts)
+
+
 def check_diarize(state: State) -> str:
     """Les personnes d'un dialogue, données par la session temps réel de NeMo, dans trois formats.
 
@@ -1121,6 +1144,7 @@ CHECKS: list[tuple[str, str, Callable[[State], str], tuple[str, ...], bool]] = [
     ("health", "GET /health", check_health, (), False),
     ("synthesis", "Synthèse des deux phrases en wav", check_synthesis, ("health",), False),
     ("transcription", "Transcription dictee du dialogue", check_transcription, ("synthesis",), False),
+    ("language", "Langue détectée sur un audio anglais", check_language, ("health",), False),
     ("diarize", "dictee-diarize en diarized_json, vtt et srt", check_diarize, ("synthesis",), False),
     ("stream", "stream=true", check_stream, ("synthesis",), False),
     ("clean", "dictee-clean avec LiteLLM injoignable", check_clean, ("transcription",), False),

@@ -187,7 +187,7 @@ Sans `background`, dictee décode l'envoi, crée la tâche ou rejoint une tâche
 |---|---|
 | `file` | L'audio, dans tout format que ffmpeg lit, de 2 heures au plus pour tous les modes |
 | `model` | Le traitement, selon le tableau ci-dessus |
-| `language` | Code ISO-639-1, `fr` par défaut, converti pour NeMo (`fr` devient `fr-FR`) |
+| `language` | Code ISO-639-1, converti pour NeMo (`fr` devient `fr-FR`). Absent ou `auto`, la langue est détectée par NeMo et les réponses détaillées annoncent `und`. |
 | `prompt` | Accepté et ignoré : NeMo le traite comme une phrase renforcée à une force qui insère des mots que personne n'a dits, donc dictee ne le lui transmet jamais. Le glossaire de l'utilisateur joue ce rôle, avec une force prudente. |
 | `response_format` | `json` (défaut), `text`, `srt`, `vtt`, `verbose_json`, `diarized_json` |
 | `stream` | `true` envoie des événements SSE, sans tâche enregistrée |
@@ -294,7 +294,7 @@ Une tâche n'est visible que de son propriétaire, le compte que désigne la cl�
 | Événement du client | Ce que fait dictee |
 |---|---|
 | Ouverture | Identifie l'appelant, charge son glossaire et envoie `session.created`. |
-| `session.update`, `session.type` à `transcription` | Lit `audio.input.format` (`audio/pcm` seulement, PCM16 mono, `rate` de 8000 à 96000, 24000 par défaut), la langue (`transcription.languages[0]`, sinon `transcription.language`, `fr` par défaut), `transcription.keywords` (ajoutés au glossaire de l'appelant pour cette session) et `turn_detection`. `prompt`, `delay`, `model` et `noise_reduction` sont acceptés et ignorés. Répond `session.updated` avec la session effective. Une fois l'audio commencé, les réglages ne changent plus (erreur `session_already_started`). |
+| `session.update`, `session.type` à `transcription` | Lit `audio.input.format` (`audio/pcm` seulement, PCM16 mono, `rate` de 8000 à 96000, 24000 par défaut), la langue (`transcription.languages[0]`, sinon `transcription.language`, détectée par défaut : la session annonce alors une langue nulle), `transcription.keywords` (ajoutés au glossaire de l'appelant pour cette session) et `turn_detection`. `prompt`, `delay`, `model` et `noise_reduction` sont acceptés et ignorés. Répond `session.updated` avec la session effective. Une fois l'audio commencé, les réglages ne changent plus (erreur `session_already_started`). |
 | `turn_detection` absent ou `null` | Le client valide chaque prise de parole par `input_audio_buffer.commit`. |
 | `turn_detection` de type `server_vad` ou `semantic_vad` | Refusé par une `error` de code `unsupported_turn_detection` : NeMo 0.3.0 ne ferme pas seul une prise de parole, et dictee n'a pas de détection sémantique. |
 | `input_audio_buffer.append` (PCM16 en base64) | Décode l'audio et le transmet à NeMo en trames binaires. |
@@ -341,7 +341,7 @@ Pour une tâche, la reformulation s'applique au texte assemblé des morceaux, av
 
 ### 6.3 `dictee-diarize`
 
-Une réunion passe par une seule session sur la route temps réel de NeMo, `/v1/audio/transcriptions/realtime`, ouverte avec les horodatages des mots (`word_timestamps`), `speaker_diarization`, la langue et les termes du glossaire en renforcement de mots (`speech_contexts`, force `GLOSSARY_BOOST`). dictee lit l'audio depuis le WAV de la tâche et l'envoie par trames d'une seconde, aussi vite que NeMo l'accepte, sans attendre la durée réelle de l'enregistrement. La part d'audio envoyée donne `progress`, écrit en base au plus toutes les 5 s.
+Une réunion passe par une seule session sur la route temps réel de NeMo, `/v1/audio/transcriptions/realtime`, ouverte avec les horodatages des mots (`word_timestamps`), `speaker_diarization`, la langue et les termes du glossaire en renforcement de mots (`speech_contexts`, force `GLOSSARY_BOOST`). dictee lit l'audio depuis le WAV de la tâche et l'envoie par trames d'une seconde, aussi vite que NeMo l'accepte, sans attendre la durée réelle de l'enregistrement. Tant que NeMo n'a reconnu aucun mot, il n'émet aucun événement : le délai de 300 s sans événement repart donc à chaque trame qu'il accepte, et ne court seul qu'après le commit. Un audio sans mot reconnu rend un texte vide. La part d'audio envoyée donne `progress`, écrit en base au plus toutes les 5 s.
 
 NeMo rend tous les mots dans son événement final, chacun avec son numéro de personne. dictee renomme les personnes A, B, C dans l'ordre de leur première apparition parmi les mots, et rattache un mot sans personne à la personne du mot qui le précède. Les mots consécutifs d'une même personne forment un segment, et chaque changement de personne ouvre un nouveau segment.
 
