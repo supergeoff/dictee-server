@@ -1,7 +1,7 @@
 import pytest
 
 from dictee.errors import ApiError
-from dictee.modes import MODELS, RESPONSE_FORMATS, Mode, resolve_mode, to_iso_language, to_nemo_language
+from dictee.modes import MODELS, RESPONSE_FORMATS, Mode, is_auto_language, resolve_mode, to_iso_language, to_nemo_language
 
 
 @pytest.mark.parametrize(
@@ -52,8 +52,6 @@ def test_models_and_formats_are_the_documented_ones():
 @pytest.mark.parametrize(
     "code,expected",
     [
-        (None, "fr-FR"),
-        ("", "fr-FR"),
         ("fr", "fr-FR"),
         ("FR", "fr-FR"),
         ("fr-fr", "fr-FR"),
@@ -79,8 +77,6 @@ def test_to_nemo_language_refuses_what_is_not_a_language_code(code):
 @pytest.mark.parametrize(
     "code,expected",
     [
-        (None, "fr"),
-        ("", "fr"),
         ("fr", "fr"),
         ("FR", "fr"),
         ("fr-FR", "fr"),
@@ -97,4 +93,28 @@ def test_to_iso_language(code, expected):
 def test_to_iso_language_refuses_what_is_not_a_language_code(code):
     with pytest.raises(ApiError) as e:
         to_iso_language(code)
+    assert e.value.status == 400 and e.value.param == "language"
+
+
+@pytest.mark.parametrize("code", [None, "", "auto", "AUTO", "Auto"])
+def test_a_missing_or_auto_language_asks_nemo_to_detect(code):
+    assert is_auto_language(code)
+    assert to_nemo_language(code) == "auto"
+    assert to_iso_language(code) == "und"
+
+
+@pytest.mark.parametrize("code", ["und", "UND"])
+def test_an_undetermined_language_stays_undetermined(code):
+    assert to_iso_language(code) == "und"
+
+
+@pytest.mark.parametrize("code", ["fr", "en-US", "und"])
+def test_a_named_language_is_not_auto(code):
+    assert not is_auto_language(code)
+
+
+@pytest.mark.parametrize("code", [" auto", "auto ", "automatic", "aut"])
+def test_what_only_looks_like_auto_is_refused(code):
+    with pytest.raises(ApiError) as e:
+        to_nemo_language(code)
     assert e.value.status == 400 and e.value.param == "language"

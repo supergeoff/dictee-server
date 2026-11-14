@@ -27,7 +27,9 @@ FRAME_BYTES = TRANSCRIPTION_RATE * SAMPLE_WIDTH
 
 # Délais en secondes. Le client HTTP partagé de l'app n'a pas de délai de lecture : chaque appel fixe le sien.
 OPEN_TIMEOUT = 10.0  # ouverture d'une connexion, WebSocket ou HTTP
-EVENT_TIMEOUT = 300.0  # silence maximal entre deux événements de NeMo pendant une session temps réel
+# Silence maximal de NeMo pendant une session temps réel, compté depuis le dernier événement reçu ou la dernière trame
+# d'audio qu'il a acceptée : tant qu'il n'a reconnu aucun mot, il n'émet rien, et l'audio qu'il accepte prouve qu'il travaille.
+EVENT_TIMEOUT = 300.0
 # Silence maximal entre deux événements quand la session marque les personnes : une réunion de 2 heures peut rester
 # bien plus longtemps sans événement qu'une dictée. La tâche 1 a mesuré au plus 23 s de silence sur une réunion de
 # 2 heures, commit et événement final compris : le délai retenu reste le plancher de 300 s.
@@ -101,17 +103,48 @@ async def _receive(ws: ClientConnection, sender: asyncio.Task) -> str | bytes:
             receiving.exception()  # lue ici, pour qu'asyncio n'en journalise rien si personne ne la lit
 
 
-async def _next_event(ws: ClientConnection, timeout: float | None = None, sender: asyncio.Task | None = None) -> dict:
+class _Activity:
+    """Le délai de l'événement attendu, que chaque trame d'audio acceptée par NeMo repousse.
+
+    `_next_event` y inscrit son délai le temps de son attente ; l'envoi de l'audio, dans sa propre tâche, le repousse à
+    chaque trame. Hors d'une attente, une trame acceptée ne change rien : l'attente suivante repart de zéro.
+    """
+
+    def __init__(self) -> None:
+        self._limit: asyncio.Timeout | None = None
+        self._timeout = 0.0
+
+    def watch(self, limit: asyncio.Timeout | None, timeout: float) -> None:
+        self._limit, self._timeout = limit, timeout
+
+    def frame_accepted(self) -> None:
+        if self._limit is not None:
+            with contextlib.suppress(RuntimeError):  # le délai vient d'expirer ou de se terminer
+                self._limit.reschedule(asyncio.get_running_loop().time() + self._timeout)
+
+
+async def _next_event(
+    ws: ClientConnection,
+    timeout: float | None = None,
+    sender: asyncio.Task | None = None,
+    activity: _Activity | None = None,
+) -> dict:
     """Prochain événement de NeMo, attendu `timeout` secondes au plus (`EVENT_TIMEOUT` par défaut).
 
     Un événement `error` lève l'exception qui lui correspond ; avec `sender`, l'erreur de l'envoi de l'audio aussi.
+    Avec `activity`, chaque trame d'audio que NeMo accepte pendant l'attente repousse le délai.
     """
     timeout = EVENT_TIMEOUT if timeout is None else timeout
     try:
-        async with asyncio.timeout(timeout):
+        async with asyncio.timeout(timeout) as limit:
+            if activity is not None:
+                activity.watch(limit, timeout)
             raw = await (ws.recv() if sender is None else _receive(ws, sender))
     except TimeoutError:
         raise NemoError(f"no event from NeMo for {timeout:g} seconds") from None
+    finally:
+        if activity is not None:
+            activity.watch(None, 0.0)
     return _decode(raw)
 
 
@@ -285,7 +318,7 @@ class NemoClient:
 
         Lève `NemoUnavailable` si NeMo est injoignable ou coupe la connexion, `NemoOverloaded` si sa file est pleine
         et `NemoError` pour toute autre erreur, y compris plus de `EVENT_TIMEOUT` secondes sans événement
-        (`SPEAKERS_EVENT_TIMEOUT` avec les personnes).
+        ni trame d'audio acceptée (`SPEAKERS_EVENT_TIMEOUT` avec les personnes).
         """
         session: dict[str, object] = {"sample_rate": TRANSCRIPTION_RATE, "language": language, "word_timestamps": True}
         if speakers:
@@ -300,9 +333,16 @@ class NemoClient:
             await _expect(ws, "session.created")
             await ws.send(json.dumps({"type": "session.update", "session": session}))
             await _expect(ws, "session.updated")
-            sender = asyncio.create_task(_send_audio(ws, wav, on_progress))
+            activity = _Activity()
+
+            def frame_accepted(sent: float) -> None:
+                activity.frame_accepted()
+                if on_progress is not None:
+                    on_progress(sent)
+
+            sender = asyncio.create_task(_send_audio(ws, wav, frame_accepted))
             while True:
-                event = await _next_event(ws, event_timeout, sender)
+                event = await _next_event(ws, event_timeout, sender, activity)
                 kind = event.get("type")
                 if kind == _COMPLETED:
                     yield _final(event)
