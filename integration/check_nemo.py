@@ -22,6 +22,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from pathlib import Path
 
 import httpx
@@ -49,6 +50,13 @@ MEMORY_LIMIT = 3 * 1024**3
 # n'est ni gardé ni affiché.
 NOTE_PCM: bytes | None = None
 VOICES = {"John", "Sofia", "Aria", "Jason", "Leo"}
+# Contrôle k : deux phrases anglaises, et les mots (sans accent) que chaque langue doit rendre.
+EN_PHRASE_1 = ("Good morning, this is a test of the automatic language detection.", "John")
+EN_PHRASE_2 = ("Thank you, the meeting will continue in English this afternoon.", "Aria")
+FR_KEYWORDS = ["bonjour", "transcription", "synthese", "francais"]
+EN_KEYWORDS = ["morning", "language", "meeting", "afternoon"]
+LANGUAGE_CASES = ("auto", "fr-FR", "en-US")
+NOTE_LANGUAGE_SECONDS = 30
 
 results: list[tuple[str, bool, str]] = []
 
@@ -479,6 +487,101 @@ def check_turns() -> None:
     report("j", "Prises de parole", not errors and not errors_vad, f"NEMO_MANY_COMMITS={many}, SERVER_VAD={vad}")
 
 
+def plain_words(text: str) -> list[str]:
+    """Les mots d'un texte, en minuscules et sans accents, pour y chercher des mots-clés."""
+    decomposed = unicodedata.normalize("NFKD", text.lower())
+    return re.findall(r"[a-z']+", "".join(char for char in decomposed if not unicodedata.combining(char)))
+
+
+def keywords_found(text: str, keywords: list[str]) -> list[str]:
+    words = set(plain_words(text))
+    return [keyword for keyword in keywords if keyword in words]
+
+
+def synth_pcm(phrase: tuple[str, str], language: str) -> bytes:
+    """Le PCM 16 kHz d'une phrase dite par NeMo dans la langue donnée."""
+    text, voice = phrase
+    rate, data = nemo_rt.parse_wav(nemo_rt.synth_wav(text, voice, RATE, language))
+    assert rate == RATE, f"phrase à {rate} Hz au lieu de {RATE} Hz"
+    return data
+
+
+def rest_text(pcm: bytes, language: str) -> tuple[int, str]:
+    """Le statut HTTP et le texte de la route REST de NeMo pour cet audio et cette langue."""
+    form = rest_form([], 0.0) | {"language": language}
+    response = httpx.post(
+        f"{nemo_rt.BASE_URL}/v1/audio/transcriptions",
+        data=form,
+        files=rest_files(pcm),
+        headers=nemo_rt.auth_headers(),
+        timeout=600,
+    )
+    return response.status_code, (response.json().get("text", "") if response.status_code == 200 else "")
+
+
+def session_text(pcm: bytes, language: str) -> tuple[list[str], str]:
+    """Les types d'événements et le texte d'une session temps réel avec personnes."""
+    session = {"sample_rate": RATE, "language": language, "word_timestamps": True, "speaker_diarization": True}
+    events, _ = asyncio.run(nemo_rt.scripted_session(session, [("audio", pcm, False), ("commit",)]))
+    kinds = [event.get("type", "?") for _, event in events]
+    return kinds, " ".join(event.get("transcript", "") for _, event in events if event.get("type") == COMPLETED)
+
+
+def check_language() -> None:
+    """Contrôle k : NeMo détecte la langue (`auto`) sur la route REST et sur la session avec personnes.
+
+    Trois audios de synthèse, français, anglais et mêlés, passent dans chaque langue. Seuls des comptes sont
+    affichés : mots-clés retrouvés par langue et nombre de mots, jamais le texte.
+    """
+    fr1, fr2 = synth_pcm(PHRASE_1, "fr-FR"), synth_pcm(PHRASE_2, "fr-FR")
+    en1, en2 = synth_pcm(EN_PHRASE_1, "en-US"), synth_pcm(EN_PHRASE_2, "en-US")
+    gap = silence(1.0)
+    audios = {
+        "french": fr1 + gap + fr2,
+        "english": en1 + gap + en2,
+        "mixed": fr1 + gap + en1 + gap + fr2 + gap + en2,
+    }
+    # (audio, langue, route) -> (mots-clés français, mots-clés anglais)
+    found: dict[tuple[str, str, str], tuple[list[str], list[str]]] = {}
+    accepted = True
+    for name, pcm in audios.items():
+        (WORK / f"langue-{name}.wav").write_bytes(nemo_rt.wav_file(pcm, RATE))
+        for language in LANGUAGE_CASES:
+            status, rest = rest_text(pcm, language)
+            kinds, live = session_text(pcm, language)
+            for route, text in (("REST", rest), ("session", live)):
+                found[(name, language, route)] = (keywords_found(text, FR_KEYWORDS), keywords_found(text, EN_KEYWORDS))
+                french, english = found[(name, language, route)]
+                words = len(plain_words(text))
+                note(f"{name} / {language} / {route} : {len(french)} mot(s)-clé(s) français, {len(english)} anglais, {words} mots")
+            note(f"{name} / {language} : REST HTTP {status}, session {kinds[0] if kinds else '-'} ... {kinds[-1] if kinds else '-'}")
+            if language == "auto":
+                accepted = accepted and status == 200 and "session.updated" in kinds and kinds[-1:] == [COMMITTED]
+                accepted = accepted and "error" not in kinds
+    report("k1", "auto accepté", accepted, "route REST en 200 et session jusqu'à committed, sans error, avec auto")
+
+    both = all(
+        len(found[("mixed", "auto", route)][0]) == len(FR_KEYWORDS) and len(found[("mixed", "auto", route)][1]) == len(EN_KEYWORDS)
+        for route in ("REST", "session")
+    )
+    report("k2", "deux langues", both, "audio mêlé avec auto : tous les mots-clés français et anglais, par les deux routes")
+
+    start = all("morning" in found[("english", "auto", route)][1] for route in ("REST", "session"))
+    report("k3", "départ en anglais", start, "audio anglais avec auto : le premier mot-clé est retrouvé, par les deux routes")
+
+    same = True
+    for index, pcm in enumerate((fr1, fr2), start=1):
+        automatic, fixed = rest_text(pcm, "auto")[1], rest_text(pcm, "fr-FR")[1]
+        same = same and plain_words(automatic) == plain_words(fixed)
+        note(f"phrase française {index} : {len(plain_words(automatic))} mots en auto, {len(plain_words(fixed))} en fr-FR")
+    report("k4", "dictées françaises", same, "chaque phrase française rend le même texte avec auto et avec fr-FR (REST)")
+
+    if NOTE_PCM is not None:
+        excerpt = NOTE_PCM[: NOTE_LANGUAGE_SECONDS * RATE * 2]
+        counts = {language: len(plain_words(rest_text(excerpt, language)[1])) for language in ("auto", "fr-FR")}
+        note(f"enregistrement réel, {NOTE_LANGUAGE_SECONDS} premières secondes : {counts} mots")
+
+
 CHECKS = {
     "abc": lambda audio: check_realtime(audio),
     "d": lambda audio: check_speakers(audio),
@@ -488,6 +591,7 @@ CHECKS = {
     "h": lambda audio: check_rest_chunk(audio),
     "i": lambda audio: check_meeting(audio),
     "j": lambda audio: check_turns(),
+    "k": lambda audio: check_language(),
 }
 
 
