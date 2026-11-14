@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import re
 import subprocess
@@ -56,6 +57,18 @@ EN_PHRASE_2 = ("Thank you, the meeting will continue in English this afternoon."
 FR_KEYWORDS = ["bonjour", "transcription", "synthese", "francais"]
 EN_KEYWORDS = ["morning", "language", "meeting", "afternoon"]
 LANGUAGE_CASES = ("auto", "fr-FR", "en-US")
+# Au changement de langue, NeMo perd parfois les premiers mots de la nouvelle langue : il suffit d'en retrouver les
+# trois quarts. Un audio mêlé de 20 s varie trop d'un passage à l'autre pour le mesurer : le contrôle k2 compte les
+# mots-clés d'un bloc d'anglais de 32 s, puis d'une session français, anglais, français de 96 s.
+BLOCK_REPEATS = 3
+MIN_SHARE = 0.75
+SHORT_FRENCH = [
+    ("D'accord, merci.", "Sofia"),
+    ("Oui, je vois.", "Leo"),
+    ("Rendez-vous demain matin.", "Sofia"),
+    ("Peux-tu m'envoyer le document ?", "Leo"),
+    ("Non, pas maintenant.", "Leo"),
+]
 NOTE_LANGUAGE_SECONDS = 30
 
 results: list[tuple[str, bool, str]] = []
@@ -498,6 +511,12 @@ def keywords_found(text: str, keywords: list[str]) -> list[str]:
     return [keyword for keyword in keywords if keyword in words]
 
 
+def occurrences(text: str, keywords: list[str]) -> int:
+    """Combien de fois les mots-clés apparaissent dans le texte, répétitions comprises."""
+    words = plain_words(text)
+    return sum(words.count(keyword) for keyword in keywords)
+
+
 def synth_pcm(phrase: tuple[str, str], language: str) -> bytes:
     """Le PCM 16 kHz d'une phrase dite par NeMo dans la langue donnée."""
     text, voice = phrase
@@ -560,11 +579,20 @@ def check_language() -> None:
                 accepted = accepted and "error" not in kinds
     report("k1", "auto accepté", accepted, "route REST en 200 et session jusqu'à committed, sans error, avec auto")
 
-    both = all(
-        len(found[("mixed", "auto", route)][0]) == len(FR_KEYWORDS) and len(found[("mixed", "auto", route)][1]) == len(EN_KEYWORDS)
-        for route in ("REST", "session")
-    )
-    report("k2", "deux langues", both, "audio mêlé avec auto : tous les mots-clés français et anglais, par les deux routes")
+    french_block = (fr1 + gap + fr2 + gap) * BLOCK_REPEATS
+    english_block = (en1 + gap + en2 + gap) * BLOCK_REPEATS
+    total = len(EN_KEYWORDS) * BLOCK_REPEATS
+    needed = math.ceil(total * MIN_SHARE)
+    rest_auto = occurrences(rest_text(english_block, "auto")[1], EN_KEYWORDS)
+    rest_fixed = occurrences(rest_text(english_block, "fr-FR")[1], EN_KEYWORDS)
+    meeting = french_block + english_block + french_block
+    session_auto = occurrences(session_text(meeting, "auto")[1], EN_KEYWORDS)
+    session_fixed = occurrences(session_text(meeting, "fr-FR")[1], EN_KEYWORDS)
+    note(f"bloc anglais de {duration(english_block):.0f} s en REST : {rest_auto} mots-clés sur {total} en auto, {rest_fixed} en fr-FR")
+    note(f"session de {duration(meeting):.0f} s, français puis anglais puis français : {session_auto} en auto, {session_fixed} en fr-FR")
+    both = rest_auto >= needed and rest_auto > rest_fixed and session_auto >= needed and session_auto > session_fixed
+    detail = f"auto retrouve au moins {needed} mots-clés anglais sur {total}, et plus qu'avec fr-FR, en REST et en session"
+    report("k2", "deux langues", both, detail)
 
     start = all("morning" in found[("english", "auto", route)][1] for route in ("REST", "session"))
     report("k3", "départ en anglais", start, "audio anglais avec auto : le premier mot-clé est retrouvé, par les deux routes")
@@ -572,13 +600,20 @@ def check_language() -> None:
     same = True
     for index, pcm in enumerate((fr1, fr2), start=1):
         automatic, fixed = rest_text(pcm, "auto")[1], rest_text(pcm, "fr-FR")[1]
-        same = same and plain_words(automatic) == plain_words(fixed)
+        same = same and len(plain_words(automatic)) == len(plain_words(fixed))
         note(f"phrase française {index} : {len(plain_words(automatic))} mots en auto, {len(plain_words(fixed))} en fr-FR")
-        if plain_words(automatic) != plain_words(fixed):
-            # Les phrases sont de synthèse : leur texte peut s'afficher pour voir ce qui diffère.
+    for phrase in SHORT_FRENCH:
+        pcm = synth_pcm(phrase, "fr-FR")
+        automatic, fixed = rest_text(pcm, "auto")[1], rest_text(pcm, "fr-FR")[1]
+        equal = plain_words(automatic) == plain_words(fixed)
+        same = same and equal
+        note(f"énoncé français de {duration(pcm):.1f} s : {'identique' if equal else 'différent'} en auto et en fr-FR")
+        if not equal:
+            # Les énoncés sont de synthèse : leur texte peut s'afficher pour voir ce qui diffère.
             note(f"  auto : {automatic}")
             note(f"  fr-FR : {fixed}")
-    report("k4", "dictées françaises", same, "chaque phrase française rend le même texte avec auto et avec fr-FR (REST)")
+    detail = "deux phrases de même longueur, et chaque énoncé court identique, avec auto et avec fr-FR (REST)"
+    report("k4", "dictées françaises", same, detail)
 
     if NOTE_PCM is not None:
         excerpt = NOTE_PCM[: NOTE_LANGUAGE_SECONDS * RATE * 2]

@@ -60,9 +60,9 @@ EN_KEYWORDS = ["morning", "language", "meeting", "afternoon"]
 | Ligne | Réussite |
 |---|---|
 | `k1` auto accepté | la route REST répond 200 et la session rend `session.updated` puis `input_audio_buffer.committed`, avec `auto` |
-| `k2` deux langues | `mixed` avec `auto` retrouve les quatre mots de `FR_KEYWORDS` et les quatre de `EN_KEYWORDS`, par les deux routes |
+| `k2` deux langues | un bloc anglais de 32 s (REST), puis une session français, anglais, français de 96 s, retrouvent avec `auto` au moins neuf des douze mots-clés anglais, et plus qu'avec `fr-FR` |
 | `k3` départ en anglais | `english` avec `auto` retrouve `morning`, le mot-clé de sa première phrase, par les deux routes |
-| `k4` dictées françaises | chaque phrase française seule rend avec `auto` le même texte qu'avec `fr-FR`, par la route REST |
+| `k4` dictées françaises | chaque phrase française rend avec `auto` autant de mots qu'avec `fr-FR`, et cinq énoncés français courts (de 1 à 2 s) rendent le même texte avec `auto` et avec `fr-FR`, par la route REST |
 
 Avec `--note`, la fonction compare aussi les 30 premières secondes de l'enregistrement réel en `auto` et en `fr-FR`, et n'en affiche que les nombres de mots.
 
@@ -112,7 +112,7 @@ Mesures complémentaires, qui n'entrent pas dans le contrôle :
 - Le mot « bonjour » répété n'est retrouvé qu'une fois sur trois ou sur six, en `fr-FR` comme en `auto` : l'audio répété de synthèse en est la cause, pas la langue.
 - Une requête REST de 130 s fait redémarrer NeMo (limite de mémoire de 3 Go), ce qui confirme le découpage en morceaux de dictee.
 
-Les critères de `k2` et de `k4` du contrôle sont plus stricts que la spec : celle-ci demande du texte dans chaque langue et le même texte en dictée courte, pas tous les mots-clés ni une égalité mot à mot sur des noms rares. Le travail est arrêté sur ces deux lignes, comme l'exige la table de l'étape 3, et attend la décision de Geoff.
+Les critères de `k2` et de `k4` du premier contrôle étaient plus stricts que la spec : celle-ci demande du texte dans chaque langue et le même texte en dictée courte, pas tous les mots-clés ni une égalité mot à mot sur des noms rares. Le travail s'est arrêté sur ces deux lignes, comme l'exige la table de l'étape 3. Geoff a décidé de poursuivre le 14 novembre 2026, avec la conception inchangée. Les deux critères du contrôle sont alors réécrits comme le tableau de l'étape 1 les donne. Un audio mêlé de 20 s donne des comptes qui varient d'un passage à l'autre : deux mots-clés anglais retrouvés avec `fr-FR` sur un passage, aucun sur un autre. `k2` compte donc les mots-clés sur des blocs plus longs, où `auto` et `fr-FR` se séparent nettement dans les mesures complémentaires.
 
 ---
 
