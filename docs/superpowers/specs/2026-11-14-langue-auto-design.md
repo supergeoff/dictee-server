@@ -51,7 +51,7 @@ Les mesures datent du 14 novembre 2026, sur dictee en production avec NeMo-Speec
 
 ### Champ `language` des réponses
 
-Ce point est un choix de conception, non une décision de Geoff. Quand la langue est détectée, le champ `language` de `verbose_json` et de `diarized_json` porte la langue que NeMo rapporte pour la plus grande part de l'audio. Quand NeMo ne rapporte rien, ce qui est le cas de la session temps réel en 0.3.0, le champ vaut `und`, le code ISO d'une langue indéterminée.
+Ce point est un choix de conception, non une décision de Geoff. Quand la langue est détectée, le champ `language` de `verbose_json` et de `diarized_json` vaut `und`, le code ISO d'une langue indéterminée. La session temps réel de NeMo 0.3.0 ne rapporte pas la langue qu'elle détecte, et garder celle que la route REST rapporte demanderait une colonne de plus par morceau en base : dictee ne la rend donc pas. La dictée en direct annonce une langue nulle dans sa session quand elle détecte.
 
 ### Délai sans événement
 
@@ -71,7 +71,6 @@ La première tâche du plan lance NeMo seul (`make nemo-up`, avec la version du 
 | Un audio qui alterne français et anglais rend du texte dans chaque langue avec `auto`. Le texte obtenu avec la bonne langue fixe sert de référence. | Sinon, le travail s'arrête et Geoff est prévenu. |
 | Un audio en anglais rend ses premiers mots avec `auto`, sans départ muet. | Sinon, le travail s'arrête et Geoff est prévenu. |
 | Des dictées courtes en français rendent avec `auto` le même texte qu'avec `fr`. | Sinon, `auto` par défaut se limite au modèle `dictee-diarize`, et les autres modèles gardent le français par défaut. |
-| La réponse `verbose_json` de la route REST donne la langue détectée. | Sinon, le champ `language` vaut `und` aussi pour les morceaux. |
 
 ## Tests
 
