@@ -9,6 +9,10 @@ MODELS = ("dictee", "dictee-clean", "dictee-diarize")
 RESPONSE_FORMATS = ("json", "text", "srt", "vtt", "verbose_json", "diarized_json")
 
 DEFAULT_LANGUAGE = "fr"
+# Une langue absente ou `auto` : NeMo détecte la langue. La réponse la dit alors `und`, le code ISO d'une langue
+# indéterminée, car NeMo 0.3.0 ne rapporte pas celle qu'il a détectée.
+AUTO_LANGUAGE = "auto"
+UNDETERMINED_LANGUAGE = "und"
 
 # Les modèles qui imposent les locuteurs, quel que soit le format.
 _DIARIZE_MODELS = frozenset({"dictee-diarize", "gpt-4o-transcribe-diarize"})
@@ -51,15 +55,18 @@ def resolve_mode(model: str, response_format: str) -> Mode:
     return Mode.RAW
 
 
-def _split_language(code: str | None) -> tuple[str, str | None]:
-    """Sépare un code en langue (minuscules) et région (majuscules, ou `None`). Une langue absente vaut le français."""
-    if not code:
-        return DEFAULT_LANGUAGE, None
+def is_auto_language(code: str | None) -> bool:
+    """Vrai pour une langue absente, vide ou `auto` (dans n'importe quelle casse) : NeMo la détecte."""
+    return not code or code.lower() == AUTO_LANGUAGE
+
+
+def _split_language(code: str) -> tuple[str, str | None]:
+    """Sépare un code en langue (minuscules) et région (majuscules, ou `None`)."""
     match = _LANGUAGE_CODE.fullmatch(code)
     if match is None:
         raise ApiError(
             400,
-            f"Unsupported language '{code}'. Send an ISO-639-1 code such as 'fr' or 'en'.",
+            f"Unsupported language '{code}'. Send an ISO-639-1 code such as 'fr' or 'en', or 'auto'.",
             param="language",
         )
     language, region = match.groups()
@@ -67,11 +74,21 @@ def _split_language(code: str | None) -> tuple[str, str | None]:
 
 
 def to_nemo_language(code: str | None) -> str:
-    """Convertit un code ISO-639-1, ou un code déjà régional, en code NeMo : `fr` donne `fr-FR`, `en` donne `en-US`."""
+    """Convertit un code ISO-639-1, ou un code déjà régional, en code NeMo : `fr` donne `fr-FR`, `en` donne `en-US`.
+
+    Une langue absente ou `auto` donne `auto` : NeMo détecte la langue.
+    """
+    if is_auto_language(code):
+        return AUTO_LANGUAGE
     language, region = _split_language(code)
     return f"{language}-{region or _REGIONS.get(language, language.upper())}"
 
 
 def to_iso_language(code: str | None) -> str:
-    """Convertit un code de langue, régional ou non, en code ISO-639-1 : `fr-FR` donne `fr`."""
+    """Convertit un code de langue, régional ou non, en code ISO-639-1 : `fr-FR` donne `fr`.
+
+    Une langue absente, `auto` ou `und` donne `und`, la langue indéterminée.
+    """
+    if is_auto_language(code) or (code is not None and code.lower() == UNDETERMINED_LANGUAGE):
+        return UNDETERMINED_LANGUAGE
     return _split_language(code)[0]
