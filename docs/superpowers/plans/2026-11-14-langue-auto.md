@@ -94,7 +94,25 @@ git commit -m "Vérifier la détection de langue sur NeMo"
 
 #### Résultats de la tâche 1
 
-À remplir par l'exécutant.
+NeMo-Speech.cpp 0.3.0 sur CPU, modèle Nemotron 3.5, relevés du 14 novembre 2026 avec des audios de synthèse. Deux passages du contrôle `k`, qui donnent le même verdict.
+
+| Ligne | Verdict | Comptes |
+|---|---|---|
+| `k1` auto accepté | OK | Route REST en 200 et session jusqu'à `committed`, sans `error`, pour les trois audios. |
+| `k3` départ en anglais | OK | Audio anglais en `auto` : 4 mots-clés anglais sur 4 par les deux routes, comme en `en-US`. |
+| `k2` deux langues | Échec | Audio mêlé en `auto` : 4 mots-clés français sur 4, et 3 anglais sur 4 par les deux routes (2 sur 4 en REST au premier passage). En `fr-FR` : 0 anglais sur 4. Le mot-clé perdu est toujours le premier de la première phrase anglaise, au changement de langue. |
+| `k4` dictées françaises | Échec | Mêmes nombres de mots en `auto` et en `fr-FR` (13 et 10). La phrase 2 est identique. La phrase 1 diffère seulement par deux noms rares de la phrase de synthèse (Nemotron, Sortformer), que NeMo entend autrement d'un passage à l'autre. |
+
+Mesures complémentaires, qui n'entrent pas dans le contrôle :
+
+- La route REST rend le même texte à chaque essai pour un même audio (4 essais sur chaque phrase française, en `auto` comme en `fr-FR`).
+- Huit énoncés français de 0,7 à 2,4 s, comparés en REST : identiques en `auto` et en `fr-FR` (8 sur 8). La détection ne change donc pas une dictée courte.
+- Blocs de 32 s en REST, comme les morceaux de dictee : en anglais, `auto` retrouve 12 mots-clés sur 12, comme `en-US`, et `fr-FR` en retrouve 6 sur 12.
+- Session avec personnes de 96 s (français, anglais, français) : `auto` retrouve 11 mots-clés anglais sur 12, `fr-FR` en retrouve 4 sur 12.
+- Le mot « bonjour » répété n'est retrouvé qu'une fois sur trois ou sur six, en `fr-FR` comme en `auto` : l'audio répété de synthèse en est la cause, pas la langue.
+- Une requête REST de 130 s fait redémarrer NeMo (limite de mémoire de 3 Go), ce qui confirme le découpage en morceaux de dictee.
+
+Les critères de `k2` et de `k4` du contrôle sont plus stricts que la spec : celle-ci demande du texte dans chaque langue et le même texte en dictée courte, pas tous les mots-clés ni une égalité mot à mot sur des noms rares. Le travail est arrêté sur ces deux lignes, comme l'exige la table de l'étape 3, et attend la décision de Geoff.
 
 ---
 

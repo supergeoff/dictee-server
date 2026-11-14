@@ -574,6 +574,10 @@ def check_language() -> None:
         automatic, fixed = rest_text(pcm, "auto")[1], rest_text(pcm, "fr-FR")[1]
         same = same and plain_words(automatic) == plain_words(fixed)
         note(f"phrase française {index} : {len(plain_words(automatic))} mots en auto, {len(plain_words(fixed))} en fr-FR")
+        if plain_words(automatic) != plain_words(fixed):
+            # Les phrases sont de synthèse : leur texte peut s'afficher pour voir ce qui diffère.
+            note(f"  auto : {automatic}")
+            note(f"  fr-FR : {fixed}")
     report("k4", "dictées françaises", same, "chaque phrase française rend le même texte avec auto et avec fr-FR (REST)")
 
     if NOTE_PCM is not None:
