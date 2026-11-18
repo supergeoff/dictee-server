@@ -174,7 +174,7 @@ def test_json_with_any_model_name(openai_client, fake_nemo, tone_mp3, settings):
     # Sans `stream`, le fichier passe par morceaux (section 7.2 de la spec) : ni session, ni personnes, ni partiels.
     assert fake_nemo.calls == fake_nemo.chunk_calls
     call = fake_nemo.calls[0]
-    assert (call["language"], call["boost"], call["phrases"]) == ("fr-FR", settings.glossary_boost, [])
+    assert (call["language"], call["boost"], call["phrases"]) == ("auto", settings.glossary_boost, [])
 
 
 def test_user_glossary_becomes_boosted_phrases(openai_client, fake_nemo, db, tone_mp3):
@@ -257,7 +257,7 @@ def test_prompt_never_reaches_the_logs(ask, caplog):
     assert "Kubernetes" not in caplog.text
 
 
-@pytest.mark.parametrize("sent,expected", [("fr-FR", "fr-FR"), ("EN", "en-US"), ("de", "de-DE"), ("", "fr-FR")])
+@pytest.mark.parametrize("sent,expected", [("fr-FR", "fr-FR"), ("EN", "en-US"), ("de", "de-DE"), ("", "auto")])
 def test_language_reaches_nemo_in_its_own_form(ask, fake_nemo, sent, expected):
     assert ask(language=sent).status_code == 200
     assert fake_nemo.calls[0]["language"] == expected
@@ -265,6 +265,36 @@ def test_language_reaches_nemo_in_its_own_form(ask, fake_nemo, sent, expected):
 
 def test_verbose_json_reports_the_iso_language(ask):
     assert ask(language="en-US", response_format="verbose_json").json()["language"] == "en"
+
+
+@pytest.mark.parametrize("fields", [{}, {"language": "auto"}, {"language": "AUTO"}])
+def test_without_a_language_nemo_detects_it(ask, fake_nemo, fields):
+    assert ask(**fields).status_code == 200
+    assert fake_nemo.calls[0]["language"] == "auto"
+
+
+@pytest.mark.parametrize("model", ["dictee", "dictee-clean", "dictee-diarize"])
+def test_every_model_detects_the_language_by_default(ask, fake_nemo, model):
+    assert ask(model=model).status_code == 200
+    assert fake_nemo.calls[0]["language"] == "auto"
+
+
+def test_a_stream_without_a_language_detects_it(ask, fake_nemo):
+    assert ask(stream="true").status_code == 200
+    assert fake_nemo.transcribe_calls[0]["language"] == "auto"
+
+
+@pytest.mark.parametrize("response_format", ["verbose_json", "diarized_json"])
+def test_a_detected_language_is_reported_as_undetermined(ask, response_format):
+    answer = ask(response_format=response_format)
+    assert answer.status_code == 200
+    assert answer.json().get("language", "und") == "und"
+
+
+def test_the_same_file_with_and_without_a_language_makes_two_tasks(ask):
+    detected = ask(background="true").json()
+    french = ask(background="true", language="fr").json()
+    assert detected["id"] != french["id"]
 
 
 def test_empty_and_blank_finals_are_left_out_of_the_text(ask, fake_nemo):

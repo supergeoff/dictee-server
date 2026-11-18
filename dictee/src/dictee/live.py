@@ -26,7 +26,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from dictee.audio import SAMPLE_WIDTH
 from dictee.auth import resolve_caller
 from dictee.errors import NEMO_ERRORS, ApiError, nemo_failure, unexpected_error
-from dictee.modes import DEFAULT_LANGUAGE, MODELS, to_iso_language, to_nemo_language
+from dictee.modes import MODELS, UNDETERMINED_LANGUAGE, to_iso_language, to_nemo_language
 from dictee.nemo import LiveSession
 from dictee.profile import glossary_terms, glossary_too_large, load_profile, prompt_glossary
 from dictee.types import Cleared, Committed, Final, Partial
@@ -59,7 +59,7 @@ class _Config:
     """Réglages de la session en vigueur : ceux que la prochaine session NeMo reçoit."""
 
     rate: int = DEFAULT_RATE
-    language: str = DEFAULT_LANGUAGE  # code ISO-639-1
+    language: str | None = None  # code ISO-639-1 ; `None` quand NeMo détecte la langue
     keywords: tuple[str, ...] = ()
     prompt_terms: tuple[str, ...] = ()  # termes du `prompt`, qui complètent le glossaire du compte
     silence_ms: int | None = None  # silence de `server_vad` ; `None` quand le client valide lui-même
@@ -113,11 +113,12 @@ def _read_rate(audio_format: dict) -> int:
     return rate
 
 
-def _read_language(code: object, param: str) -> str:
-    """Code ISO-639-1 d'une langue demandée ; une langue absente vaut le français."""
+def _read_language(code: object, param: str) -> str | None:
+    """Code ISO-639-1 d'une langue demandée ; `None` quand NeMo détecte la langue (absente, `auto` ou `und`)."""
     if code is None or isinstance(code, str):
         with contextlib.suppress(ApiError):
-            return to_iso_language(code)
+            language = to_iso_language(code)
+            return None if language == UNDETERMINED_LANGUAGE else language
     raise _invalid(param, "Unsupported language. Send an ISO-639-1 code such as 'fr' or 'en'.")
 
 

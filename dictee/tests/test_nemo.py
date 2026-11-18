@@ -424,6 +424,44 @@ async def test_with_speakers_silence_from_nemo_still_ends_after_the_speakers_tim
     await asyncio.wait_for(fake_ws.closed.wait(), 1)
 
 
+async def test_a_session_that_takes_audio_without_any_event_outlives_the_timeout(fake_ws, nemo, wav_1s, monkeypatch):
+    # NeMo n'émet rien tant qu'il n'a reconnu aucun mot : l'audio qu'il accepte prouve qu'il travaille.
+    monkeypatch.setattr(nemo_module, "EVENT_TIMEOUT", 0.2)
+
+    async def slow_upload(ws, wav, on_progress):
+        for second in range(1, 5):
+            await asyncio.sleep(0.15)
+            on_progress(float(second))
+        await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+
+    monkeypatch.setattr(nemo_module, "_send_audio", slow_upload)
+    items = await transcribe(nemo, wav_1s)
+    assert [type(item) for item in items] == [Final]
+
+
+async def test_a_session_that_stops_taking_audio_and_stays_silent_fails_after_the_timeout(
+    fake_ws, nemo, wav_1s, monkeypatch
+):
+    monkeypatch.setattr(nemo_module, "EVENT_TIMEOUT", 0.2)
+
+    async def stuck_upload(ws, wav, on_progress):
+        on_progress(1.0)
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(nemo_module, "_send_audio", stuck_upload)
+    started = time.monotonic()
+    with pytest.raises(NemoError, match="no event from NeMo for 0.2 seconds"):
+        await transcribe(nemo, wav_1s)
+    assert 0.2 <= time.monotonic() - started < 1.0
+    await asyncio.wait_for(fake_ws.closed.wait(), 1)
+
+
+async def test_the_progress_of_the_caller_still_gets_every_frame(fake_ws, nemo, tmp_path):
+    seen: list[float] = []
+    await transcribe(nemo, write_wav(tmp_path, 3.0), on_progress=seen.append)
+    assert seen == [1.0, 2.0, 3.0]
+
+
 async def test_stopping_the_consumer_closes_the_session(fake_ws, nemo, wav_1s):
     fake_ws.after_commit = HELD_BACK
     first_final = asyncio.Event()
