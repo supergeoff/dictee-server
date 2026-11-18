@@ -86,7 +86,37 @@ def test_the_session_in_force_reaches_nemo(live_client, fake_nemo, db):
         until(ws, COMPLETED)
     options = fake_nemo.live_sessions[0].options
     assert (options["sample_rate"], options["language"]) == (16000, "en-US")
-    assert options["phrases"] == ["Nemotron", "Kubernetes"] and "prompt" not in options
+    assert options["phrases"] == ["Nemotron", "x", "Kubernetes"] and "prompt" not in options
+
+
+def test_prompt_term_already_known_is_not_repeated(live_client, fake_nemo, db):
+    headers, owner = personal_headers(db, "alice@example.test")
+    db.save_settings(owner, glossary="Nemotron")
+    with open_live(live_client, headers) as ws:
+        until(ws, "session.created")
+        update(ws, transcription={"prompt": "Nemotron\nMagpie", "keywords": ["Magpie"]})
+        until(ws, "session.updated")
+        ws.send_json({"type": "input_audio_buffer.append", "audio": pcm_b64(0.5, 24000)})
+        ws.send_json({"type": "input_audio_buffer.commit"})
+        until(ws, COMPLETED)
+    assert fake_nemo.live_sessions[0].options["phrases"] == ["Nemotron", "Magpie"]
+
+
+def test_invalid_prompt_is_refused(live_client, service_headers, fake_nemo):
+    param = "session.audio.input.transcription.prompt"
+    with open_live(live_client, service_headers) as ws:
+        until(ws, "session.created")
+        update(ws, transcription={"language": "en", "prompt": "Magpie"})
+        until(ws, "session.updated")
+        for invalid in (3, ["Magpie"], "a" * 20_001):
+            update(ws, transcription={"language": "de", "prompt": invalid})
+            error = until(ws, "error")[-1]["error"]
+            assert (error["code"], error["param"]) == ("invalid_value", param)
+        ws.send_json({"type": "input_audio_buffer.append", "audio": pcm_b64(0.5, 24000)})
+        ws.send_json({"type": "input_audio_buffer.commit"})
+        until(ws, COMPLETED)
+    options = fake_nemo.live_sessions[0].options
+    assert (options["language"], options["phrases"]) == ("en-US", ["Magpie"])
 
 
 def test_appended_audio_reaches_nemo_decoded(live_client, service_headers, fake_nemo):
@@ -311,14 +341,14 @@ def test_the_session_line_never_carries_any_text(live_client, fake_nemo, db, cap
     db.save_settings(owner, glossary="Nemotron")
     with open_live(live_client, headers) as ws:
         until(ws, "session.created")
-        update(ws, transcription={"language": "fr", "keywords": ["Kubernetes"]})
+        update(ws, transcription={"language": "fr", "keywords": ["Kubernetes"], "prompt": "Magpie"})
         until(ws, "session.updated")
         ws.send_json({"type": "input_audio_buffer.append", "audio": pcm_b64(0.5, 24000)})
         ws.send_json({"type": "input_audio_buffer.commit"})
         until(ws, COMPLETED)
     wait_for(lambda: lines(caplog))
     assert lines(caplog) == [f"route=realtime user={owner} audio_s=0.5 turns=1 status=closed"]
-    for text in ("Bonjour", "Nemotron", "Kubernetes"):
+    for text in ("Bonjour", "Nemotron", "Kubernetes", "Magpie"):
         assert text not in caplog.text
 
 
