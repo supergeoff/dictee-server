@@ -45,7 +45,7 @@ from dictee.lifecycle import (
 )
 from dictee.modes import Mode, resolve_mode, to_iso_language, to_nemo_language
 from dictee.processing import task_audio, task_dir
-from dictee.profile import Profile, glossary_terms, load_profile
+from dictee.profile import Profile, glossary_terms, glossary_too_large, load_profile, with_extra_glossary
 from dictee.runner import LongTicket
 from dictee.speakers import build_segments, label_speakers
 from dictee.tasks_api import task_error, task_object
@@ -63,7 +63,8 @@ GRANULARITIES = frozenset({"word", "segment"})
 class _Params:
     """Les champs du formulaire qui pilotent la transcription, une fois validés.
 
-    `model` est le nom de modèle envoyé, vide sans lui : la tâche le garde tel quel.
+    `model` est le nom de modèle envoyé, vide sans lui : la tâche le garde tel quel. `prompt` est le texte du champ du
+    même nom, vide sans lui : il complète le glossaire du compte (`with_extra_glossary`).
     """
 
     model: str
@@ -74,6 +75,7 @@ class _Params:
     stream: bool
     background: bool
     granularities: frozenset[str]
+    prompt: str
 
 
 def _first(fields: dict[str, list[str]], name: str) -> str | None:
@@ -95,9 +97,10 @@ def _parse_params(fields: dict[str, list[str]], trace: Trace) -> _Params:
     """Lit les champs du formulaire, et lève une erreur 400 pour une langue, un format ou des drapeaux refusés.
 
     Un champ absent prend sa valeur par défaut : la fonction vaut aussi pour les champs reçus avant le fichier.
-    `stream` et `background` ne vont pas ensemble : un flux n'a pas de tâche à laisser en arrière-plan. `prompt`,
-    `chunking_strategy`, `temperature`, `known_speaker_names[]`, `known_speaker_references[]` et `include[]` sont
-    acceptés et ignorés : NeMo ne reçoit jamais `prompt`.
+    `stream` et `background` ne vont pas ensemble : un flux n'a pas de tâche à laisser en arrière-plan. `prompt`
+    complète le glossaire du compte, une entrée par ligne comme sur la page, et ne dépasse pas les bornes du glossaire :
+    NeMo n'en reçoit que les termes, en `phrases`. `chunking_strategy`, `temperature`, `known_speaker_names[]`,
+    `known_speaker_references[]` et `include[]` sont acceptés et ignorés.
     """
     model = _first(fields, "model")
     trace.model = loggable(model)
@@ -113,6 +116,10 @@ def _parse_params(fields: dict[str, list[str]], trace: Trace) -> _Params:
     if stream and background:
         message = "stream and background cannot be used together."
         raise ApiError(400, message, param="background", code="unsupported_combination")
+    prompt = _first(fields, "prompt") or ""
+    if glossary_too_large(prompt):
+        message = "prompt is limited to 20000 characters and 500 lines."
+        raise ApiError(400, message, param="prompt", code="invalid_value")
     return _Params(
         model=model or "",
         nemo_language=nemo_language,
@@ -122,6 +129,7 @@ def _parse_params(fields: dict[str, list[str]], trace: Trace) -> _Params:
         stream=stream,
         background=background,
         granularities=frozenset(values) & GRANULARITIES or frozenset({"segment"}),
+        prompt=prompt,
     )
 
 
@@ -470,6 +478,7 @@ async def _handle(request: Request, trace: Trace) -> Response:
             request, upload_path, settings.max_upload_mb, lambda early: _parse_params(early, trace)
         )
         params = _parse_params(upload.fields, trace)
+        profile = with_extra_glossary(profile, params.prompt)
         if not upload.has_file:
             raise ApiError(400, "Missing required parameter: 'file'.", param="file", code="missing_required_parameter")
         if params.stream:
