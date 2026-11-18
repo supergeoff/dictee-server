@@ -28,7 +28,7 @@ from dictee.auth import resolve_caller
 from dictee.errors import NEMO_ERRORS, ApiError, nemo_failure, unexpected_error
 from dictee.modes import MODELS, UNDETERMINED_LANGUAGE, to_iso_language, to_nemo_language
 from dictee.nemo import LiveSession
-from dictee.profile import glossary_terms, load_profile
+from dictee.profile import glossary_terms, glossary_too_large, load_profile, prompt_glossary
 from dictee.types import Cleared, Committed, Final, Partial
 
 logger = logging.getLogger("dictee")
@@ -61,6 +61,7 @@ class _Config:
     rate: int = DEFAULT_RATE
     language: str | None = None  # code ISO-639-1 ; `None` quand NeMo détecte la langue
     keywords: tuple[str, ...] = ()
+    prompt_terms: tuple[str, ...] = ()  # termes du `prompt`, qui complètent le glossaire du compte
     silence_ms: int | None = None  # silence de `server_vad` ; `None` quand le client valide lui-même
 
 
@@ -122,7 +123,11 @@ def _read_language(code: object, param: str) -> str | None:
 
 
 def _read_transcription(transcription: dict, config: _Config) -> _Config:
-    """Langue (`languages[0]`, sinon `language`) et `keywords` ; `prompt`, `delay` et `model` sont ignorés."""
+    """Langue (`languages[0]`, sinon `language`), `keywords` et `prompt` ; `delay` et `model` sont ignorés.
+
+    Le `prompt` se lit comme le glossaire de la page, un terme par ligne, dans les mêmes bornes et sans les phrases de
+    contexte (`prompt_glossary`) ; `null` vaut vide.
+    """
     if transcription.get("languages") is not None:
         param = f"{_INPUT}.transcription.languages"
         languages = transcription["languages"]
@@ -136,6 +141,14 @@ def _read_transcription(transcription: dict, config: _Config) -> _Config:
         if not isinstance(keywords, list) or not all(isinstance(keyword, str) for keyword in keywords):
             raise _invalid(f"{_INPUT}.transcription.keywords", "'keywords' must be a list of strings.")
         config = replace(config, keywords=tuple(dict.fromkeys(word.strip() for word in keywords if word.strip())))
+    if "prompt" in transcription:
+        param = f"{_INPUT}.transcription.prompt"
+        prompt = transcription["prompt"] or ""
+        if not isinstance(prompt, str):
+            raise _invalid(param, "'prompt' must be a string.")
+        if glossary_too_large(prompt):
+            raise _invalid(param, "'prompt' is limited to 20000 characters and 500 lines.")
+        config = replace(config, prompt_terms=tuple(glossary_terms(prompt_glossary(prompt))))
     return config
 
 
@@ -424,7 +437,7 @@ class _LiveConnection:
     async def _open_session(self) -> LiveSession:
         """Ouvre une session NeMo avec les réglages en vigueur et la confie à la lecture de NeMo.
 
-        NeMo reçoit le glossaire de l'appelant, puis les `keywords` qui n'y sont pas déjà.
+        NeMo reçoit le glossaire de l'appelant, puis les termes du `prompt` et les `keywords` qui n'y sont pas déjà.
         """
         config = self._config
         stack = contextlib.AsyncExitStack()
@@ -432,7 +445,7 @@ class _LiveConnection:
             self._nemo.live(
                 sample_rate=config.rate,
                 language=to_nemo_language(config.language),
-                phrases=[*self._terms, *(word for word in config.keywords if word not in self._terms)],
+                phrases=list(dict.fromkeys([*self._terms, *config.prompt_terms, *config.keywords])),
                 boost=self._settings.glossary_boost,
                 endpointing_ms=config.silence_ms,
             )

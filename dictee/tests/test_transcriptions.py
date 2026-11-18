@@ -195,6 +195,68 @@ def test_personal_key_uses_its_owner_glossary(transcriptions_client, fake_nemo, 
     assert fake_nemo.calls[0]["phrases"] == ["Sortformer"]
 
 
+def test_prompt_completes_the_user_glossary(openai_client, fake_nemo, db, tone_mp3):
+    user = db.upsert_user("sub-1", "Ana@Example.org", "Ana")
+    db.save_settings(user, glossary="Nemotron\nMagpie")
+    openai_client.audio.transcriptions.create(
+        model="whisper-1",
+        file=("a.mp3", tone_mp3),
+        extra_headers={"X-OpenWebUI-User-Email": "ana@example.org"},
+        extra_body={"prompt": "Kubernetes\nMagpie"},
+    )
+    assert fake_nemo.calls[0]["phrases"] == ["Nemotron", "Magpie", "Kubernetes"]
+
+
+def test_prompt_alone_without_account(ask, fake_nemo):
+    assert ask(prompt="Kubernetes").status_code == 200
+    assert fake_nemo.calls[0]["phrases"] == ["Kubernetes"]
+
+
+def test_prompt_reaches_the_cleanup_glossary(ask, fake_llm):
+    assert ask(model="dictee-clean", prompt="Kubernetes").status_code == 200
+    system = fake_llm.calls[0]["messages"][0]["content"]
+    assert "- Kubernetes" in system
+
+
+def test_too_large_prompt_is_a_400(ask, fake_nemo):
+    r = ask(prompt="a" * 20_001)
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == "prompt"
+    assert r.json()["error"]["code"] == "invalid_value"
+    assert fake_nemo.calls == []
+
+
+def test_another_prompt_makes_another_task(transcriptions_client, db, tone_mp3):
+    headers, _ = personal_headers(db, "alice@example.test")
+    post(transcriptions_client, headers, tone_mp3, model="dictee")
+    post(transcriptions_client, headers, tone_mp3, model="dictee", prompt="Sortformer")
+    assert len(tasks_of(transcriptions_client)) == 2
+
+
+def test_blank_prompt_joins_the_same_task(transcriptions_client, db, tone_mp3):
+    headers, _ = personal_headers(db, "alice@example.test")
+    post(transcriptions_client, headers, tone_mp3, model="dictee")
+    post(transcriptions_client, headers, tone_mp3, model="dictee", prompt="  \n")
+    assert len(tasks_of(transcriptions_client)) == 1
+
+
+def test_free_prompt_is_accepted(ask, fake_nemo):
+    assert ask(prompt="Bonjour, voici une réunion.").status_code == 200
+    assert fake_nemo.calls[0]["phrases"] == []
+
+
+def test_prompt_keeps_terms_and_drops_sentences(ask, fake_nemo):
+    prompt = "Kubernetes\nModel Context Protocol\nwe talked about the new cluster setup today\nC'est bon ?"
+    assert ask(prompt=prompt).status_code == 200
+    assert fake_nemo.calls[0]["phrases"] == ["Kubernetes", "Model Context Protocol"]
+
+
+def test_prompt_never_reaches_the_logs(ask, caplog):
+    caplog.set_level(logging.DEBUG)
+    assert ask(prompt="Kubernetes").status_code == 200
+    assert "Kubernetes" not in caplog.text
+
+
 @pytest.mark.parametrize("sent,expected", [("fr-FR", "fr-FR"), ("EN", "en-US"), ("de", "de-DE"), ("", "auto")])
 def test_language_reaches_nemo_in_its_own_form(ask, fake_nemo, sent, expected):
     assert ask(language=sent).status_code == 200

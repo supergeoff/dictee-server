@@ -10,8 +10,12 @@ from dictee.profile import (
     Profile,
     glossary_prompt,
     glossary_terms,
+    glossary_too_large,
     load_profile,
+    merge_glossary,
     parse_glossary,
+    prompt_glossary,
+    with_extra_glossary,
 )
 
 
@@ -153,3 +157,35 @@ def test_profile_is_immutable(db, settings):
     assert isinstance(profile.glossary, tuple)
     with pytest.raises(dataclasses.FrozenInstanceError):
         profile.voice = "Marco"  # type: ignore[misc]
+
+
+def test_merge_glossary_appends_new_terms():
+    base = (GlossaryEntry("Nemotron"),)
+    assert merge_glossary(base, "Magpie\nNemotron\nK8s (souvent entendu : cassis)") == (
+        GlossaryEntry("Nemotron"),
+        GlossaryEntry("Magpie"),
+        GlossaryEntry("K8s", ("cassis",)),
+    )
+
+
+def test_merge_glossary_blank_keeps_base():
+    base = (GlossaryEntry("Nemotron"),)
+    assert merge_glossary(base, "  \n") is base
+
+
+def test_glossary_too_large():
+    assert glossary_too_large("a" * 20_001)
+    assert glossary_too_large("a\n" * 501)
+    assert not glossary_too_large("a\n" * 500)
+
+
+def test_with_extra_glossary_keeps_instructions_and_voice():
+    profile = Profile((GlossaryEntry("Nemotron"),), "Keep it short.", "Marco")
+    assert with_extra_glossary(profile, "Magpie") == Profile(
+        (GlossaryEntry("Nemotron"), GlossaryEntry("Magpie")), "Keep it short.", "Marco"
+    )
+
+
+def test_prompt_glossary_drops_context_sentences():
+    text = "Node.js\nModel Context Protocol\nun deux trois quatre cinq six\nVoici la réunion."
+    assert [entry.term for entry in prompt_glossary(text)] == ["Node.js", "Model Context Protocol"]
