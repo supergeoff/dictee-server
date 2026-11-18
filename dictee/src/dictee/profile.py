@@ -2,7 +2,7 @@
 
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.resources import files
 
 from dictee.auth import Caller
@@ -11,6 +11,10 @@ from dictee.settings import Settings
 
 # Le fichier voyage avec le paquet : c'est le texte de l'ancien proxy, neutre et sans rien de personnel.
 DEFAULT_INSTRUCTIONS = files("dictee").joinpath("defaults/instructions.txt").read_text(encoding="utf-8").strip()
+
+# Bornes d'un glossaire : celui de la page et le complément donné par `prompt`.
+MAX_GLOSSARY_CHARS = 20_000
+MAX_GLOSSARY_LINES = 500
 
 # Début des déformations d'une ligne : « (souvent entendu : » (forme de la page) ou « (often heard as: » (forme de
 # l'ancien proxy). Chaque `\s*` est suivi d'un caractère qui n'est pas une espace, donc sans retour en arrière coûteux.
@@ -71,6 +75,30 @@ def parse_glossary(text: str) -> list[GlossaryEntry]:
         hints = tuple(hint for hint in (part.strip() for part in hints_text.split(",")) if hint)
         entries.append(GlossaryEntry(term, hints))
     return entries
+
+
+def glossary_too_large(text: str) -> bool:
+    """Vrai si le texte d'un glossaire dépasse la borne en caractères ou en lignes."""
+    return len(text) > MAX_GLOSSARY_CHARS or len(text.splitlines()) > MAX_GLOSSARY_LINES
+
+
+def merge_glossary(base: tuple[GlossaryEntry, ...], extra: str) -> tuple[GlossaryEntry, ...]:
+    """Glossaire `base` suivi des entrées de `extra` dont le terme n'y est pas, dans leur ordre et sans doublon.
+
+    Les termes se comparent tels quels. Rend `base` lui-même quand `extra` n'ajoute rien.
+    """
+    known = {entry.term for entry in base}
+    added = []
+    for entry in parse_glossary(extra):
+        if entry.term not in known:
+            known.add(entry.term)
+            added.append(entry)
+    return base + tuple(added) if added else base
+
+
+def with_extra_glossary(profile: Profile, extra: str) -> Profile:
+    """Profil dont le glossaire est complété par le texte `extra` ; consignes et voix restent celles du profil."""
+    return replace(profile, glossary=merge_glossary(profile.glossary, extra))
 
 
 def glossary_terms(entries: Iterable[GlossaryEntry]) -> list[str]:

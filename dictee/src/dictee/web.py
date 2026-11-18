@@ -37,7 +37,13 @@ from dictee.audio import OUTPUT_FORMATS, encode_stream
 from dictee.auth import Caller
 from dictee.errors import NEMO_ERRORS, nemo_failure
 from dictee.nemo import TTS_SAMPLE_RATE
-from dictee.profile import DEFAULT_INSTRUCTIONS, load_profile
+from dictee.profile import (
+    DEFAULT_INSTRUCTIONS,
+    MAX_GLOSSARY_CHARS,
+    MAX_GLOSSARY_LINES,
+    glossary_too_large,
+    load_profile,
+)
 from dictee.settings import Settings
 from dictee.speech import LANGUAGE, list_voices, resolve_voice
 from dictee.upload import bounded_request
@@ -45,8 +51,6 @@ from dictee.upload import bounded_request
 logger = logging.getLogger("dictee")
 
 PREVIEW_TEXT = "Bonjour, voici la voix qui lira vos textes."
-MAX_GLOSSARY_CHARS = 20_000
-MAX_GLOSSARY_LINES = 500
 MAX_INSTRUCTIONS_CHARS = 20_000
 MAX_LABEL_CHARS = 100
 # Un formulaire de la page tient dans quelques dizaines de Ko : au-delà, le corps n'est pas lu.
@@ -226,7 +230,7 @@ async def _known_voice(state: State, requested: str) -> str:
 
 def _checked_glossary(text: str) -> str:
     glossary = _clean(text)
-    if len(glossary) > MAX_GLOSSARY_CHARS or len(glossary.splitlines()) > MAX_GLOSSARY_LINES:
+    if glossary_too_large(glossary):
         message = f"Le glossaire est limité à {MAX_GLOSSARY_CHARS} caractères et à {MAX_GLOSSARY_LINES} lignes."
         raise WebError(400, message)
     return glossary
