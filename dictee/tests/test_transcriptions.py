@@ -242,7 +242,13 @@ def test_blank_prompt_joins_the_same_task(transcriptions_client, db, tone_mp3):
 
 def test_free_prompt_is_accepted(ask, fake_nemo):
     assert ask(prompt="Bonjour, voici une réunion.").status_code == 200
-    assert fake_nemo.calls[0]["phrases"] == ["Bonjour, voici une réunion."]
+    assert fake_nemo.calls[0]["phrases"] == []
+
+
+def test_prompt_keeps_terms_and_drops_sentences(ask, fake_nemo):
+    prompt = "Kubernetes\nModel Context Protocol\nwe talked about the new cluster setup today\nC'est bon ?"
+    assert ask(prompt=prompt).status_code == 200
+    assert fake_nemo.calls[0]["phrases"] == ["Kubernetes", "Model Context Protocol"]
 
 
 def test_prompt_never_reaches_the_logs(ask, caplog):

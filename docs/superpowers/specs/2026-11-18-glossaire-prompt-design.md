@@ -18,7 +18,7 @@ Geoff veut compléter, depuis l'app dictee sur son téléphone, le glossaire que
 
 ## Conception
 
-- Lecture : `prompt` se lit avec `parse_glossary`, un terme par ligne, avec la forme `Terme (souvent entendu : a, b)`. Un `prompt` libre venu d'un autre front devient au pire quelques termes sans effet nuisible.
+- Lecture : `prompt` se lit avec `parse_glossary`, un terme par ligne, avec la forme `Terme (souvent entendu : a, b)`. Une ligne de plus de 5 mots ou terminée par `.`, `!` ou `?` est une phrase de contexte venue d'un autre front : elle est ignorée, car NeMo renforcerait une phrase entière et écrirait des mots que personne n'a dits.
 - Bornes : les limites de la page (`MAX_GLOSSARY_CHARS`, `MAX_GLOSSARY_LINES`) s'appliquent au `prompt`. Au-delà, la requête reçoit une erreur 400 au format OpenAI avec `param: "prompt"`.
 - Fusion : le glossaire effectif est celui du profil suivi des entrées du `prompt` dont le terme n'y figure pas déjà. Un appelant sans compte reçoit le seul complément.
 - Usage : le glossaire fusionné remplace celui du profil partout où il sert aujourd'hui, c'est-à-dire le boost NeMo, le glossaire de la reformulation et les `TaskParams` d'une tâche enregistrée (qui gardent donc le complément jusqu'à la fin de la tâche).

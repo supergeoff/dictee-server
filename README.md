@@ -32,7 +32,7 @@ Chaque appel porte une clé dans l'en-tête `Authorization: Bearer <clé>`. Une 
 | `dictee-clean` | Le texte reformulé par un LLM (un modèle de langage). Si la reformulation échoue, dictee rend le texte brut. |
 | `dictee-diarize` | Le texte avec ses locuteurs, nommés A, B, C dans l'ordre de leur première prise de parole. Le format `diarized_json` donne les mêmes locuteurs, quel que soit le modèle. |
 
-Le champ `response_format` vaut `json` par défaut, et accepte `text`, `srt`, `vtt`, `verbose_json` et `diarized_json`. Le champ `language` vaut `fr` par défaut. Le champ `prompt` est accepté et ignoré : dictee ne le transmet jamais à NeMo, car NeMo en ferait une phrase renforcée qui ajoute des mots que personne n'a dits. Le glossaire de l'utilisateur tient ce rôle, avec une force prudente.
+Le champ `response_format` vaut `json` par défaut, et accepte `text`, `srt`, `vtt`, `verbose_json` et `diarized_json`. Le champ `language` vaut `fr` par défaut. Le champ `prompt` complète le glossaire de l'utilisateur, un terme par ligne comme sur la page, dans les mêmes bornes (500 lignes et 20 000 caractères). Ses termes s'ajoutent sans doublon à ceux du compte et servent à NeMo comme à la reformulation. dictee ne transmet jamais le texte brut à NeMo et écarte les phrases de contexte (plus de 5 mots ou un point final), car NeMo en ferait des phrases renforcées qui ajoutent des mots que personne n'a dits. En direct, `transcription.prompt` suit la même règle.
 
 ```bash
 curl https://<adresse>/v1/audio/transcriptions \

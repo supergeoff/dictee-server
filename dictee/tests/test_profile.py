@@ -14,6 +14,7 @@ from dictee.profile import (
     load_profile,
     merge_glossary,
     parse_glossary,
+    prompt_glossary,
     with_extra_glossary,
 )
 
@@ -183,3 +184,8 @@ def test_with_extra_glossary_keeps_instructions_and_voice():
     assert with_extra_glossary(profile, "Magpie") == Profile(
         (GlossaryEntry("Nemotron"), GlossaryEntry("Magpie")), "Keep it short.", "Marco"
     )
+
+
+def test_prompt_glossary_drops_context_sentences():
+    text = "Node.js\nModel Context Protocol\nun deux trois quatre cinq six\nVoici la réunion."
+    assert [entry.term for entry in prompt_glossary(text)] == ["Node.js", "Model Context Protocol"]

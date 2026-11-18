@@ -28,7 +28,7 @@ from dictee.auth import resolve_caller
 from dictee.errors import NEMO_ERRORS, ApiError, nemo_failure, unexpected_error
 from dictee.modes import DEFAULT_LANGUAGE, MODELS, to_iso_language, to_nemo_language
 from dictee.nemo import LiveSession
-from dictee.profile import glossary_terms, glossary_too_large, load_profile, parse_glossary
+from dictee.profile import glossary_terms, glossary_too_large, load_profile, prompt_glossary
 from dictee.types import Cleared, Committed, Final, Partial
 
 logger = logging.getLogger("dictee")
@@ -124,7 +124,8 @@ def _read_language(code: object, param: str) -> str:
 def _read_transcription(transcription: dict, config: _Config) -> _Config:
     """Langue (`languages[0]`, sinon `language`), `keywords` et `prompt` ; `delay` et `model` sont ignorés.
 
-    Le `prompt` se lit comme le glossaire de la page, un terme par ligne, dans les mêmes bornes ; `null` vaut vide.
+    Le `prompt` se lit comme le glossaire de la page, un terme par ligne, dans les mêmes bornes et sans les phrases de
+    contexte (`prompt_glossary`) ; `null` vaut vide.
     """
     if transcription.get("languages") is not None:
         param = f"{_INPUT}.transcription.languages"
@@ -146,7 +147,7 @@ def _read_transcription(transcription: dict, config: _Config) -> _Config:
             raise _invalid(param, "'prompt' must be a string.")
         if glossary_too_large(prompt):
             raise _invalid(param, "'prompt' is limited to 20000 characters and 500 lines.")
-        config = replace(config, prompt_terms=tuple(glossary_terms(parse_glossary(prompt))))
+        config = replace(config, prompt_terms=tuple(glossary_terms(prompt_glossary(prompt))))
     return config
 
 
