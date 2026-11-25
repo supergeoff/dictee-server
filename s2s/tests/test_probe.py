@@ -7,7 +7,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from probe_litellm import pcm_duration_s, wav_data_info, wav_sample_rate  # noqa: E402
+from probe_litellm import (  # noqa: E402
+    pcm_duration_s,
+    pcm_to_wav,
+    wav_data_info,
+    wav_sample_rate,
+)
 
 
 def make_wav(rate: int, seconds: float) -> bytes:
@@ -81,6 +86,25 @@ def test_wav_rejects_missing_data_chunk():
 
 def test_pcm_duration_s():
     assert pcm_duration_s(48000, 24000) == 1.0
+
+
+def test_pcm_to_wav_roundtrip():
+    pcm = b"\x01\x00" * 2400
+    wav = pcm_to_wav(pcm, 24000)
+    assert wav_data_info(wav) == (24000, 1, 16, 4800)
+    with wave.open(io.BytesIO(wav)) as w:
+        assert w.readframes(w.getnframes()) == pcm
+
+
+def test_pcm_to_wav_rejects_odd_length():
+    with pytest.raises(ValueError):
+        pcm_to_wav(b"\x00\x00\x00", 24000)
+
+
+@pytest.mark.parametrize("rate", [0, -24000])
+def test_pcm_to_wav_rejects_invalid_rate(rate):
+    with pytest.raises(ValueError):
+        pcm_to_wav(b"\x00\x00", rate)
 
 
 @pytest.mark.parametrize("rate", [0, -24000])

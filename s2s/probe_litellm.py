@@ -6,16 +6,23 @@
 
 Variables d'environnement : LITELLM_URL (finit par /v1) et LITELLM_KEY.
 La clé et les en-têtes ne sont jamais affichés.
+
+Voxtral n'accepte que mp3 et pcm via OpenRouter. Le PCM est du 16 bits signé
+little-endian mono à 24 kHz (doc Mistral), ce que la transcription du WAV
+reconstruit confirme.
 """
 
+import io
 import os
 import sys
 import time
+import wave
 
 import httpx
 
 TEXT = "Bonjour, ceci est un essai de transcription."
 VOICE = "fr_marie_neutral"
+PCM_RATE = 24000
 
 
 def wav_data_info(data: bytes) -> tuple[int, int, int, int]:
@@ -63,19 +70,24 @@ def pcm_duration_s(n_bytes: int, sample_rate: int) -> float:
     return n_bytes / (2 * sample_rate)
 
 
+def pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:
+    """Enveloppe un PCM 16 bits mono dans un WAV."""
+    if sample_rate <= 0:
+        raise ValueError("taux invalide")
+    if len(pcm) % 2:
+        raise ValueError("nombre d'octets impair pour du PCM 16 bits")
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        w.writeframes(pcm)
+    return buf.getvalue()
+
+
 def fail(message: str) -> None:
     print(f"ECHEC : {message}", file=sys.stderr)
     sys.exit(1)
-
-
-def speech_payload(response_format: str, **extra) -> dict:
-    return {
-        "model": "speech",
-        "voice": VOICE,
-        "input": TEXT,
-        "response_format": response_format,
-        **extra,
-    }
 
 
 def main() -> None:
@@ -86,34 +98,23 @@ def main() -> None:
     headers = {"Authorization": f"Bearer {key}"}
 
     with httpx.Client(timeout=120) as client:
-        # 1. WAV complet
-        try:
-            r = client.post(
-                f"{url}/audio/speech", headers=headers, json=speech_payload("wav")
-            )
-            r.raise_for_status()
-            wav = r.content
-            rate, channels, bits, wav_data_bytes = wav_data_info(wav)
-        except (httpx.HTTPError, ValueError) as e:
-            fail(f"appel speech en wav : {type(e).__name__} {e}")
-        wav_duration = wav_data_bytes / (rate * channels * bits / 8)
-        print(
-            f"1. speech wav : {len(wav)} octets, taux {rate} Hz, {channels} canal(aux), "
-            f"{bits} bits, {wav_data_bytes} octets de données, "
-            f"{wav_duration:.2f} s d'audio"
-        )
-
-        # 2. PCM en flux, sans compression pour compter les vrais octets
+        # 1. PCM en flux, sans compression pour compter les vrais octets
+        payload = {
+            "model": "speech",
+            "voice": VOICE,
+            "input": TEXT,
+            "response_format": "pcm",
+            "stream_format": "audio",
+        }
         try:
             t0 = time.monotonic()
             first = None
-            chunks = 0
-            total = 0
+            parts = []
             with client.stream(
                 "POST",
                 f"{url}/audio/speech",
                 headers={**headers, "Accept-Encoding": "identity"},
-                json=speech_payload("pcm", stream_format="audio"),
+                json=payload,
             ) as resp:
                 resp.raise_for_status()
                 for chunk in resp.iter_bytes():
@@ -121,28 +122,28 @@ def main() -> None:
                         continue
                     if first is None:
                         first = time.monotonic() - t0
-                    chunks += 1
-                    total += len(chunk)
+                    parts.append(chunk)
             elapsed = time.monotonic() - t0
         except httpx.HTTPError as e:
             fail(f"appel speech en pcm : {type(e).__name__} {e}")
         if first is None:
             fail("appel speech en pcm : aucun octet reçu.")
+        chunks = len(parts)
+        pcm = b"".join(parts)
         ratio_time = first / elapsed if elapsed > 0 else 1.0
         print(
-            f"2. speech pcm : premier octet {first:.2f} s, total {elapsed:.2f} s "
-            f"(premier/total {ratio_time:.2f}), {chunks} morceaux, {total} octets, "
-            f"{pcm_duration_s(total, rate):.2f} s d'audio si 16 bits mono à {rate} Hz"
-        )
-        ratio_bytes = total / wav_data_bytes if wav_data_bytes else 0.0
-        print(
-            f"   octets pcm / octets de données du wav : {ratio_bytes:.2f} "
-            "(proche de 1 : pcm 16 bits mono au même taux que le wav)"
+            f"1. speech pcm : premier octet {first:.2f} s, total {elapsed:.2f} s "
+            f"(premier/total {ratio_time:.2f}), {chunks} morceaux, {len(pcm)} octets, "
+            f"{pcm_duration_s(len(pcm), PCM_RATE):.2f} s d'audio à {PCM_RATE} Hz"
         )
         if chunks == 1 or ratio_time > 0.9:
             print("ATTENTION : l'audio semble arriver d'un seul bloc, pas de flux.")
 
-        # 3. Transcription du WAV de l'appel 1
+        # 2. Transcription du WAV construit à partir du PCM
+        try:
+            wav = pcm_to_wav(pcm, PCM_RATE)
+        except ValueError as e:
+            fail(f"construction du wav : {e}")
         try:
             r = client.post(
                 f"{url}/audio/transcriptions",
@@ -155,7 +156,7 @@ def main() -> None:
         except (httpx.HTTPError, ValueError) as e:
             fail(f"appel transcriptions : {type(e).__name__} {e}")
         ok = "essai" in text.lower()
-        print(f"3. transcription : {text!r} {'OK' if ok else ''}".rstrip())
+        print(f"2. transcription : {text!r} {'OK' if ok else ''}".rstrip())
         if not ok:
             fail("la transcription ne contient pas « essai ».")
 
