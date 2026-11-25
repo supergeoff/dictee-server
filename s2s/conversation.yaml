@@ -2,7 +2,11 @@ schema_version: 1
 runtime:
   server: {host: 0.0.0.0, port: 8765}
 blocks:
-  vad: {kind: vad, backend: silero}
+  vad:
+    kind: vad
+    backend: silero
+    settings:
+      min_speech_ms: 250
   stt:
     kind: stt
     backend: openai
