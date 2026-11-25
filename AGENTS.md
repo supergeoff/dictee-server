@@ -24,7 +24,7 @@ Ce dépôt porte dictee, le point d'entrée audio de la stack de Geoff, et l'ima
 | Commande | Effet |
 |---|---|
 | `make test` | Lance `pytest`, avec un faux NeMo et un faux LiteLLM, sans réseau. |
-| `S2S_REF=<ref> make s2s-check` | Construit l'image de `s2s/` (serveur speech-to-speech du mode conversation d'Open WebUI), valide `s2s/conversation.yaml` dans l'image et le Caddyfile du gardien. `s2s/` est la source des montages du compose de Dokploy. |
+| `S2S_REF=<ref> make s2s-check` | Construit l'image de `s2s/` (serveur speech-to-speech du mode conversation d'Open WebUI), valide `s2s/conversation.yaml` dans l'image, puis construit le relais `s2s/gate` et lance ses tests dans son image. `s2s/` est la source du montage de `conversation.yaml` du compose de Dokploy, et `s2s/gate` celle de l'image du relais. |
 | `make integration` | Demande la variable `NEMO_VERSION` (voir Principes). Lance le compose de test en local avec les vrais modèles sur de courts extraits audio. Elle se joue à la demande, pas à chaque changement, et ne tourne pas dans la CI. |
 
 ## Écriture
