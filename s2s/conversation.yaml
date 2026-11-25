@@ -14,6 +14,7 @@ blocks:
       openai_stt_base_url: {env: LITELLM_URL}
       openai_stt_api_key: {env: CONVERSATION_LITELLM_KEY}
       openai_stt_model: transcribe
+      openai_stt_language: fr
   llm:
     kind: llm
     backend: chat-completions
