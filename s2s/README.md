@@ -3,7 +3,7 @@
 Ce dossier porte le serveur speech-to-speech de Hugging Face qui sert le mode appel vocal d'Open WebUI. Il enchaîne VAD, transcription, LLM et synthèse vocale, les trois derniers appelant LiteLLM.
 
 - `Dockerfile` construit l'image. La référence de speech-to-speech (commit, branche ou tag de `huggingface/speech-to-speech`, installée depuis l'archive GitHub) est l'argument de build `S2S_REF`, sans valeur par défaut. Dokploy construit depuis `#main:s2s`.
-- `conversation.yaml` est la configuration du pipeline, montée dans `/config/conversation.yaml`. Ce dossier en est la source. Le taux d'échantillonnage de la synthèse (24000) est celui mesuré sur Voxtral via OpenRouter.
+- `conversation.yaml` est la configuration du pipeline, montée dans `/config/conversation.yaml`. Ce dossier en est la source. Le taux d'échantillonnage de la synthèse (24000) est celui que renvoie MAI-Voice-2.1-Flash via OpenRouter (en-tête `audio/pcm;rate=24000;channels=1`).
 - `gate/` est le relais devant le service : c'est un petit serveur Python (`gate/gate.py`, `aiohttp` en version exacte dans `gate/requirements.txt`) qui écoute sur le port 8080 du service `conversation-gate`. Dokploy construit son image depuis `#main:s2s/gate`.
 - Variables : `LITELLM_URL`, `CONVERSATION_LITELLM_KEY`, `CONVERSATION_GATE_KEY`.
 - `mounts-conversation.json` décrit le montage de fichier Dokploy de `conversation.yaml` dans le compose `dictee`. Après une modification de `conversation.yaml`, on écrit le montage avec `python3 ../dokployconfig/deploy/mounts.py --catalog s2s/mounts-conversation.json --apply` (variables `DOKPLOY_URL` et `DOKPLOY_API_KEY`), puis on redémarre le service. Le relais n'a aucun montage : sa seule configuration est la variable `CONVERSATION_GATE_KEY`.
@@ -12,7 +12,7 @@ Vérification : `S2S_REF=4d067e7977f05920daa13c089adc396b51a27384 make s2s-check
 
 La sonde `probe_litellm.py` mesure ce que LiteLLM renvoie pour la transcription et la synthèse, et ses tests sont dans `tests/test_probe.py`.
 
-`openai_tts_voice_override` impose la voix `fr_marie_neutral` au serveur, quelle que soit la voix qu'Open WebUI envoie dans `session.update`. `openai_tts_voice` reste la voix par défaut.
+`openai_tts_voice_override` impose la voix `fr-FR-Marc:MAI-Voice-2.1-Flash` au serveur, quelle que soit la voix qu'Open WebUI envoie dans `session.update`. `openai_tts_voice` reste la voix par défaut.
 
 ## Relais
 
