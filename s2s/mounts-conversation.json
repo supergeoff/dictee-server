@@ -1,0 +1,13 @@
+{
+  "composeId": "xUkfJ_DJkAF2Xrskxsank",
+  "appName": "ai-dictee-tltwgv",
+  "service": "conversation",
+  "mounts": [
+    {
+      "path": "conversation.yaml",
+      "mountId": "VnNZvgYF4eX6zpX7GCORw",
+      "filePath": "conversation.yaml",
+      "containerPath": "/config/conversation.yaml"
+    }
+  ]
+}

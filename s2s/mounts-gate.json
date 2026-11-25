@@ -1,0 +1,13 @@
+{
+  "composeId": "xUkfJ_DJkAF2Xrskxsank",
+  "appName": "ai-dictee-tltwgv",
+  "service": "conversation-gate",
+  "mounts": [
+    {
+      "path": "conversation.Caddyfile",
+      "mountId": "1YtzzQCGjlMGEp10PzCI2",
+      "filePath": "conversation.Caddyfile",
+      "containerPath": "/etc/caddy/Caddyfile"
+    }
+  ]
+}
