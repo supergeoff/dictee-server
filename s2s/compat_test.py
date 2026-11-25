@@ -15,7 +15,10 @@ Variables d'environnement : CONVERSATION_URL (wss://.../v1/realtime),
 CONVERSATION_GATE_KEY, LITELLM_URL (finit par /v1) et LITELLM_KEY.
 Aucune clé n'est affichée.
 
-Usage : compat_test.py [--points 1,2,3]
+Usage : compat_test.py [--points 1,2,3] [--skip-gate]
+
+--skip-gate vise un service local sans gardien : le point 1 n'est pas joué (SKIP, non
+applicable en local) et CONVERSATION_GATE_KEY n'est plus requise.
 """
 
 import asyncio
@@ -832,16 +835,27 @@ POINTS: list[tuple[int, str, Callable, float, tuple[int, ...]]] = [
 ]
 
 
-async def run(selected: set[int]) -> int:
+def parse_args(argv: list[str]) -> tuple[set[int], bool]:
+    """Renvoie (points choisis, skip_gate). Lève ValueError si --points est mal formé."""
+    selected = set(range(1, 10))
+    if "--points" in argv:
+        try:
+            selected = {int(n) for n in argv[argv.index("--points") + 1].split(",")}
+        except (IndexError, ValueError):
+            raise ValueError("--points attend une liste comme 1,2,3") from None
+    return selected, "--skip-gate" in argv
+
+
+async def run(selected: set[int], skip_gate: bool = False) -> int:
     url = os.environ.get("CONVERSATION_URL", "")
     key = os.environ.get("CONVERSATION_GATE_KEY", "")
     litellm_url = os.environ.get("LITELLM_URL", "").rstrip("/")
     litellm_key = os.environ.get("LITELLM_KEY", "")
-    if not (url and key and litellm_url and litellm_key):
-        print(
-            "ECHEC : CONVERSATION_URL, CONVERSATION_GATE_KEY, LITELLM_URL et LITELLM_KEY "
-            "doivent être définies."
+    if not (url and (key or skip_gate) and litellm_url and litellm_key):
+        names = "CONVERSATION_URL, LITELLM_URL et LITELLM_KEY" if skip_gate else (
+            "CONVERSATION_URL, CONVERSATION_GATE_KEY, LITELLM_URL et LITELLM_KEY"
         )
+        print(f"ECHEC : {names} doivent être définies.")
         return 1
     failed = []
     async with httpx.AsyncClient(timeout=120) as client:
@@ -864,6 +878,9 @@ async def run(selected: set[int]) -> int:
         results: dict[int, bool] = {}
         for number, label, fn, timeout, needs in POINTS:
             if number not in selected:
+                continue
+            if number == 1 and skip_gate:
+                print(f"SKIP {number} : {label} : non applicable en local", flush=True)
                 continue
             if number >= 7 and ctx.conn is not None:
                 await ctx.conn.close()  # le serveur n'a qu'une place de session
@@ -906,14 +923,12 @@ async def run(selected: set[int]) -> int:
 
 
 def main() -> None:
-    selected = set(range(1, 10))
-    if "--points" in sys.argv:
-        try:
-            selected = {int(n) for n in sys.argv[sys.argv.index("--points") + 1].split(",")}
-        except (IndexError, ValueError):
-            print("ECHEC : --points attend une liste comme 1,2,3")
-            sys.exit(1)
-    sys.exit(asyncio.run(run(selected)))
+    try:
+        selected, skip_gate = parse_args(sys.argv[1:])
+    except ValueError as e:
+        print(f"ECHEC : {e}")
+        sys.exit(1)
+    sys.exit(asyncio.run(run(selected, skip_gate)))
 
 
 if __name__ == "__main__":

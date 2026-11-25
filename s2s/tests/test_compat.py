@@ -143,3 +143,32 @@ def test_check_input_pcm_accepts_24k_mono_16bit():
 def test_looks_french():
     assert ct.looks_french("Bonjour, peux-tu me dire quelle heure il est à Tokyo ?")
     assert not ct.looks_french("Hello, can you tell me the time in Tokyo?")
+
+
+def test_parse_args_skip_gate_and_points():
+    assert ct.parse_args([]) == (set(range(1, 10)), False)
+    assert ct.parse_args(["--skip-gate"]) == (set(range(1, 10)), True)
+    assert ct.parse_args(["--points", "2,7", "--skip-gate"]) == ({2, 7}, True)
+    with pytest.raises(ValueError):
+        ct.parse_args(["--points"])
+
+
+def test_skip_gate_skips_point_1_and_needs_no_gate_key(monkeypatch, capsys):
+    import asyncio
+
+    async def fake_synthesize(client, base, key, text):
+        return b"\x00\x00" * 2400
+
+    monkeypatch.setattr(ct, "synthesize", fake_synthesize)
+    monkeypatch.setenv("CONVERSATION_URL", "ws://127.0.0.1:1/v1/realtime")
+    monkeypatch.delenv("CONVERSATION_GATE_KEY", raising=False)
+    monkeypatch.setenv("LITELLM_URL", "http://litellm.invalid/v1")
+    monkeypatch.setenv("LITELLM_KEY", "test")
+    assert asyncio.run(ct.run({1}, skip_gate=True)) == 0
+    out = capsys.readouterr().out
+    assert "SKIP 1" in out
+    assert "non applicable en local" in out
+    assert "PASS 1" not in out and "FAIL 1" not in out
+    # Sans le drapeau, la clé du gardien reste obligatoire.
+    assert asyncio.run(ct.run({1})) == 1
+    assert "CONVERSATION_GATE_KEY" in capsys.readouterr().out
