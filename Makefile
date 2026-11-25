@@ -2,7 +2,9 @@
 COMPOSE ?= $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
 COMPOSE_FILES = -f compose.integration.yaml
 
-.PHONY: check-nemo-version down integration nemo-up test
+.PHONY: check-nemo-version check-s2s-version down integration nemo-up s2s-check test
+
+CADDY_IMAGE = docker.io/library/caddy:2.11.9-alpine
 
 .env:
 	sh integration/make-env.sh > .env
@@ -16,6 +18,21 @@ nemo-up: check-nemo-version .env
 # Le contrôle teste la variable d'environnement, celle que compose reçoit.
 check-nemo-version:
 	@test -n "$$NEMO_VERSION" || { echo "NEMO_VERSION est requise : la valeur de NEMO_VERSION dans les args du compose dictee de Dokploy (NEMO_VERSION=<version> make integration)" >&2; exit 1; }
+
+check-s2s-version:
+	@test -n "$(S2S_VERSION)" || { echo "S2S_VERSION est requise : la valeur de S2S_VERSION dans les args du compose dictee de Dokploy (S2S_VERSION=<version> make s2s-check)" >&2; exit 1; }
+
+# Construit l'image s2s, valide conversation.yaml dedans, puis valide le Caddyfile du gardien.
+# Les variables {env: ...} du YAML reçoivent des valeurs factices : la validation ne contacte aucun service.
+s2s-check: check-s2s-version
+	docker build --build-arg S2S_VERSION=$(S2S_VERSION) -t conversation-check s2s
+	docker run --rm --entrypoint python \
+		-e LITELLM_URL=http://litellm.invalid/v1 -e CONVERSATION_LITELLM_KEY=test \
+		-v $(PWD)/s2s/conversation.yaml:/config/conversation.yaml:ro \
+		conversation-check -c "from speech_to_speech.config import load_config, validate_config; validate_config(load_config('/config/conversation.yaml')); print('Configuration valide')"
+	docker run --rm -e CONVERSATION_GATE_KEY=test \
+		-v $(PWD)/s2s/conversation.Caddyfile:/etc/caddy/Caddyfile:ro \
+		$(CADDY_IMAGE) caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile
 
 down:
 	$(COMPOSE) $(COMPOSE_FILES) down
