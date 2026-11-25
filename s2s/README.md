@@ -10,3 +10,7 @@ Ce dossier porte le serveur speech-to-speech de Hugging Face qui sert le mode ap
 Vérification : `S2S_VERSION=1.1.0 make s2s-check` construit l'image, valide la configuration dedans, puis valide le Caddyfile.
 
 La sonde `probe_litellm.py` mesure ce que LiteLLM renvoie pour la transcription et la synthèse, et ses tests sont dans `tests/test_probe.py`.
+
+`openai_tts_voice` n'est qu'une voix par défaut : la voix envoyée par le client dans `session.update` la remplace, donc Open WebUI doit envoyer `fr_marie_neutral`.
+
+`CONVERSATION_GATE_KEY` doit être une valeur aléatoire non vide, sans `*`, parce que le matcher de Caddy lirait une étoile comme un joker.
