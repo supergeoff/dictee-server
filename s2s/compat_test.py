@@ -17,6 +17,9 @@ Aucune clé n'est affichée.
 
 Usage : compat_test.py [--points 1,2,3] [--skip-gate]
 
+Le point 10 envoie input_audio_buffer.clear : le gardien le retire, speech-to-speech ne le connaît pas.
+Sans gardien, il échoue donc, y compris avec --skip-gate.
+
 --skip-gate vise un service local sans gardien : le point 1 n'est pas joué (SKIP, non
 applicable en local) et CONVERSATION_GATE_KEY n'est plus requise.
 """
@@ -196,6 +199,11 @@ def respond_to_result(call_id: str) -> dict:
             "metadata": {"call_id": call_id},
         },
     }
+
+
+def input_audio_buffer_clear() -> dict:
+    """Le client d'Open WebUI l'envoie à chaque coupure du micro (src/lib/utils/realtime.ts)."""
+    return {"type": "input_audio_buffer.clear"}
 
 
 def context_events(revision: int, messages: list[dict]) -> list[dict]:
@@ -822,6 +830,50 @@ async def point9(ctx: Ctx) -> str:
     return f"médiane {statistics.median(delays):.2f} s sur 5 essais (min {min(delays):.2f} s, max {max(delays):.2f} s)"
 
 
+async def point10(ctx: Ctx) -> str:
+    """Micro coupé : le client envoie input_audio_buffer.clear après de l'audio.
+
+    La session doit rester ouverte, sans événement error, et répondre à une question parlée ensuite.
+    Sans le gardien, speech-to-speech répond error à cet événement : le point échoue.
+    """
+    conn = await ctx.open()
+    try:
+        await stream_pcm(conn, ctx.question[: PCM_RATE * 2])  # une seconde d'audio, sans silence
+        mark = conn.mark()
+        await conn.send(input_audio_buffer_clear())
+        await asyncio.sleep(2)
+        conn.assert_healthy(mark)
+        mark = conn.mark()
+        await stream_pcm(conn, ctx.second_question + silence(SILENCE_S))
+        try:
+            _, _, tr = await conn.wait_for(
+                of_type("conversation.item.input_audio_transcription.completed"), 30, start=mark
+            )
+        except WaitTimeout:
+            seen = [e.get("type") for _, e in conn.events[mark:]]
+            raise PointFail(f"pas de transcription après le micro coupé sous 30 s ; événements : {seen}") from None
+        mark = conn.mark()
+        await conn.send(respond_to_input(tr["item_id"]))
+        try:
+            idx, _, done = await conn.wait_for(of_type("response.done"), 60, start=mark)
+        except WaitTimeout:
+            seen = [e.get("type") for _, e in conn.events[mark:]]
+            raise PointFail(f"pas de réponse après le micro coupé sous 60 s ; événements : {seen}") from None
+        status = (done.get("response") or {}).get("status")
+        if status != "completed":
+            raise PointFail(f"response.done avec le statut {status!r} : {short(done)}")
+        _, deltas = response_audio(conn.events[mark : idx + 1])
+        if not deltas:
+            raise PointFail(f"aucun response.output_audio.delta après le micro coupé : {short(done)}")
+        conn.assert_healthy(0)
+        return (
+            f"session ouverte après input_audio_buffer.clear, transcription {tr.get('transcript', '')!r}, "
+            f"puis réponse de {len(deltas)} deltas"
+        )
+    finally:
+        await conn.close()
+
+
 POINTS: list[tuple[int, str, Callable, float, tuple[int, ...]]] = [
     (1, "connexion sans clé ou avec une mauvaise clé refusée", point1, 30, ()),
     (2, "session.update du bridge accepté", point2, 40, ()),
@@ -832,12 +884,13 @@ POINTS: list[tuple[int, str, Callable, float, tuple[int, ...]]] = [
     (7, "question pendant un appel d'outil", point7, 330, ()),
     (8, "30 s sans audio", point8, 90, ()),
     (9, "délai fin d'audio vers premier delta", point9, 420, ()),
+    (10, "micro coupé : la session reste ouverte", point10, 150, ()),
 ]
 
 
 def parse_args(argv: list[str]) -> tuple[set[int], bool]:
     """Renvoie (points choisis, skip_gate). Lève ValueError si --points est mal formé."""
-    selected = set(range(1, 10))
+    selected = set(range(1, 11))
     if "--points" in argv:
         try:
             selected = {int(n) for n in argv[argv.index("--points") + 1].split(",")}

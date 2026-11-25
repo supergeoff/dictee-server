@@ -78,6 +78,18 @@ def test_respond_to_result_and_function_output():
     assert [t["name"] for t in ev["response"]["tools"]] == ["play_animation"]
 
 
+def test_input_audio_buffer_clear_matches_bridge():
+    """Le client d'Open WebUI l'envoie à chaque coupure du micro (src/lib/utils/realtime.ts) : type seul, rien d'autre."""
+    assert ct.input_audio_buffer_clear() == {"type": "input_audio_buffer.clear"}
+
+
+def test_point_10_is_the_muted_microphone_point():
+    number, label, fn, timeout, needs = ct.POINTS[-1]
+    assert (number, fn) == (10, ct.point10)
+    assert "micro coupé" in label
+    assert needs == ()
+
+
 def test_context_events_first_snapshot_has_no_delete():
     events = ct.context_events(0, [{"role": "user", "content": "Salut"}])
     assert [e["type"] for e in events] == ["conversation.item.create"]
@@ -146,8 +158,8 @@ def test_looks_french():
 
 
 def test_parse_args_skip_gate_and_points():
-    assert ct.parse_args([]) == (set(range(1, 10)), False)
-    assert ct.parse_args(["--skip-gate"]) == (set(range(1, 10)), True)
+    assert ct.parse_args([]) == (set(range(1, 11)), False)
+    assert ct.parse_args(["--skip-gate"]) == (set(range(1, 11)), True)
     assert ct.parse_args(["--points", "2,7", "--skip-gate"]) == ({2, 7}, True)
     with pytest.raises(ValueError):
         ct.parse_args(["--points"])
