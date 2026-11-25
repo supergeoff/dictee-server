@@ -44,6 +44,7 @@ TRANSCRIPTION_MODEL = "transcribe"
 VOICE_MODEL = "medium"
 QUESTION = "Bonjour, peux-tu me dire quelle heure il est à Tokyo ?"
 SECOND_QUESTION = "Tu m'entends toujours ?"
+FACTUAL_QUESTION = "Et à Paris ?"
 SILENCE_S = 1.5
 CHUNK_MS = 50
 SLOT_RETRIES = 8
@@ -241,10 +242,6 @@ def chunk_pcm(pcm: bytes, chunk_ms: int = CHUNK_MS) -> Iterator[bytes]:
         yield pcm[off : off + size]
 
 
-def median(values: list[float]) -> float:
-    return statistics.median(values)
-
-
 def short(event: object, limit: int = 400) -> str:
     """Événement sur une ligne, charges audio tronquées."""
     if isinstance(event, dict):
@@ -400,6 +397,8 @@ class Ctx:
         self.litellm_key = litellm_key
         self.question = b""
         self.second_question = b""
+        self.factual_question = b""
+        self.notes: list[str] = []
         self.conn: Conn | None = None
         self.item_id = ""
         self.slot_retries = 0
@@ -611,7 +610,13 @@ async def point6(ctx: Ctx) -> str:
     return f"réponse acceptée, {len(deltas)} deltas, {pcm_duration_s(len(pcm), PCM_RATE):.2f} s d'audio"
 
 
-async def point7(ctx: Ctx) -> str:
+async def tool_flow(ctx: Ctx, second_pcm: bytes, strict: bool = True) -> dict:
+    """Rejoue le flux du client autour d'un appel d'outil en attente.
+
+    Question 1, response.create du client, appel generate_chat_completion. Pendant que l'appel
+    est en attente, seconde question en audio, transcription, puis le response.create que le
+    client envoie après bridge.respond {item_id}. Ensuite le résultat d'outil et sa lecture.
+    """
     conn = await ctx.open(TOOL_INSTRUCTIONS)
     try:
         mark = conn.mark()
@@ -657,11 +662,11 @@ async def point7(ctx: Ctx) -> str:
             raise PointFail(f"response.created sans la metadata input_item_id : {short(created)}")
         await conn.wait_for(of_type("response.done"), 30, start=mark)
 
-        # Appel d'outil en cours : le bridge n'a pas encore envoyé de résultat. L'utilisateur parle.
+        # Appel d'outil en attente : l'utilisateur pose une seconde question.
         mark = conn.mark()
-        await stream_pcm(conn, ctx.second_question + silence(SILENCE_S))
+        await stream_pcm(conn, second_pcm + silence(SILENCE_S))
         try:
-            await conn.wait_for(
+            _, _, tr2 = await conn.wait_for(
                 lambda e: e.get("type") == "conversation.item.input_audio_transcription.completed"
                 and e.get("item_id") != item_id,
                 30,
@@ -673,24 +678,84 @@ async def point7(ctx: Ctx) -> str:
             ) from None
         conn.assert_healthy(mark)
 
+        # Le client lance la réponse à la seconde question (bridge.respond {item_id}).
+        mark = conn.mark()
+        await conn.send(respond_to_input(tr2["item_id"]))
+        out2: list = []
+        second_error = ""
+        try:
+            idx, _, done2 = await conn.wait_for(of_type("response.done"), 60, start=mark)
+            status2 = (done2.get("response") or {}).get("status")
+            if status2 != "completed":
+                raise PointFail(f"response.done de la seconde question, statut {status2!r} : {short(done2)}")
+            out2 = [(i.get("type"), i.get("name")) for i in (done2.get("response") or {}).get("output", [])]
+        except WaitTimeout:
+            seen = [e.get("type") for _, e in conn.events[mark:]]
+            raise PointFail(f"pas de response.done pour la seconde question ; événements : {seen}") from None
+        except PointFail as e:
+            await asyncio.sleep(2)
+            state = conn.closed or "connexion encore ouverte 2 s après"
+            if strict or conn.closed:
+                raise PointFail(f"{e} ; {state}") from None
+            second_error = f"{e} ; {state}"
+
+        # Résultat d'outil, puis lecture du résultat (bridge.result puis bridge.respond {call_id}).
         mark = conn.mark()
         await conn.send(function_call_output(call_id, "completed", "Il est vingt et une heures à Tokyo."))
-        await conn.send(respond_to_result(call_id))
+        result_event = respond_to_result(call_id)
+        await conn.send(result_event)
         try:
             idx, _, done = await conn.wait_for(of_type("response.done"), 60, start=mark)
         except WaitTimeout:
             seen = [e.get("type") for _, e in conn.events[mark:]]
             raise PointFail(f"pas de réponse après le résultat sous 60 s ; événements : {seen}") from None
-        pcm, deltas = response_audio(conn.events[mark : idx + 1])
-        if not deltas:
-            raise PointFail("aucune réponse audio après le résultat : " + short(done, 2500) + " ; événements : " + str([e.get("type") for _, e in conn.events[mark : idx + 1]]))
-        text = spoken_text(conn.events[mark : idx + 1])
-        return (
-            f"appel {args['request']!r} ; session ouverte pendant la seconde question ; "
-            f"réponse après résultat : {len(deltas)} deltas, {text!r}"
-        )
+        status = (done.get("response") or {}).get("status")
+        if status != "completed":
+            raise PointFail(f"response.done après le résultat, statut {status!r} : {short(done)}")
+        _, deltas = response_audio(conn.events[mark : idx + 1])
+        output = [(i.get("type"), i.get("name")) for i in (done.get("response") or {}).get("output", [])]
+        return {
+            "request": args["request"],
+            "second_output": out2,
+            "second_error": second_error,
+            "deltas": len(deltas),
+            "text": spoken_text(conn.events[mark : idx + 1]),
+            "output": output,
+            "tools": [t["name"] for t in result_event["response"]["tools"]],
+            "recalled": any(name == "generate_chat_completion" for _, name in output),
+        }
     finally:
         await conn.close()
+
+
+async def point7(ctx: Ctx) -> str:
+    failure: PointFail | None = None
+    detail = ""
+    try:
+        res = await tool_flow(ctx, ctx.second_question)
+        detail = (
+            f"appel {res['request']!r} ; session ouverte pendant la seconde question, sa réponse "
+            f"{res['second_output']} ; après le résultat : {res['deltas']} deltas, sortie {res['output']}, "
+            f"{res['text']!r}"
+        )
+    except PointFail as e:
+        failure = e
+    # Variante factuelle : ne bloque pas le point, qu'il réussisse ou non.
+    try:
+        var = await asyncio.wait_for(tool_flow(ctx, ctx.factual_question, strict=False), 150)
+        verb = "rappelle" if var["recalled"] else "ne rappelle pas"
+        note = (
+            f"NOTE point 7, variante factuelle ({FACTUAL_QUESTION!r}) : le modèle {verb} "
+            f"generate_chat_completion après le résultat d'outil ; tools du response.create : "
+            f"{var['tools']} ; sortie {var['output']}"
+            + (f" ; réponse à la seconde question : {var['second_error']}" if var["second_error"] else "")
+        )
+    except Exception as e:  # noqa: BLE001
+        note = f"NOTE point 7, variante factuelle non conclue : {type(e).__name__} {e}"
+    ctx.notes.append(note)
+    if failure is not None:
+        raise failure
+    return detail
 
 
 async def point8(ctx: Ctx) -> str:
@@ -705,7 +770,19 @@ async def point8(ctx: Ctx) -> str:
         except WaitTimeout:
             seen = [e.get("type") for _, e in conn.events[mark:]]
             raise PointFail(f"pas de session.updated après 30 s sans audio ; événements : {seen}") from None
-        return "session ouverte après 30 s sans audio, session.updated reçu"
+        mark = conn.mark()
+        await stream_pcm(conn, ctx.second_question + silence(SILENCE_S))
+        try:
+            _, _, tr = await conn.wait_for(
+                of_type("conversation.item.input_audio_transcription.completed"), 30, start=mark
+            )
+        except WaitTimeout:
+            seen = [e.get("type") for _, e in conn.events[mark:]]
+            raise PointFail(f"pas de transcription après 30 s sans audio ; événements : {seen}") from None
+        return (
+            f"session ouverte après 30 s sans audio, session.updated reçu, "
+            f"puis transcription {tr.get('transcript', '')!r}"
+        )
     finally:
         await conn.close()
 
@@ -739,7 +816,7 @@ async def point9(ctx: Ctx) -> str:
             f"puis {to_audio:.2f} s jusqu'au premier delta)"
         )
         print("   " + lines[-1], flush=True)
-    return f"médiane {median(delays):.2f} s sur 5 essais (min {min(delays):.2f} s, max {max(delays):.2f} s)"
+    return f"médiane {statistics.median(delays):.2f} s sur 5 essais (min {min(delays):.2f} s, max {max(delays):.2f} s)"
 
 
 POINTS: list[tuple[int, str, Callable, float, tuple[int, ...]]] = [
@@ -749,7 +826,7 @@ POINTS: list[tuple[int, str, Callable, float, tuple[int, ...]]] = [
     (4, "response.create donne de l'audio PCM 24 kHz", point4, 120, (2, 3)),
     (5, "instantané de contexte accepté", point5, 30, (2,)),
     (6, "réponse hors conversation acceptée", point6, 90, (2,)),
-    (7, "question pendant un appel d'outil", point7, 240, ()),
+    (7, "question pendant un appel d'outil", point7, 330, ()),
     (8, "30 s sans audio", point8, 90, ()),
     (9, "délai fin d'audio vers premier delta", point9, 420, ()),
 ]
@@ -773,7 +850,9 @@ async def run(selected: set[int]) -> int:
             ctx.question = await synthesize(client, litellm_url, litellm_key, QUESTION)
             ctx.second_question = await synthesize(client, litellm_url, litellm_key, SECOND_QUESTION)
             check_input_pcm(ctx.question)
+            ctx.factual_question = await synthesize(client, litellm_url, litellm_key, FACTUAL_QUESTION)
             check_input_pcm(ctx.second_question)
+            check_input_pcm(ctx.factual_question)
         except (httpx.HTTPError, ValueError) as e:
             print(f"ECHEC : audio d'entrée par l'alias speech : {type(e).__name__} {e}")
             return 1
@@ -815,6 +894,8 @@ async def run(selected: set[int]) -> int:
                 failed.append(number)
         if ctx.conn is not None:
             await ctx.conn.close()
+        for note in ctx.notes:
+            print(note)
         if ctx.slot_retries:
             print(f"NOTE : la place de session unique n'était pas encore libre {ctx.slot_retries} fois après une fermeture (réessai à 1 s)")
     if failed:

@@ -128,10 +128,6 @@ def test_silence_duration():
     assert len(ct.silence(1.5)) == 72000
 
 
-def test_median_of_five():
-    assert ct.median([3.0, 1.0, 2.0, 5.0, 4.0]) == 3.0
-
-
 def test_short_truncates_audio_payloads():
     text = ct.short({"type": "response.output_audio.delta", "delta": "A" * 5000})
     assert len(text) < 300
