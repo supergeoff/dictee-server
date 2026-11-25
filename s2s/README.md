@@ -15,3 +15,5 @@ La sonde `probe_litellm.py` mesure ce que LiteLLM renvoie pour la transcription 
 `openai_tts_voice` n'est qu'une voix par défaut : la voix envoyée par le client dans `session.update` la remplace, donc Open WebUI doit envoyer `fr_marie_neutral`.
 
 `CONVERSATION_GATE_KEY` doit être une valeur aléatoire non vide, sans `*`, parce que le matcher de Caddy lirait une étoile comme un joker.
+
+Le test de compatibilité `compat_test.py` rejoue les événements du bridge d'Open WebUI contre le service déployé, à travers le gardien. Il lit `CONVERSATION_URL`, `CONVERSATION_GATE_KEY`, `LITELLM_URL` et `LITELLM_KEY`, affiche `PASS` ou `FAIL` pour chacun des neuf points de la spec et sort avec le code 1 si l'un échoue. Le serveur n'a qu'une place de session : le script ferme chaque session avant d'en ouvrir une autre. Ses tests sont dans `tests/test_compat.py`.
