@@ -67,6 +67,12 @@ def test_wav_rejects_missing_fmt_chunk():
         wav_data_info(data)
 
 
+def test_wav_rejects_header_without_any_chunk():
+    data = b"RIFF" + (4).to_bytes(4, "little") + b"WAVE"
+    with pytest.raises(ValueError, match="fmt introuvable"):
+        wav_data_info(data)
+
+
 def test_wav_rejects_missing_data_chunk():
     wav = make_wav(24000, 0.1)
     with pytest.raises(ValueError, match="data"):
