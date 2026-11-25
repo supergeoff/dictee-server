@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import os
-import socket
 from types import SimpleNamespace
 import subprocess
 import sys
