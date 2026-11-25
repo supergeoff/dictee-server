@@ -28,8 +28,8 @@ blocks:
       openai_tts_base_url: {env: LITELLM_URL}
       openai_tts_api_key: {env: CONVERSATION_LITELLM_KEY}
       openai_tts_model: speech
-      openai_tts_voice: fr_marie_neutral
-      openai_tts_voice_override: fr_marie_neutral
+      openai_tts_voice: fr-FR-Marc:MAI-Voice-2.1-Flash
+      openai_tts_voice_override: fr-FR-Marc:MAI-Voice-2.1-Flash
       openai_tts_response_format: pcm
       openai_tts_sample_rate: 24000
 pipelines:
