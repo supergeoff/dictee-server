@@ -21,7 +21,7 @@ import wave
 import httpx
 
 TEXT = "Bonjour, ceci est un essai de transcription."
-VOICE = "fr_marie_neutral"
+VOICE = "fr-FR-Marc:MAI-Voice-2.1-Flash"
 PCM_RATE = 24000
 
 

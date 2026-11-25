@@ -17,7 +17,7 @@ def test_session_update_matches_bridge():
     assert session["type"] == "realtime"
     assert session["output_modalities"] == ["audio"]
     assert session["audio"]["output"]["format"] == {"type": "audio/pcm", "rate": 24000}
-    assert session["audio"]["output"]["voice"] == "fr_marie_neutral"
+    assert session["audio"]["output"]["voice"] == "fr-FR-Marc:MAI-Voice-2.1-Flash"
     assert session["audio"]["input"]["format"] == {"type": "audio/pcm", "rate": 24000}
     assert session["audio"]["input"]["transcription"] == {"model": "transcribe"}
     vad = session["audio"]["input"]["turn_detection"]
