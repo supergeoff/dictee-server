@@ -45,7 +45,7 @@ from probe_litellm import (
     wav_sample_rate,
 )
 
-VOICE = "fr_marie_neutral"
+VOICE = "fr-FR-Marc:MAI-Voice-2.1-Flash"
 TRANSCRIPTION_MODEL = "transcribe"
 VOICE_MODEL = "medium"
 QUESTION = "Bonjour, peux-tu me dire quelle heure il est à Tokyo ?"
