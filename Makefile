@@ -20,12 +20,12 @@ check-nemo-version:
 	@test -n "$$NEMO_VERSION" || { echo "NEMO_VERSION est requise : la valeur de NEMO_VERSION dans les args du compose dictee de Dokploy (NEMO_VERSION=<version> make integration)" >&2; exit 1; }
 
 check-s2s-version:
-	@test -n "$(S2S_VERSION)" || { echo "S2S_VERSION est requise : la valeur de S2S_VERSION dans les args du compose dictee de Dokploy (S2S_VERSION=<version> make s2s-check)" >&2; exit 1; }
+	@test -n "$(S2S_REF)" || { echo "S2S_REF est requise : la valeur de S2S_REF dans les args du compose dictee de Dokploy (S2S_REF=<ref> make s2s-check)" >&2; exit 1; }
 
 # Construit l'image s2s, valide conversation.yaml dedans, puis valide le Caddyfile du gardien.
 # Les variables {env: ...} du YAML reçoivent des valeurs factices : la validation ne contacte aucun service.
 s2s-check: check-s2s-version
-	docker build --build-arg S2S_VERSION=$(S2S_VERSION) -t conversation-check s2s
+	docker build --build-arg S2S_REF=$(S2S_REF) -t conversation-check s2s
 	docker run --rm --entrypoint python \
 		-e LITELLM_URL=http://litellm.invalid/v1 -e CONVERSATION_LITELLM_KEY=test \
 		-v $(PWD)/s2s/conversation.yaml:/config/conversation.yaml:ro \
