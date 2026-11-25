@@ -27,6 +27,7 @@ PORT = 8080
 KEY_VARIABLE = "CONVERSATION_GATE_KEY"
 DROPPED_TYPE = "input_audio_buffer.clear"
 MAX_MESSAGE_SIZE = 16 * 2**20
+CONNECT_TIMEOUT = 10  # secondes ; ni délai total ni délai de lecture : un appel muet ne doit jamais être coupé
 # Codes qui ne se mettent jamais dans une trame Close (RFC 6455, 7.4.1).
 NOT_SENDABLE = {1005, 1006, 1015}
 
@@ -59,7 +60,7 @@ def is_dropped(text: str) -> bool:
         return False
     try:
         event = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         return False
     return isinstance(event, dict) and event.get("type") == DROPPED_TYPE
 
@@ -94,6 +95,8 @@ async def relay(request: web.Request) -> web.StreamResponse:
     key = request.app[KEY]
     if not is_authorized(request, key):
         return web.Response(status=401)
+    if not request.raw_path.startswith("/"):
+        return web.Response(status=400)
     client = web.WebSocketResponse(max_msg_size=MAX_MESSAGE_SIZE)
     if not client.can_prepare(request).ok:
         return web.Response(status=404)
@@ -126,7 +129,7 @@ async def relay(request: web.Request) -> web.StreamResponse:
             if client.closed or client.close_code is not None:
                 code = close_code(client)
             else:
-                code = close_code(upstream)
+                code = close_code(upstream, default=1011)
             await upstream.close(code=code)
             await client.close(code=code)
         finally:
@@ -137,7 +140,8 @@ async def relay(request: web.Request) -> web.StreamResponse:
 
 
 async def open_session(app: web.Application):
-    async with aiohttp.ClientSession() as session:
+    timeout = aiohttp.ClientTimeout(total=None, connect=CONNECT_TIMEOUT, sock_connect=CONNECT_TIMEOUT, sock_read=None)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         app[SESSION] = session
         yield
 

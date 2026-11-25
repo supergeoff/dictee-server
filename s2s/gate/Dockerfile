@@ -1,4 +1,4 @@
-FROM python:3.13-slim AS base
+FROM python:3.13.18-slim AS base
 
 WORKDIR /app
 COPY requirements.txt .
