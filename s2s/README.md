@@ -14,6 +14,8 @@ La sonde `probe_litellm.py` mesure ce que LiteLLM renvoie pour la transcription 
 
 `openai_tts_voice_override` impose la voix `fr-FR-Marc:MAI-Voice-2.1-Flash` au serveur, quelle que soit la voix qu'Open WebUI envoie dans `session.update`. `openai_tts_voice` reste la voix par défaut.
 
+`openai_stt_language: fr` envoie `language=fr` à chaque transcription. Au téléphone, la voix arrive faible, et MAI-Transcribe 2 a reconnu du français comme du danois quand il devinait la langue (appel du 25 novembre 2026).
+
 ## Relais
 
 Le relais sert à deux choses. Il protège le service par une clé, et il retire un événement que speech-to-speech ne connaît pas.
