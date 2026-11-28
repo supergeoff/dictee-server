@@ -110,3 +110,11 @@ async def test_error_answers_are_fixed_messages_that_do_not_quote_the_body(serve
     server.speech_statuses = [503]
     with pytest.raises(EngineUnavailable):
         await adapter(server).speak("Bonjour.", voice="Lucien", language="fr-FR")
+
+
+async def test_unreachable_message_is_fixed(server):
+    server.unreachable = True
+    with pytest.raises(EngineUnavailable) as raised:
+        await adapter(server).speak("Bonjour.", voice="Lucien", language="fr-FR")
+    assert str(raised.value) == "The voice server is unreachable"
+    assert isinstance(raised.value.__cause__, httpx.ConnectError)

@@ -44,6 +44,10 @@ _OPTIONAL = {
 }
 
 
+# Réglages qui bornent une file : à 0 ou moins, tout appel attendrait indéfiniment.
+_AT_LEAST_ONE = {"tts_max_concurrent": "TTS_MAX_CONCURRENT", "live_max_sessions": "LIVE_MAX_SESSIONS"}
+
+
 def _is_set(value: str | None) -> bool:
     return value is not None and value.strip() != ""
 
@@ -124,4 +128,7 @@ class Settings:
                 values[field] = kind(raw)
             except ValueError:
                 raise ValueError(f"{name} must be a {kind.__name__}, got {raw!r}") from None
+        for field, name in _AT_LEAST_ONE.items():
+            if values.get(field, 1) < 1:
+                raise ValueError(f"{name} must be at least 1, got {values[field]!r}")
         return cls(**values)  # type: ignore[arg-type]

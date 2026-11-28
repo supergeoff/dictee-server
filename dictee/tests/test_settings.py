@@ -134,3 +134,15 @@ def test_settings_are_frozen():
     s = Settings.from_env(REQUIRED_ENV)
     with pytest.raises(AttributeError):
         s.nemo_url = "http://elsewhere"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("name", ["TTS_MAX_CONCURRENT", "LIVE_MAX_SESSIONS"])
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_queue_bound_below_one_is_refused_by_variable_name(name, value):
+    with pytest.raises(ValueError, match=f"{name} must be at least 1"):
+        Settings.from_env({**REQUIRED_ENV, name: value})
+
+
+@pytest.mark.parametrize("name", ["TTS_MAX_CONCURRENT", "LIVE_MAX_SESSIONS"])
+def test_queue_bound_of_one_is_accepted(name):
+    Settings.from_env({**REQUIRED_ENV, name: "1"})

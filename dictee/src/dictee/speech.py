@@ -1,12 +1,12 @@
 """Route `POST /v1/audio/speech`, compatible avec celle d'OpenAI.
 
-La route découpe le texte en phrases, fait synthétiser la première par NeMo avant d'ouvrir la réponse, puis rend le
+La route découpe le texte en phrases, fait synthétiser la première par le moteur de voix avant d'ouvrir la réponse, puis rend le
 son au fil de l'eau : un seul ffmpeg encode le son de toutes les phrases, synthétisées l'une après l'autre. Rien n'est
 journalisé ici qui vienne du contenu : ni le texte à dire, ni l'audio. La ligne de chaque requête dit qui, quoi et
 comment elle s'est terminée.
 
 Les pièces que la route de transcription partage sont dans `lifecycle` (tâches détachées, client qui raccroche) et
-`errors` (erreurs de NeMo et erreur imprévue).
+`errors` (erreurs du moteur et erreur imprévue).
 """
 
 import asyncio

@@ -53,7 +53,7 @@ class OpenAISpeech:
                 **kwargs,
             )
         except httpx.TransportError as exc:
-            raise EngineUnavailable(f"The voice server is unreachable: {exc!r}") from exc
+            raise EngineUnavailable("The voice server is unreachable") from exc
         if response.status_code == 503:
             raise EngineUnavailable("The voice server is not ready (HTTP 503)")
         if response.status_code == 429:

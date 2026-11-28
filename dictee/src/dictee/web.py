@@ -217,9 +217,9 @@ def _public_url(settings: Settings) -> str:
 
 
 async def _known_voice(state: State, requested: str) -> str:
-    """Voix de NeMo que `requested` désigne, sans tenir compte de la casse, écrite comme NeMo l'écrit.
+    """Voix du moteur de voix que `requested` désigne, sans tenir compte de la casse, écrite comme lui l'écrit.
 
-    Lève `WebError` 400 si NeMo ne la propose pas ; un échec de NeMo à la lecture des voix remonte tel quel.
+    Lève `WebError` 400 si le moteur de voix ne la propose pas ; son échec à la lecture des voix remonte tel quel.
     """
     # Sans voix de repli, `resolve_voice` rend une chaîne vide pour un nom que le moteur ne propose pas.
     voice = resolve_voice(requested.strip(), "", await list_voices(state), "")

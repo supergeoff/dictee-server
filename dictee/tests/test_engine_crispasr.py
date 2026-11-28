@@ -341,3 +341,11 @@ async def test_stream_chunks_stay_under_the_limit(wav_40s, crispasr, monkeypatch
     events = await run(crispasr, wav_40s)
     assert len(events) == len(chunk_bounds(40.0, cuts.plan_cuts(40.0, [], STREAM_CHUNK_S)))
     assert len(events) >= 3
+
+
+async def test_unreachable_message_is_fixed_and_chained():
+    error = httpx.ConnectError("refused")
+    with pytest.raises(EngineUnavailable) as raised:
+        await chunk(failing(error))
+    assert str(raised.value) == "CrispASR is unreachable"
+    assert raised.value.__cause__ is error
