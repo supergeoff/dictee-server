@@ -5,6 +5,7 @@ corps d'une réponse, qui peut citer le texte transcrit.
 """
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -126,8 +127,11 @@ class CrispasrTranscriber:
         if speakers:
             yield await self._transcribe_whole(wav, language, on_progress)
         else:
-            async for final in self._transcribe_chunks(wav, language, phrases, boost, on_progress):
-                yield final
+            async with contextlib.aclosing(
+                self._transcribe_chunks(wav, language, phrases, boost, on_progress)
+            ) as finals:
+                async for final in finals:
+                    yield final
 
     async def _transcribe_whole(self, wav: Path, language: str, on_progress: Callable[[float], None] | None) -> Final:
         """Le fichier entier en une requête avec les personnes, avec la lecture de `/progress` pendant l'attente."""
@@ -135,10 +139,13 @@ class CrispasrTranscriber:
         request = asyncio.create_task(
             self._post_audio(audio, language, {"diarize": "true", "diarize_method": "sortformer"})
         )
-        tasks = [request]
-        if on_progress is not None:
-            tasks.append(asyncio.create_task(self._read_progress(on_progress)))
+        reader = None if on_progress is None else asyncio.create_task(self._read_progress(on_progress))
+        tasks = [request] if reader is None else [request, reader]
         try:
+            # La lecture de `/progress` ne finit jamais d'elle-même : si elle se termine, c'est que `on_progress` a levé.
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            if reader is not None and reader.done():
+                reader.result()
             response = await request
         finally:
             for task in tasks:
@@ -152,10 +159,10 @@ class CrispasrTranscriber:
             try:
                 response = await self._request("GET", "/progress", timeout=PROGRESS_TIMEOUT)
                 percent = float(response.json()["progress"])
-                if 0 <= percent <= 100:
-                    on_progress(percent / 100)
             except (EngineUnavailable, EngineOverloaded, EngineError, ValueError, KeyError, TypeError):
-                pass
+                percent = -1.0
+            if 0 <= percent <= 100:
+                on_progress(percent / 100)
             await asyncio.sleep(PROGRESS_EVERY_S)
 
     async def _transcribe_chunks(

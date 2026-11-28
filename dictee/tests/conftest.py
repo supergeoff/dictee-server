@@ -4,6 +4,7 @@ import subprocess
 import threading
 import time
 import wave
+from collections.abc import Sequence
 from pathlib import Path
 
 import anyio
@@ -120,6 +121,24 @@ def write_wav(path, seconds: float, frequency: int = 400) -> None:
         wav.setsampwidth(2)
         wav.setframerate(RATE)
         wav.writeframes(pcm)
+
+
+def wav_with_silences(directory: Path, seconds: float, silences: Sequence[tuple[float, float]]) -> Path:
+    """WAV canonique mono 16 kHz : un sinus d'amplitude 8000, remplacé par des zéros dans chaque intervalle."""
+    count = round(seconds * RATE)
+    # 400 Hz fait un nombre entier de périodes par seconde : les secondes se mettent bout à bout sans raccord.
+    one_second = struct.pack(f"<{RATE}h", *(round(8000 * math.sin(2 * math.pi * 400 * n / RATE)) for n in range(RATE)))
+    pcm = bytearray((one_second * math.ceil(seconds))[: count * 2])
+    for start, end in silences:
+        first, last = round(start * RATE), round(end * RATE)
+        pcm[first * 2 : last * 2] = bytes((last - first) * 2)
+    path = directory / "silences.wav"
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(RATE)
+        wav.writeframes(pcm)
+    return path
 
 
 def audio_task(services, seconds: float, mode: Mode = Mode.RAW):

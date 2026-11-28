@@ -1,13 +1,10 @@
 import asyncio
-import math
 import os
 import random
-import struct
-import wave
-from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
+from conftest import wav_with_silences
 
 from dictee import cuts
 from dictee.audio import AudioDecodeError
@@ -16,24 +13,6 @@ from dictee.cuts import MAX_CHUNK_S, Silence, chunk_bounds, detect_silences, pla
 pytestmark = pytest.mark.anyio
 
 RATE = 16000
-
-
-def wav_with_silences(directory: Path, seconds: float, silences: Sequence[tuple[float, float]]) -> Path:
-    """WAV canonique mono 16 kHz : un sinus d'amplitude 8000, remplacé par des zéros dans chaque intervalle."""
-    count = round(seconds * RATE)
-    # 400 Hz fait un nombre entier de périodes par seconde : les secondes se mettent bout à bout sans raccord.
-    one_second = struct.pack(f"<{RATE}h", *(round(8000 * math.sin(2 * math.pi * 400 * n / RATE)) for n in range(RATE)))
-    pcm = bytearray((one_second * math.ceil(seconds))[: count * 2])
-    for start, end in silences:
-        first, last = round(start * RATE), round(end * RATE)
-        pcm[first * 2 : last * 2] = bytes((last - first) * 2)
-    path = directory / "silences.wav"
-    with wave.open(str(path), "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(RATE)
-        wav.writeframes(pcm)
-    return path
 
 
 def random_silences(rng: random.Random, duration: float) -> list[Silence]:

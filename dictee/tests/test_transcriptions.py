@@ -18,10 +18,9 @@ from pathlib import Path
 import anyio
 import httpx
 import pytest
-from conftest import make_audio, personal_headers, wait_until, write_wav
+from conftest import make_audio, personal_headers, wait_until, wav_with_silences, write_wav
 from fakes import CRISPASR_FIXTURES, FINALS, FakeCrispasr, FakeNemo, engines_of
 from starlette.testclient import TestClient
-from test_cuts import wav_with_silences
 
 from dictee import audio as audio_module
 from dictee import transcribe

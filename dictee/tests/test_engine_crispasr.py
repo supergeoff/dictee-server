@@ -9,9 +9,9 @@ import pytest
 from conftest import audio_task, write_wav
 from fakes import CRISPASR_FIXTURES, FakeCrispasr, FakeNemo
 
-from dictee.engines import Engines
 from dictee import cuts
 from dictee.cuts import Silence, chunk_bounds
+from dictee.engines import Engines
 from dictee.engines import crispasr as crispasr_module
 from dictee.engines.crispasr import STREAM_CHUNK_S, CrispasrTranscriber
 from dictee.engines.ports import EngineError, EngineOverloaded, EngineUnavailable
@@ -267,6 +267,20 @@ async def test_a_failing_progress_route_does_not_fail_the_transcription(tmp_path
     write_wav(wav, 3.0)
     (final,) = await run(adapter, wav, speakers=True, on_progress=lambda fraction: None)
     assert final.text == CHUNK["text"].strip()
+
+
+@pytest.mark.usefixtures("fast_progress")
+async def test_an_error_raised_by_on_progress_reaches_the_caller(tmp_path, fake_crispasr, crispasr):
+    fake_crispasr.progress_body = {"busy": True, "progress": 42}
+    fake_crispasr.transcription_delay = 30.0
+    wav = tmp_path / "audio.wav"
+    write_wav(wav, 3.0)
+
+    def broken(fraction: float) -> None:
+        raise RuntimeError("callback failed")
+
+    with pytest.raises(RuntimeError, match="callback failed"):
+        await asyncio.wait_for(run(crispasr, wav, speakers=True, on_progress=broken), timeout=5)
 
 
 @pytest.mark.usefixtures("fast_progress")

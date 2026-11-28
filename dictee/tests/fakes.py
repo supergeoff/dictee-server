@@ -383,8 +383,8 @@ class FakeCrispasr:
         self.requests.append(record)
         if request.url.path == "/health":
             status = self._next(self.health_statuses)
-            return httpx.Response(status, json={"status": "ok", "backend": "parakeet"} if status == 200 else {"status": "loading"},
-            )
+            body = {"status": "ok", "backend": "parakeet"} if status == 200 else {"status": "loading"}
+            return httpx.Response(status, json=body)
         if request.url.path == "/progress":
             if self.progress_body is not None:
                 return httpx.Response(200, json=self.progress_body)
