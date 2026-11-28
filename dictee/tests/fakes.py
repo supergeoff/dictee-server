@@ -375,7 +375,8 @@ class FakeCrispasr:
         self.requests.append(record)
         if request.url.path == "/health":
             status = self._next(self.health_statuses)
-            return httpx.Response(status, json={"status": "ok" if status == 200 else "loading"})
+            return httpx.Response(status, json={"status": "ok", "backend": "parakeet"} if status == 200 else {"status": "loading"},
+            )
         if request.url.path == "/progress":
             return httpx.Response(200, content=(CRISPASR_FIXTURES / "progress.json").read_bytes())
         if request.url.path == "/v1/audio/transcriptions":

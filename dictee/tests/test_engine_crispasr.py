@@ -80,6 +80,17 @@ async def test_ready_is_false_while_loading(crispasr, fake_crispasr, status, exp
     assert fake_crispasr.requests[0]["path"] == "/health"
 
 
+async def test_ready_does_not_send_the_key(crispasr, fake_crispasr):
+    await crispasr.ready()
+    assert "authorization" not in fake_crispasr.requests[0]["headers"]
+
+
+async def test_ready_is_false_for_a_200_with_another_status():
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"status": "loading"}))
+    adapter = CrispasrTranscriber("http://crispasr.test", "k", httpx.AsyncClient(transport=transport))
+    assert await adapter.ready() is False
+
+
 async def test_unreachable_server_is_unavailable():
     adapter = failing(httpx.ConnectError("refused"))
     with pytest.raises(EngineUnavailable):

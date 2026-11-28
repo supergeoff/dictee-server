@@ -43,8 +43,10 @@ class CrispasrTranscriber:
         self._headers = {"Authorization": f"Bearer {api_key}"}
         self._http = http
 
-    async def _request(self, method: str, path: str, *, timeout: float, **kwargs) -> httpx.Response:
-        """Appel d'une route HTTP de CrispASR.
+    async def _request(
+        self, method: str, path: str, *, timeout: float, authenticated: bool = True, **kwargs
+    ) -> httpx.Response:
+        """Appel d'une route HTTP de CrispASR ; `authenticated=False` n'envoie pas la clé (route publique).
 
         Un échec de transport ou un 503 (modèle en chargement) donne `EngineUnavailable`, un 429 `EngineOverloaded`
         (le serveur met en file au lieu de refuser : ce code est une précaution). Toute autre erreur donne
@@ -54,7 +56,7 @@ class CrispasrTranscriber:
             response = await self._http.request(
                 method,
                 self._base_url + path,
-                headers=self._headers,
+                headers=self._headers if authenticated else None,
                 timeout=httpx.Timeout(timeout, connect=OPEN_TIMEOUT),
                 **kwargs,
             )
@@ -115,7 +117,7 @@ class CrispasrTranscriber:
     async def ready(self) -> bool:
         """Vrai seulement si `GET /health` répond 200 avec `status` à `ok` ; 503 (chargement) ou une panne rend faux."""
         try:
-            response = await self._request("GET", "/health", timeout=READY_TIMEOUT)
+            response = await self._request("GET", "/health", timeout=READY_TIMEOUT, authenticated=False)
             body = response.json()
         except (EngineUnavailable, EngineOverloaded, EngineError, ValueError):
             return False

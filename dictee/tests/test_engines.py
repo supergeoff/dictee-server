@@ -45,6 +45,23 @@ def test_crispasr_replaces_only_the_file_transcriber(http):
     assert engines.tts is engines.live
 
 
+def test_crispasr_leaves_nemo_shared_by_the_other_roles(http):
+    engines = build_engines(_settings(STT_ENGINE="crispasr", CRISPASR_API_KEY="key"), http)
+
+    assert isinstance(engines.stt, CrispasrTranscriber)
+    assert engines.live is engines.tts
+
+
+def test_crispasr_is_not_built_when_no_role_chooses_it(http, monkeypatch):
+    created = []
+    monkeypatch.setattr("dictee.engines.CrispasrTranscriber", lambda *args: created.append(args))
+
+    engines = build_engines(_settings(), http)
+
+    assert created == []
+    assert engines.stt is engines.live is engines.tts
+
+
 def test_nemo_declares_its_capabilities(http):
     client = NemoClient("http://nemo.test", "key", http)
 
