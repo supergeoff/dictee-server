@@ -347,7 +347,7 @@ def _multipart_parts(request: httpx.Request) -> tuple[dict[str, str], bytes | No
 
 
 class FakeCrispasr:
-    """Faux serveur CrispASR : `/health`, `/progress` et `/v1/audio/transcriptions` servis d'après les fixtures.
+    """Faux serveur CrispASR : `/health` et `/v1/audio/transcriptions` servis d'après les fixtures.
 
     `requests` garde chaque requête reçue : `method`, `path`, `headers` et, pour un multipart, `form` (les champs de
     formulaire hors fichier) et `file` (le contenu du fichier envoyé). `health_statuses` et `transcription_statuses`
@@ -364,7 +364,6 @@ class FakeCrispasr:
         self.health_statuses = [200]
         self.transcription_statuses = [200]
         self.transcription_delay = 0.0  # secondes que la transcription met à répondre
-        self.progress_body: dict | None = None  # corps de `/progress` ; sans lui, celui de `progress.json`
         self.requests: list[dict] = []
         self.http = httpx.AsyncClient(transport=httpx.MockTransport(self._serve))
 
@@ -387,10 +386,6 @@ class FakeCrispasr:
             status = self._next(self.health_statuses)
             body = {"status": "ok", "backend": "parakeet"} if status == 200 else {"status": "loading"}
             return httpx.Response(status, json=body)
-        if request.url.path == "/progress":
-            if self.progress_body is not None:
-                return httpx.Response(200, json=self.progress_body)
-            return httpx.Response(200, content=(CRISPASR_FIXTURES / "progress.json").read_bytes())
         if request.url.path == "/v1/audio/transcriptions":
             status = self._next(self.transcription_statuses)
             if status != 200:

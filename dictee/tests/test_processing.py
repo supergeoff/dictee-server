@@ -277,19 +277,19 @@ async def test_the_progress_of_a_meeting_never_goes_back_after_a_retry(services,
 
 
 async def test_a_meeting_on_crispasr_reports_its_progress_over_the_task_duration(services, monkeypatch):
-    # `on_progress` reçoit des secondes d'audio, quel que soit le moteur : à mi-chemin d'une réunion de 20 s, CrispASR
-    # annonce 50 % et la tâche vaut 0,5.
+    # `on_progress` reçoit des secondes d'audio, quel que soit le moteur : CrispASR les estime d'après le temps écoulé,
+    # et la tâche avance sans atteindre 1 avant sa fin.
     monkeypatch.setattr(processing, "PROGRESS_EVERY_S", 0.0)
     monkeypatch.setattr(crispasr_module, "PROGRESS_EVERY_S", 0.01)
     fake = FakeCrispasr("diarized.json")
-    fake.progress_body = {"busy": True, "progress": 50}
-    fake.transcription_delay = 0.1
+    fake.transcription_delay = 0.2
     nemo = FakeNemo()
     crispasr = CrispasrTranscriber("http://crispasr.test", "k", fake.http)
     services = replace(services, engines=Engines(stt=crispasr, live=nemo, tts=nemo))
     writes = progress_writes(services, monkeypatch)
     await process(services, audio_task(services, 20.0, mode=Mode.DIARIZE), RunStats())
-    assert writes and set(writes) == {0.5}
+    assert len(writes) >= 2 and writes == sorted(writes)
+    assert 0 < writes[0] and writes[-1] <= crispasr_module.WHOLE_PROGRESS_CAP
 
 
 async def test_a_resumed_meeting_keeps_the_progress_it_had_reached(services, monkeypatch):
