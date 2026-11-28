@@ -13,13 +13,13 @@ import time
 import anyio
 import pytest
 from conftest import wait_until
-from fakes import FakeNemo
+from fakes import TTS_SAMPLE_RATE, FakeNemo, engines_of
 from starlette.requests import Request
 
 from dictee import speech
 from dictee.app import create_app
 from dictee.audio import OUTPUT_FORMATS, SPEECH_RATE
-from dictee.nemo import TTS_SAMPLE_RATE, NemoError, NemoOverloaded, NemoUnavailable
+from dictee.engines.ports import EngineError, EngineOverloaded, EngineUnavailable
 from dictee.speech import MAX_INPUT_CHARS, MAX_SENTENCE_CHARS, resolve_voice, split_sentences
 
 URL = "/v1/audio/speech"
@@ -79,7 +79,7 @@ def test_split_does_not_cut_inside_a_number_or_a_domain_name():
 
 def test_split_keeps_a_closing_quote_with_its_sentence():
     text = 'Elle dit « Salut. » Puis elle part. Il répond "Non." Fin'
-    assert split_sentences(text) == ['Elle dit « Salut. »', "Puis elle part.", 'Il répond "Non."', "Fin"]
+    assert split_sentences(text) == ["Elle dit « Salut. »", "Puis elle part.", 'Il répond "Non."', "Fin"]
     assert split_sentences("Elle dit «\u00a0Salut.\u00a0» Puis") == ["Elle dit «\u00a0Salut.\u00a0»", "Puis"]
 
 
@@ -287,7 +287,7 @@ def test_voices_are_read_once_and_kept_in_the_app_state(say, fake_nemo, transcri
     assert transcriptions_client.app.state.voices == ("John", "Sofia", "Aria", "Jason", "Leo")
 
 
-@pytest.mark.parametrize("error,status", [(NemoOverloaded("busy"), 429), (NemoUnavailable("down"), 502)])
+@pytest.mark.parametrize("error,status", [(EngineOverloaded("busy"), 429), (EngineUnavailable("down"), 502)])
 def test_failed_voice_lookup_is_a_429_or_502_and_is_not_kept(say, fake_nemo, error, status):
     fake_nemo.error = error
     assert say(voice="aria").status_code == status
@@ -509,9 +509,9 @@ def test_body_over_one_mebibyte_is_413(say, fake_nemo):
 @pytest.mark.parametrize(
     "error,status,error_type,code",
     [
-        (NemoOverloaded("the queue is full"), 429, "rate_limit_error", "overloaded"),
-        (NemoUnavailable("connection refused"), 502, "server_error", "upstream_error"),
-        (NemoError("synthesis failed"), 502, "server_error", "upstream_error"),
+        (EngineOverloaded("the queue is full"), 429, "rate_limit_error", "overloaded"),
+        (EngineUnavailable("connection refused"), 502, "server_error", "upstream_error"),
+        (EngineError("synthesis failed"), 502, "server_error", "upstream_error"),
     ],
 )
 def test_nemo_failure_before_the_first_sound_is_a_429_or_502(
@@ -535,9 +535,9 @@ def test_nemo_failure_before_the_first_sound_is_a_429_or_502(
 @pytest.mark.parametrize(
     "error,status",
     [
-        (NemoOverloaded("the queue is full"), 429),
-        (NemoUnavailable("connection refused"), 502),
-        (NemoError("synthesis failed"), 502),
+        (EngineOverloaded("the queue is full"), 429),
+        (EngineUnavailable("connection refused"), 502),
+        (EngineError("synthesis failed"), 502),
     ],
 )
 def test_nemo_failure_after_the_first_sentence_cuts_the_stream(say, fake_nemo, caplog, error, status):
@@ -687,7 +687,7 @@ def test_log_line_of_a_failure_before_the_first_sound_has_no_first_pcm_but_the_t
 
     async def failing_speak(text, *, voice, language):
         await real_speak(text, voice=voice, language=language)
-        raise NemoUnavailable("down")
+        raise EngineUnavailable("down")
 
     fake_nemo.speak = failing_speak
     caplog.set_level(logging.INFO, logger="dictee")
@@ -799,7 +799,7 @@ async def test_the_first_sentence_is_sent_before_the_next_one_is_synthesized(
     caplog, settings, fake_llm, service_headers
 ):
     nemo = HoldingNemo(pcm=silence(0.5))
-    app = create_app(settings, nemo=nemo, http=fake_llm.http)
+    app = create_app(settings, engines=engines_of(nemo), http=fake_llm.http)
     body = json.dumps({"input": "Un. Deux. Trois."}).encode()
     sent: list = []
     caplog.set_level(logging.INFO, logger="dictee")
@@ -822,7 +822,7 @@ async def test_client_hanging_up_stops_the_synthesis_and_kills_ffmpeg(
     caplog, settings, fake_llm, service_headers, spawned
 ):
     nemo = HoldingNemo(pcm=silence(0.5))
-    app = create_app(settings, nemo=nemo, http=fake_llm.http)
+    app = create_app(settings, engines=engines_of(nemo), http=fake_llm.http)
     body = json.dumps({"input": "Un. Deux. Trois. Quatre. Cinq."}).encode()
     hung_up = anyio.Event()
     sent: list = []
@@ -849,7 +849,7 @@ async def test_closing_the_stream_stops_the_synthesis_and_kills_ffmpeg(
     # Starlette ne reprend pas toujours le générateur d'un client parti (une écriture refusée l'abandonne à son
     # dernier `yield`) : sa fermeture, par le ramasse-miettes, arrête alors la synthèse sans le filet de la réponse.
     nemo = HoldingNemo(pcm=silence(0.5))
-    app = create_app(settings, nemo=nemo, http=fake_llm.http)
+    app = create_app(settings, engines=engines_of(nemo), http=fake_llm.http)
     body = json.dumps({"input": "Un. Deux. Trois. Quatre."}).encode()
 
     messages = [{"type": "http.request", "body": body, "more_body": False}]
@@ -878,7 +878,7 @@ async def test_client_hanging_up_during_the_first_sentence_is_a_499_without_audi
     caplog, settings, fake_llm, service_headers, spawned
 ):
     nemo = HoldingNemo(pcm=silence(0.5), answered=0)
-    app = create_app(settings, nemo=nemo, http=fake_llm.http)
+    app = create_app(settings, engines=engines_of(nemo), http=fake_llm.http)
     body = json.dumps({"input": "Un. Deux. Trois."}).encode()
     hung_up = anyio.Event()
     sent: list = []
@@ -901,7 +901,7 @@ async def test_client_hanging_up_before_the_stream_starts_still_stops_the_synthe
     # Le client raccroche entre la création de la réponse et son premier octet : le générateur du flux ne démarre
     # jamais et ses `finally` ne courent pas. Seul le filet de la réponse arrête alors la synthèse et ffmpeg.
     nemo = HoldingNemo(pcm=silence(0.5))
-    app = create_app(settings, nemo=nemo, http=fake_llm.http)
+    app = create_app(settings, engines=engines_of(nemo), http=fake_llm.http)
     body = json.dumps({"input": "Un. Deux. Trois."}).encode()
     hung_up = anyio.Event()
     sent: list = []
@@ -928,7 +928,7 @@ async def test_client_hanging_up_before_the_stream_starts_still_stops_the_synthe
 async def test_client_hanging_up_during_the_body_is_not_an_error(
     caplog, settings, fake_nemo, fake_llm, service_headers
 ):
-    app = create_app(settings, nemo=fake_nemo, http=fake_llm.http)
+    app = create_app(settings, engines=engines_of(fake_nemo), http=fake_llm.http)
     body = json.dumps({"input": "Bonjour."}).encode()
     hung_up = anyio.Event()
     hung_up.set()

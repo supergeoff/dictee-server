@@ -31,7 +31,8 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from dictee.audio import AudioDecodeError, AudioTooLong, decode_wav16k
 from dictee.auth import require_caller
 from dictee.cleanup import clean
-from dictee.errors import NEMO_ERRORS, ApiError, nemo_failure, unexpected_error
+from dictee.engines.ports import ENGINE_ERRORS
+from dictee.errors import ApiError, engine_failure, unexpected_error
 from dictee.formats import delta_event, done_event, error_event, render, segment_event
 from dictee.lifecycle import (
     CLIENT_CLOSED,
@@ -248,7 +249,7 @@ class _Job:
             started = time.monotonic()
             try:
                 async with contextlib.aclosing(
-                    state.nemo.transcribe(
+                    state.engines.stt.transcribe(
                         self.wav,
                         language=params.nemo_language,
                         phrases=glossary_terms(self.profile.glossary),
@@ -321,8 +322,8 @@ class _Job:
             if first is _END:
                 try:
                     recognition.result()
-                except NEMO_ERRORS as error:
-                    raise nemo_failure(error) from None
+                except ENGINE_ERRORS as error:
+                    raise engine_failure(error) from None
         except BaseException:
             cancel_once(recognition)
             raise
@@ -356,8 +357,8 @@ class _Job:
         except (asyncio.CancelledError, GeneratorExit):
             self.trace.status = CLIENT_CLOSED
             raise
-        except NEMO_ERRORS as error:
-            yield self._fail(nemo_failure(error))
+        except ENGINE_ERRORS as error:
+            yield self._fail(engine_failure(error))
         except Exception as error:
             yield self._fail(unexpected_error(error))
         finally:
@@ -493,7 +494,9 @@ async def _handle(request: Request, trace: Trace) -> Response:
     trace.task = task.id
     trace.audio_s = task.duration
     if params.background:
-        return JSONResponse(task_object(task, response_format=params.response_format, granularities=params.granularities))
+        return JSONResponse(
+            task_object(task, response_format=params.response_format, granularities=params.granularities)
+        )
     # `wait` n'est jamais réveillé après l'arrêt du runner : la garde du client qui raccroche la borne. Un client parti
     # laisse la tâche aller à son terme.
     finished = await run_unless_disconnected(request, state.runner.wait(task.id))

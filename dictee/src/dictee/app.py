@@ -14,10 +14,10 @@ from starlette.routing import Route, WebSocketRoute
 
 from dictee.auth import require_caller
 from dictee.db import Database
+from dictee.engines import Engines, build_engines
 from dictee.errors import ApiError, handle_api_error, handle_http_exception, handle_unexpected_error
 from dictee.live import realtime
 from dictee.modes import MODELS
-from dictee.nemo import NemoClient
 from dictee.processing import Services
 from dictee.runner import LongLane, TaskRunner
 from dictee.settings import Settings
@@ -55,15 +55,17 @@ async def list_models(request: Request) -> JSONResponse:
     return JSONResponse({"object": "list", "data": data})
 
 
-def create_app(settings: Settings, *, nemo=None, http: httpx.AsyncClient | None = None) -> Starlette:
+def create_app(
+    settings: Settings, *, engines: Engines | None = None, http: httpx.AsyncClient | None = None
+) -> Starlette:
     """Construit l'application.
 
-    `settings`, `nemo`, `http`, la base de données, le registre des tâches (`store`), la file des tâches longues
+    `settings`, `engines`, `http`, la base de données, le registre des tâches (`store`), la file des tâches longues
     (`lane`, que les flux longs partagent avec elles) et les voix de la synthèse (`voices`, `None` jusqu'à la première
     lecture) sont rangés dans `app.state`. La base s'ouvre à `settings.db_path`, dossier parent créé au besoin. Sans
     `http`, l'app crée son client à son démarrage et le ferme à son arrêt ; un client fourni reste à la charge de
-    l'appelant. Sans `nemo`, elle crée aussi à son démarrage le client de NeMo, sur ce client HTTP ; `app.state.nemo`
-    reste `None` jusque-là.
+    l'appelant. Sans `engines`, elle crée aussi à son démarrage les moteurs audio que les réglages nomment (`build_engines`), sur ce
+    client HTTP ; `app.state.engines` reste `None` jusque-là.
 
     Le démarrage crée `settings.tasks_dir`, range dans `app.state.runner` le `TaskRunner` qui travaille sur ces deux
     clients, et le démarre : il reprend les tâches restées en file ou en cours. L'arrêt de l'app arrête le runner, avant
@@ -85,10 +87,10 @@ def create_app(settings: Settings, *, nemo=None, http: httpx.AsyncClient | None 
                 client = httpx.AsyncClient(timeout=httpx.Timeout(None, connect=5.0))
                 stack.push_async_callback(client.aclose)
                 app.state.http = client
-            if nemo is None:
-                app.state.nemo = NemoClient(settings.nemo_url, settings.nemo_api_key, app.state.http)
+            if engines is None:
+                app.state.engines = build_engines(settings, app.state.http)
             settings.tasks_dir.mkdir(parents=True, exist_ok=True)
-            services = Services(app.state.store, app.state.nemo, settings, app.state.http)
+            services = Services(app.state.store, app.state.engines, settings, app.state.http)
             app.state.runner = TaskRunner(services, app.state.lane)
             await app.state.runner.start()
             stack.push_async_callback(app.state.runner.stop)
@@ -130,7 +132,7 @@ def create_app(settings: Settings, *, nemo=None, http: httpx.AsyncClient | None 
     app.state.settings = settings
     app.state.oauth = build_oauth(settings)
     app.state.db = Database(settings.db_path)
-    app.state.nemo = nemo
+    app.state.engines = engines
     app.state.http = http
     app.state.store = TaskStore(app.state.db)
     app.state.lane = LongLane(settings.max_queued_long)

@@ -10,7 +10,7 @@ from conftest import personal_headers
 from openai import OpenAI
 
 from dictee import live
-from dictee.nemo import NemoError, NemoOverloaded
+from dictee.engines.ports import EngineError, EngineOverloaded
 from dictee.types import Final, Partial
 
 DELTA = "conversation.item.input_audio_transcription.delta"
@@ -132,8 +132,7 @@ def test_a_live_session_detects_the_language_by_default(live_client, service_hea
 
 
 @pytest.mark.parametrize(
-    "transcription",
-    [{"languages": ["auto"]}, {"language": "auto"}, {"language": None}, {"language": "und"}],
+    "transcription", [{"languages": ["auto"]}, {"language": "auto"}, {"language": None}, {"language": "und"}]
 )
 def test_a_live_session_asked_for_auto_detects_the_language(live_client, service_headers, fake_nemo, transcription):
     with open_live(live_client, service_headers) as ws:
@@ -234,8 +233,8 @@ def test_clear_is_passed_on_and_acknowledged(live_client, service_headers, fake_
 
 
 @pytest.mark.parametrize("server_vad", [True, False])
-def test_semantic_vad_is_always_refused(live_client, service_headers, monkeypatch, server_vad):
-    monkeypatch.setattr(live, "SERVER_VAD", server_vad)
+def test_semantic_vad_is_always_refused(live_client, service_headers, fake_nemo, server_vad):
+    fake_nemo.server_vad = server_vad
     with open_live(live_client, service_headers) as ws:
         until(ws, "session.created")
         update(ws, turn_detection={"type": "semantic_vad"})
@@ -248,8 +247,8 @@ def test_semantic_vad_is_always_refused(live_client, service_headers, monkeypatc
 
 
 @pytest.mark.parametrize("server_vad", [True, False])
-def test_server_vad_follows_what_nemo_can_do(live_client, service_headers, fake_nemo, monkeypatch, server_vad):
-    monkeypatch.setattr(live, "SERVER_VAD", server_vad)
+def test_server_vad_follows_what_nemo_can_do(live_client, service_headers, fake_nemo, server_vad):
+    fake_nemo.server_vad = server_vad
     with open_live(live_client, service_headers) as ws:
         until(ws, "session.created")
         update(ws, turn_detection={"type": "server_vad", "silence_duration_ms": 700})
@@ -270,8 +269,8 @@ def test_server_vad_follows_what_nemo_can_do(live_client, service_headers, fake_
         assert answer["error"]["param"] == "session.audio.input.turn_detection"
 
 
-def test_server_vad_without_a_silence_takes_the_default_one(live_client, service_headers, fake_nemo, monkeypatch):
-    monkeypatch.setattr(live, "SERVER_VAD", True)
+def test_server_vad_without_a_silence_takes_the_default_one(live_client, service_headers, fake_nemo):
+    fake_nemo.server_vad = True
     with open_live(live_client, service_headers) as ws:
         until(ws, "session.created")
         update(ws, turn_detection={"type": "server_vad"})
@@ -282,10 +281,8 @@ def test_server_vad_without_a_silence_takes_the_default_one(live_client, service
 
 
 @pytest.mark.parametrize("many_commits", [True, False])
-def test_nemo_sessions_follow_the_turns_as_nemo_requires(
-    live_client, service_headers, fake_nemo, monkeypatch, many_commits
-):
-    monkeypatch.setattr(live, "NEMO_MANY_COMMITS", many_commits)
+def test_nemo_sessions_follow_the_turns_as_nemo_requires(live_client, service_headers, fake_nemo, many_commits):
+    fake_nemo.many_commits = many_commits
     transcripts = []
     with open_live(live_client, service_headers) as ws:
         until(ws, "session.created")
@@ -305,7 +302,7 @@ def test_nemo_sessions_follow_the_turns_as_nemo_requires(
 
 
 def test_a_nemo_error_becomes_an_error_event_and_closes(live_client, service_headers, fake_nemo):
-    fake_nemo.live_error = NemoOverloaded("queue full")
+    fake_nemo.live_error = EngineOverloaded("queue full")
     with open_live(live_client, service_headers) as ws:
         until(ws, "session.created")
         ws.send_json({"type": "input_audio_buffer.append", "audio": pcm_b64(0.5, 24000)})
@@ -381,8 +378,7 @@ def test_the_session_line_never_carries_any_text(live_client, fake_nemo, db, cap
 
 
 @pytest.mark.parametrize(
-    ("limits", "status"),
-    [({"IDLE_TIMEOUT_S": 0.05}, "idle"), ({"MAX_AUDIO_S": 0.1}, "limit"), ({}, "overloaded")],
+    ("limits", "status"), [({"IDLE_TIMEOUT_S": 0.05}, "idle"), ({"MAX_AUDIO_S": 0.1}, "limit"), ({}, "overloaded")]
 )
 def test_the_session_line_says_how_the_session_ended(
     live_client, service_headers, fake_nemo, monkeypatch, caplog, limits, status
@@ -390,7 +386,7 @@ def test_the_session_line_says_how_the_session_ended(
     caplog.set_level(logging.INFO)
     for name, value in limits.items():
         monkeypatch.setattr(live, name, value)
-    fake_nemo.live_error = NemoOverloaded("queue full")
+    fake_nemo.live_error = EngineOverloaded("queue full")
     with open_live(live_client, service_headers) as ws:
         until(ws, "session.created")
         if status != "idle":
@@ -403,7 +399,7 @@ def test_the_session_line_says_how_the_session_ended(
 @pytest.mark.parametrize(
     ("error", "status"),
     [
-        (NemoError("invalid_argument: unknown term Nemotron"), "upstream_error"),
+        (EngineError("invalid_argument: unknown term Nemotron"), "upstream_error"),
         (RuntimeError("Nemotron"), "server_error"),
     ],
 )

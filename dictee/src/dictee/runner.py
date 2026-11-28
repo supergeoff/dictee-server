@@ -26,7 +26,8 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 
 from dictee import processing
-from dictee.errors import NEMO_ERRORS, ApiError, nemo_failure, unexpected_error
+from dictee.engines.ports import ENGINE_ERRORS
+from dictee.errors import ApiError, engine_failure, unexpected_error
 from dictee.lifecycle import cancel_once, spawn
 from dictee.processing import RunStats, Services, task_dir
 from dictee.taskstore import TERMINAL_STATUSES, TaskRecord, TaskResult, TaskStatus
@@ -117,8 +118,8 @@ def failure_of(error: BaseException) -> tuple[str, str]:
     NeMo saturé donne `overloaded`, NeMo indisponible ou en erreur `upstream_error`, toute autre exception
     `server_error`. Une exception imprévue passe par `unexpected_error`, qui n'en journalise que le nom de la classe.
     """
-    if isinstance(error, NEMO_ERRORS):
-        failure = nemo_failure(error)
+    if isinstance(error, ENGINE_ERRORS):
+        failure = engine_failure(error)
         return failure.code, failure.message
     failure = unexpected_error(error)
     return failure.type, failure.message

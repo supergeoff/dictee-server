@@ -9,7 +9,7 @@ from pathlib import Path
 import anyio
 import pytest
 import uvicorn
-from fakes import FINALS, FakeLlm, FakeNemo
+from fakes import FINALS, FakeLlm, FakeNemo, engines_of
 from openai import OpenAI
 from starlette.testclient import TestClient
 from taskdata import make
@@ -105,7 +105,7 @@ def store(db):
 @pytest.fixture
 def services(store, fake_nemo, settings, fake_llm):
     """Ce que le traitement d'une tâche utilise : le registre, le faux NeMo, les réglages et le client du faux LiteLLM."""
-    return Services(store, fake_nemo, settings, fake_llm.http)
+    return Services(store, engines_of(fake_nemo), settings, fake_llm.http)
 
 
 def write_wav(path, seconds: float, frequency: int = 400) -> None:
@@ -175,7 +175,7 @@ def fake_llm():
 @pytest.fixture
 def transcriptions_client(settings, fake_nemo, fake_llm):
     """Client HTTP d'une app qui parle au faux NeMo et au faux LiteLLM."""
-    app = create_app(settings, nemo=fake_nemo, http=fake_llm.http)
+    app = create_app(settings, engines=engines_of(fake_nemo), http=fake_llm.http)
     with TestClient(app, base_url="https://testserver") as test_client:
         yield test_client
 
@@ -193,7 +193,7 @@ def live_server(settings, fake_nemo, fake_llm):
     Le client temps réel du SDK d'OpenAI ouvre sa connexion par `websockets.sync` : il lui faut un vrai serveur, que
     `TestClient` ne fournit pas. `log_config=None` laisse la configuration des journaux du processus de test intacte.
     """
-    app = create_app(settings, nemo=fake_nemo, http=fake_llm.http)
+    app = create_app(settings, engines=engines_of(fake_nemo), http=fake_llm.http)
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_config=None, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()

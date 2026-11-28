@@ -9,7 +9,7 @@ import anyio
 import pytest
 from fakes import FINALS, FakeNemo
 
-from dictee.nemo import NemoUnavailable
+from dictee.engines.ports import EngineUnavailable
 from dictee.types import Final
 
 pytestmark = pytest.mark.anyio
@@ -52,9 +52,9 @@ async def test_the_chunks_come_in_turn_and_the_last_one_repeats():
 
 
 async def test_a_chunk_that_is_an_exception_is_raised_in_its_turn():
-    nemo = FakeNemo(chunks=[Final("un", ()), NemoUnavailable("down"), Final("trois", ())])
+    nemo = FakeNemo(chunks=[Final("un", ()), EngineUnavailable("down"), Final("trois", ())])
     assert (await chunk(nemo)).text == "un"
-    with pytest.raises(NemoUnavailable, match="down"):
+    with pytest.raises(EngineUnavailable, match="down"):
         await chunk(nemo)
     assert (await chunk(nemo)).text == "trois"
 
@@ -130,8 +130,8 @@ def wav_path(tmp_path):
 
 
 async def test_the_transcribe_errors_come_one_per_call_and_none_is_a_call_without_error(wav_path):
-    nemo = FakeNemo(finals=FINALS, transcribe_errors=[NemoUnavailable("lost"), None])
-    with pytest.raises(NemoUnavailable, match="lost"):
+    nemo = FakeNemo(finals=FINALS, transcribe_errors=[EngineUnavailable("lost"), None])
+    with pytest.raises(EngineUnavailable, match="lost"):
         await session(nemo, wav_path)
     assert len(await session(nemo, wav_path)) == len(FINALS)
     assert len(await session(nemo, wav_path)) == len(FINALS)
@@ -140,16 +140,16 @@ async def test_the_transcribe_errors_come_one_per_call_and_none_is_a_call_withou
 
 
 async def test_the_error_applies_again_once_the_transcribe_errors_are_used_up(wav_path):
-    nemo = FakeNemo(finals=FINALS, error=NemoUnavailable("down"), transcribe_errors=[None])
+    nemo = FakeNemo(finals=FINALS, error=EngineUnavailable("down"), transcribe_errors=[None])
     assert len(await session(nemo, wav_path)) == len(FINALS)
-    with pytest.raises(NemoUnavailable, match="down"):
+    with pytest.raises(EngineUnavailable, match="down"):
         await session(nemo, wav_path)
 
 
 async def test_the_error_alone_still_fails_every_session(wav_path):
-    nemo = FakeNemo(finals=FINALS, error=NemoUnavailable("down"))
+    nemo = FakeNemo(finals=FINALS, error=EngineUnavailable("down"))
     for _ in range(2):
-        with pytest.raises(NemoUnavailable, match="down"):
+        with pytest.raises(EngineUnavailable, match="down"):
             await session(nemo, wav_path)
 
 

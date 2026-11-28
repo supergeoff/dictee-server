@@ -26,7 +26,8 @@ from starlette.responses import Response, StreamingResponse
 
 from dictee.audio import MAX_SPEED, MIN_SPEED, OUTPUT_FORMATS, encode_stream
 from dictee.auth import require_caller
-from dictee.errors import NEMO_ERRORS, ApiError, nemo_failure, unexpected_error
+from dictee.engines.ports import ENGINE_ERRORS, Synthesizer
+from dictee.errors import ApiError, engine_failure, unexpected_error
 from dictee.lifecycle import (
     CLIENT_CLOSED,
     RequestTrace,
@@ -37,7 +38,6 @@ from dictee.lifecycle import (
     run_unless_disconnected,
     spawn,
 )
-from dictee.nemo import TTS_SAMPLE_RATE
 from dictee.profile import load_profile
 from dictee.upload import bounded_request
 
@@ -192,10 +192,10 @@ class _Trace(RequestTrace):
         finally:
             self.nemo_ms = (self.nemo_ms or 0) + elapsed_ms(called)
 
-    async def speak(self, nemo: Any, sentence: str, voice: str) -> bytes:
+    async def speak(self, tts: Synthesizer, sentence: str, voice: str) -> bytes:
         """Fait synthétiser `sentence` par NeMo ; le premier PCM reçu fixe `first_ms`."""
         with self.nemo_call():
-            pcm = await nemo.speak(sentence, voice=voice, language=LANGUAGE)
+            pcm = await tts.speak(sentence, voice=voice, language=LANGUAGE)
         if self.first_ms is None:
             self.first_ms = elapsed_ms(self.started)
         return pcm
@@ -296,7 +296,7 @@ async def list_voices(state: State) -> tuple[str, ...]:
     La page de configuration s'en sert aussi, pour la liste des voix et pour valider celle qu'on choisit.
     """
     if state.voices is None:
-        state.voices = tuple(await state.nemo.voices())
+        state.voices = tuple(await state.engines.tts.voices())
     return state.voices
 
 
@@ -306,7 +306,7 @@ async def _open(state: State, params: _Params, profile_voice: str, sentence: str
         available = await list_voices(state)
     voice = resolve_voice(params.voice, profile_voice, available)
     trace.voice = loggable(voice)
-    return voice, await trace.speak(state.nemo, sentence, voice)
+    return voice, await trace.speak(state.engines.tts, sentence, voice)
 
 
 class _End:
@@ -320,7 +320,7 @@ _END = _End()
 class _Synthesis:
     """La synthèse en cours : la voix, le format, le PCM de la première phrase et les phrases qui restent."""
 
-    nemo: Any
+    tts: Synthesizer
     voice: str
     fmt: str
     speed: float
@@ -332,7 +332,7 @@ class _Synthesis:
         """Le PCM de chaque phrase : la première est déjà synthétisée, les autres le sont l'une après l'autre."""
         yield self.first
         for sentence in self.rest:
-            yield await self.trace.speak(self.nemo, sentence, self.voice)
+            yield await self.trace.speak(self.tts, sentence, self.voice)
 
     async def _encode(self, chunks: asyncio.Queue[bytes | _End]) -> None:
         """Encode le PCM des phrases et pose les blocs dans `chunks`.
@@ -346,7 +346,7 @@ class _Synthesis:
         async with (
             contextlib.aclosing(self._pcm()) as pcm,
             contextlib.aclosing(
-                encode_stream(pcm, fmt=self.fmt, speed=self.speed, input_rate=TTS_SAMPLE_RATE)
+                encode_stream(pcm, fmt=self.fmt, speed=self.speed, input_rate=self.tts.sample_rate)
             ) as encoded,
         ):
             async for chunk in encoded:
@@ -379,7 +379,7 @@ class _Synthesis:
             self.trace.status = CLIENT_CLOSED
             raise
         except Exception as error:
-            self.trace.status = nemo_failure(error).status if isinstance(error, NEMO_ERRORS) else 500
+            self.trace.status = engine_failure(error).status if isinstance(error, ENGINE_ERRORS) else 500
             logger.warning("speech stream cut class=%s", type(error).__name__)
         finally:
             cancel_once(encoding)
@@ -398,12 +398,12 @@ async def _handle(request: Request, trace: _Trace) -> Response:
     # celle d'une réponse ordinaire (429 ou 502), le statut partant après, quand on sait déjà si NeMo répond.
     try:
         opened = await run_unless_disconnected(request, _open(state, params, profile.voice, sentences[0], trace))
-    except NEMO_ERRORS as error:
-        raise nemo_failure(error) from None
+    except ENGINE_ERRORS as error:
+        raise engine_failure(error) from None
     if opened is None:
         return Response(status_code=CLIENT_CLOSED)
     voice, first = opened
-    synthesis = _Synthesis(state.nemo, voice, params.response_format, params.speed, first, sentences[1:], trace)
+    synthesis = _Synthesis(state.engines.tts, voice, params.response_format, params.speed, first, sentences[1:], trace)
     return synthesis.respond()
 
 

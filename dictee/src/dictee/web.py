@@ -35,8 +35,8 @@ from starlette.templating import Jinja2Templates
 
 from dictee.audio import OUTPUT_FORMATS, encode_stream
 from dictee.auth import Caller
-from dictee.errors import NEMO_ERRORS, nemo_failure
-from dictee.nemo import TTS_SAMPLE_RATE
+from dictee.engines.ports import ENGINE_ERRORS
+from dictee.errors import engine_failure
 from dictee.profile import (
     DEFAULT_INSTRUCTIONS,
     MAX_GLOSSARY_CHARS,
@@ -249,7 +249,7 @@ async def _render_index(request: Request, user_id: int, *, new_key: str | None =
     profile = load_profile(state.db, state.settings, Caller(user_id))
     try:
         voices = await list_voices(state)
-    except NEMO_ERRORS as error:
+    except ENGINE_ERRORS as error:
         # La page reste utile sans la liste des voix : clés, glossaire et consignes ne dépendent pas de NeMo.
         logger.warning("voices unavailable class=%s", type(error).__name__)
         voices = ()
@@ -387,7 +387,7 @@ async def update_settings(request: Request) -> Response:
     if "voice" in fields:
         try:
             changes["voice"] = await _known_voice(request.app.state, fields["voice"])
-        except NEMO_ERRORS as error:
+        except ENGINE_ERRORS as error:
             logger.warning("voices unavailable class=%s", type(error).__name__)
             message = "Le moteur vocal ne répond pas, la liste des voix est indisponible. Rien n'a été enregistré."
             raise WebError(502, message) from None
@@ -403,13 +403,11 @@ async def reset_instructions(request: Request) -> Response:
     return RedirectResponse("/?saved=1", status_code=303)
 
 
-async def _mp3(pcm: bytes) -> bytes:
+async def _mp3(pcm: bytes, sample_rate: int) -> bytes:
     async def chunks() -> AsyncIterator[bytes]:
         yield pcm
 
-    async with contextlib.aclosing(
-        encode_stream(chunks(), fmt="mp3", speed=1.0, input_rate=TTS_SAMPLE_RATE)
-    ) as encoded:
+    async with contextlib.aclosing(encode_stream(chunks(), fmt="mp3", speed=1.0, input_rate=sample_rate)) as encoded:
         return b"".join([chunk async for chunk in encoded])
 
 
@@ -449,12 +447,12 @@ async def voice_preview(request: Request) -> Response:
     state = request.app.state
 
     async def synthesize(voice: str) -> bytes:
-        pcm = await state.nemo.speak(PREVIEW_TEXT, voice=voice, language=LANGUAGE)
-        return await _mp3(pcm)
+        pcm = await state.engines.tts.speak(PREVIEW_TEXT, voice=voice, language=LANGUAGE)
+        return await _mp3(pcm, state.engines.tts.sample_rate)
 
     try:
         voice = await _known_voice(state, request.query_params.get("voice", ""))
         mp3 = await state.previews.get(voice, synthesize)
-    except NEMO_ERRORS as error:
-        raise nemo_failure(error) from None
+    except ENGINE_ERRORS as error:
+        raise engine_failure(error) from None
     return _mp3_response(mp3, request.headers.get("range"))

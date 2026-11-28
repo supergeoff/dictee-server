@@ -20,6 +20,9 @@ _REQUIRED = {
 # Champ -> (variable d'environnement, type). La valeur par défaut est celle du champ de `Settings`.
 _OPTIONAL = {
     "nemo_url": ("NEMO_URL", str),
+    "stt_engine": ("STT_ENGINE", str),
+    "live_engine": ("LIVE_ENGINE", str),
+    "tts_engine": ("TTS_ENGINE", str),
     "cleanup_model": ("CLEANUP_MODEL", str),
     "default_voice": ("DEFAULT_VOICE", str),
     "glossary_boost": ("GLOSSARY_BOOST", float),
@@ -47,6 +50,10 @@ class Settings:
     public_url: str
     session_secret: str
     nemo_url: str = "http://nemo:8000"
+    # Moteur de chaque rôle audio (voir `dictee.engines`) : transcription de fichier, dictée en direct, synthèse.
+    stt_engine: str = "nemo"
+    live_engine: str = "nemo"
+    tts_engine: str = "nemo"
     cleanup_model: str = "simple"
     default_voice: str = "Leo"
     # Force du glossaire : la plus haute sans insertion sur le corpus de `integration/boost.py` (spec 7.6, tâche 13).

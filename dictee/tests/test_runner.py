@@ -13,9 +13,9 @@ from conftest import wait_until
 from taskdata import NOW, RAW, RESULT, make
 
 from dictee import runner as runner_module
+from dictee.engines.ports import EngineError, EngineOverloaded, EngineUnavailable
 from dictee.errors import ApiError
 from dictee.modes import Mode
-from dictee.nemo import NemoError, NemoOverloaded, NemoUnavailable
 from dictee.processing import RunStats, task_audio, task_dir
 from dictee.runner import LongLane, TaskRunner, failure_of, log_task
 from dictee.taskstore import TaskRecord, TaskStatus
@@ -470,8 +470,8 @@ async def test_a_task_submitted_after_the_stop_stays_queued_and_gives_its_ticket
     ("error", "code"),
     [
         (None, None),
-        (NemoOverloaded("full"), "overloaded"),
-        (NemoError("bad"), "upstream_error"),
+        (EngineOverloaded("full"), "overloaded"),
+        (EngineError("bad"), "upstream_error"),
         (ValueError("secret text"), "server_error"),
     ],
 )
@@ -557,9 +557,9 @@ async def test_the_cleanup_loop_survives_a_failure_and_stops_with_the_runner(ser
 @pytest.mark.parametrize(
     ("error", "failure"),
     [
-        (NemoOverloaded("full"), ("overloaded", "The speech engine is busy, try again shortly.")),
-        (NemoUnavailable("down"), ("upstream_error", "The speech engine did not answer correctly.")),
-        (NemoError("bad glossary term"), ("upstream_error", "The speech engine did not answer correctly.")),
+        (EngineOverloaded("full"), ("overloaded", "The speech engine is busy, try again shortly.")),
+        (EngineUnavailable("down"), ("upstream_error", "The speech engine did not answer correctly.")),
+        (EngineError("bad glossary term"), ("upstream_error", "The speech engine did not answer correctly.")),
         (ValueError("secret text"), ("server_error", "The server failed to process the request.")),
     ],
 )

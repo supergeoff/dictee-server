@@ -6,12 +6,9 @@ from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from dictee.nemo import NemoError, NemoOverloaded, NemoUnavailable
+from dictee.engines.ports import EngineOverloaded
 
 logger = logging.getLogger("dictee")
-
-# Les échecs de NeMo que `nemo_failure` sait rendre : une route les attrape par ce tuple.
-NEMO_ERRORS = (NemoOverloaded, NemoUnavailable, NemoError)
 
 
 class ApiError(Exception):
@@ -54,12 +51,12 @@ def unexpected_error(exc: Exception) -> ApiError:
     return ApiError(500, "The server failed to process the request.", type="server_error")
 
 
-def nemo_failure(error: Exception) -> ApiError:
-    """Erreur de l'API pour un échec de NeMo : 429 s'il est saturé, 502 sinon.
+def engine_failure(error: Exception) -> ApiError:
+    """Erreur de l'API pour un échec du moteur audio : 429 s'il est saturé, 502 sinon.
 
-    Le message de NeMo n'est pas repris : il pourrait citer l'audio ou le texte transcrit.
+    Le message du moteur n'est pas repris : il pourrait citer l'audio ou le texte transcrit.
     """
-    if isinstance(error, NemoOverloaded):
+    if isinstance(error, EngineOverloaded):
         message = "The speech engine is busy, try again shortly."
         return ApiError(429, message, type="rate_limit_error", code="overloaded")
     return ApiError(502, "The speech engine did not answer correctly.", type="server_error", code="upstream_error")
@@ -73,8 +70,4 @@ async def handle_unexpected_error(request: Request, exc: Exception) -> JSONRespo
 async def handle_http_exception(request: Request, exc: HTTPException) -> JSONResponse:
     """Rend les erreurs de Starlette (route inconnue, méthode refusée) comme celles d'OpenAI."""
     error_type = "invalid_request_error" if exc.status_code < 500 else "server_error"
-    return JSONResponse(
-        envelope(exc.detail, type=error_type),
-        status_code=exc.status_code,
-        headers=exc.headers,
-    )
+    return JSONResponse(envelope(exc.detail, type=error_type), status_code=exc.status_code, headers=exc.headers)

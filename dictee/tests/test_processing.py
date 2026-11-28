@@ -7,12 +7,12 @@ from dataclasses import replace
 
 import pytest
 from conftest import audio_task
-from fakes import FakeNemo
+from fakes import FakeNemo, engines_of
 
 from dictee import processing
 from dictee.cuts import Silence
+from dictee.engines.ports import EngineError, EngineOverloaded, EngineUnavailable
 from dictee.modes import Mode
-from dictee.nemo import NemoError, NemoOverloaded, NemoUnavailable
 from dictee.processing import RunStats, process, task_audio, wait_ready
 from dictee.taskstore import ChunkRecord
 from dictee.types import Final, Word
@@ -112,8 +112,8 @@ async def test_a_task_whose_chunks_are_all_saved_sends_nothing(services, fake_ne
 
 async def test_a_task_that_failed_midway_resumes_with_the_chunks_it_had_saved(services, fake_nemo):
     task = audio_task(services, 65.0)
-    fake_nemo.chunks = [Final("Bonjour.", ()), NemoError("bad audio")]
-    with pytest.raises(NemoError):
+    fake_nemo.chunks = [Final("Bonjour.", ()), EngineError("bad audio")]
+    with pytest.raises(EngineError):
         await process(services, task, RunStats())
     assert [chunk.text for chunk in services.store.chunks(task.id)] == ["Bonjour."]
     assert services.store.get(task.id).progress == 0.5
@@ -211,7 +211,7 @@ async def test_a_meeting_without_any_word_has_no_segment(services, fake_nemo):
 
 
 async def test_a_meeting_starts_its_whole_session_again_after_a_lost_connection(services, fake_nemo):
-    fake_nemo.transcribe_errors = [NemoUnavailable("lost"), None]
+    fake_nemo.transcribe_errors = [EngineUnavailable("lost"), None]
     stats = RunStats()
     await process(services, audio_task(services, 3.0, mode=Mode.DIARIZE), stats)
     assert len([call for call in fake_nemo.calls if "speakers" in call]) == 2 and stats.retries == 1
@@ -220,16 +220,16 @@ async def test_a_meeting_starts_its_whole_session_again_after_a_lost_connection(
 async def test_a_meeting_keeps_only_the_words_of_its_last_session(services, fake_nemo):
     # La première session rend sa première phrase avant d'être perdue : ses mots ne doivent pas rester dans le résultat.
     fake_nemo.after = 1
-    fake_nemo.transcribe_errors = [NemoUnavailable("lost"), None]
+    fake_nemo.transcribe_errors = [EngineUnavailable("lost"), None]
     result = await process(services, audio_task(services, 3.0, mode=Mode.DIARIZE), RunStats())
     assert result.text == "Bonjour à tous. Salut."
     assert len(result.words) == 4
 
 
 async def test_a_meeting_gives_up_after_three_retries(services, fake_nemo):
-    fake_nemo.transcribe_errors = [NemoOverloaded("full")] * 4
+    fake_nemo.transcribe_errors = [EngineOverloaded("full")] * 4
     stats = RunStats()
-    with pytest.raises(NemoOverloaded):
+    with pytest.raises(EngineOverloaded):
         await process(services, audio_task(services, 3.0, mode=Mode.DIARIZE), stats)
     assert len(fake_nemo.transcribe_calls) == 4 and stats.retries == 3
 
@@ -238,7 +238,7 @@ async def test_the_progress_of_a_meeting_is_written_at_most_every_few_seconds_of
     # Quatre relevés (1 à 4 s envoyées) en quelques millisecondes : un seul passe, quelle que soit la durée d'audio.
     monkeypatch.setattr(processing, "PROGRESS_EVERY_S", 2.5)
     writes = progress_writes(services, monkeypatch)
-    services = replace(services, nemo=FramedNemo(finals=services.nemo.finals))
+    services = replace(services, engines=engines_of(FramedNemo(finals=services.engines.stt.finals)))
     await process(services, audio_task(services, 4.0, mode=Mode.DIARIZE), RunStats())
     assert writes == [0.25]
 
@@ -246,7 +246,7 @@ async def test_the_progress_of_a_meeting_is_written_at_most_every_few_seconds_of
 async def test_the_progress_of_a_meeting_is_the_seconds_sent_over_its_duration(services, monkeypatch):
     monkeypatch.setattr(processing, "PROGRESS_EVERY_S", 0.0)
     writes = progress_writes(services, monkeypatch)
-    services = replace(services, nemo=FramedNemo(finals=services.nemo.finals))
+    services = replace(services, engines=engines_of(FramedNemo(finals=services.engines.stt.finals)))
     task = audio_task(services, 4.0, mode=Mode.DIARIZE)
     await process(services, task, RunStats())
     assert writes == [0.25, 0.5, 0.75, 1.0]
@@ -256,7 +256,7 @@ async def test_the_progress_of_a_meeting_is_the_seconds_sent_over_its_duration(s
 async def test_the_progress_of_a_meeting_never_goes_past_one(services, monkeypatch):
     monkeypatch.setattr(processing, "PROGRESS_EVERY_S", 0.0)
     writes = progress_writes(services, monkeypatch)
-    services = replace(services, nemo=FramedNemo(finals=services.nemo.finals))
+    services = replace(services, engines=engines_of(FramedNemo(finals=services.engines.stt.finals)))
     task = audio_task(services, 4.0, mode=Mode.DIARIZE)
     await process(services, replace(task, duration=2.0), RunStats())
     assert writes == [0.5, 1.0, 1.0, 1.0]
@@ -266,8 +266,8 @@ async def test_the_progress_of_a_meeting_never_goes_back_after_a_retry(services,
     # Le premier essai annonce 1 à 4 s envoyées puis perd sa session ; le second repart de 1 s.
     monkeypatch.setattr(processing, "PROGRESS_EVERY_S", 0.0)
     writes = progress_writes(services, monkeypatch)
-    nemo = FramedNemo(finals=services.nemo.finals, transcribe_errors=[NemoUnavailable("lost"), None])
-    services = replace(services, nemo=nemo)
+    nemo = FramedNemo(finals=services.engines.stt.finals, transcribe_errors=[EngineUnavailable("lost"), None])
+    services = replace(services, engines=engines_of(nemo))
     await process(services, audio_task(services, 4.0, mode=Mode.DIARIZE), RunStats())
     assert writes == [0.25, 0.5, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0]
 
@@ -275,7 +275,7 @@ async def test_the_progress_of_a_meeting_never_goes_back_after_a_retry(services,
 async def test_a_resumed_meeting_keeps_the_progress_it_had_reached(services, monkeypatch):
     # Après un redémarrage, la tâche avait atteint 0,6 : la nouvelle session ne fait pas reculer la barre.
     monkeypatch.setattr(processing, "PROGRESS_EVERY_S", 0.0)
-    services = replace(services, nemo=FramedNemo(finals=services.nemo.finals))
+    services = replace(services, engines=engines_of(FramedNemo(finals=services.engines.stt.finals)))
     task = audio_task(services, 4.0, mode=Mode.DIARIZE)
     services.store.set_progress(task.id, 0.6)
     writes = progress_writes(services, monkeypatch)
@@ -287,7 +287,7 @@ async def test_a_resumed_meeting_keeps_the_progress_it_had_reached(services, mon
 
 
 async def test_an_unavailable_nemo_is_tried_again_once_ready(services, fake_nemo):
-    fake_nemo.chunks = [NemoUnavailable("down"), Final("Bonjour.", ())]
+    fake_nemo.chunks = [EngineUnavailable("down"), Final("Bonjour.", ())]
     fake_nemo.ready_answers = [False, True]
     stats = RunStats()
     assert (await process(services, audio_task(services, 3.0), stats)).text == "Bonjour."
@@ -295,31 +295,31 @@ async def test_an_unavailable_nemo_is_tried_again_once_ready(services, fake_nemo
 
 
 async def test_after_three_retries_the_failure_goes_up(services, fake_nemo):
-    fake_nemo.chunks = [NemoOverloaded("full")]
-    with pytest.raises(NemoOverloaded):
+    fake_nemo.chunks = [EngineOverloaded("full")]
+    with pytest.raises(EngineOverloaded):
         await process(services, audio_task(services, 3.0), RunStats())
     assert len([call for call in fake_nemo.calls if "chunk" in call]) == 4
 
 
 async def test_an_error_on_the_request_itself_is_not_tried_again(services, fake_nemo):
-    fake_nemo.chunks = [NemoError("bad audio")]
-    with pytest.raises(NemoError):
+    fake_nemo.chunks = [EngineError("bad audio")]
+    with pytest.raises(EngineError):
         await process(services, audio_task(services, 3.0), RunStats())
     assert len([call for call in fake_nemo.calls if "chunk" in call]) == 1
 
 
 async def test_waiting_for_nemo_gives_up_after_its_delay(services, fake_nemo, monkeypatch):
     monkeypatch.setattr(processing, "READY_WAIT_S", 0.05)
-    fake_nemo.chunks, fake_nemo.ready_answers = [NemoUnavailable("down")], [False]
-    with pytest.raises(NemoUnavailable):
+    fake_nemo.chunks, fake_nemo.ready_answers = [EngineUnavailable("down")], [False]
+    with pytest.raises(EngineUnavailable):
         await process(services, audio_task(services, 3.0), RunStats())
 
 
 async def test_giving_up_on_a_nemo_that_stays_down_is_not_one_more_retry(services, fake_nemo, monkeypatch):
     monkeypatch.setattr(processing, "READY_WAIT_S", 0.05)
-    fake_nemo.chunks, fake_nemo.ready_answers = [NemoUnavailable("down")], [False]
+    fake_nemo.chunks, fake_nemo.ready_answers = [EngineUnavailable("down")], [False]
     stats = RunStats()
-    with pytest.raises(NemoUnavailable, match="did not become ready"):
+    with pytest.raises(EngineUnavailable, match="did not become ready"):
         await process(services, audio_task(services, 3.0), stats)
     assert stats.retries == 0 and len(fake_nemo.chunk_calls) == 1
 
@@ -334,7 +334,7 @@ async def test_each_retry_waits_its_own_pause(services, fake_nemo, monkeypatch):
 
     monkeypatch.setattr(processing, "RETRY_DELAYS_S", (0.5, 0.6, 0.7))
     monkeypatch.setattr(processing.asyncio, "sleep", record)
-    fake_nemo.chunks = [NemoUnavailable("down")] * 3 + [Final("Bonjour.", ())]
+    fake_nemo.chunks = [EngineUnavailable("down")] * 3 + [Final("Bonjour.", ())]
     stats = RunStats()
     assert (await process(services, audio_task(services, 3.0), stats)).text == "Bonjour."
     assert pauses == [0.5, 0.6, 0.7] and stats.retries == 3
@@ -343,12 +343,12 @@ async def test_each_retry_waits_its_own_pause(services, fake_nemo, monkeypatch):
 async def test_the_retries_of_each_chunk_are_counted_apart(services, fake_nemo):
     # Chaque morceau a droit à ses trois reprises : deux pannes pour le premier, trois pour le second.
     fake_nemo.chunks = [
-        NemoUnavailable("a"),
-        NemoUnavailable("b"),
+        EngineUnavailable("a"),
+        EngineUnavailable("b"),
         Final("Bonjour.", ()),
-        NemoOverloaded("c"),
-        NemoOverloaded("d"),
-        NemoOverloaded("e"),
+        EngineOverloaded("c"),
+        EngineOverloaded("d"),
+        EngineOverloaded("e"),
         Final("Salut.", ()),
     ]
     stats = RunStats()
@@ -374,7 +374,7 @@ async def test_wait_ready_lets_the_loop_run_between_two_readings(fake_nemo, monk
             await asyncio.sleep(0)
 
     ticker = asyncio.create_task(tick())
-    with pytest.raises(NemoUnavailable):
+    with pytest.raises(EngineUnavailable):
         await wait_ready(fake_nemo)
     ticker.cancel()
     assert ticks > 1
@@ -393,16 +393,16 @@ async def test_the_stats_count_the_chunks_and_the_time_spent_in_nemo(services, f
 
 async def test_the_time_of_a_failed_attempt_counts_as_time_spent_in_nemo(services, fake_nemo):
     fake_nemo.on_chunk = lambda: time.sleep(0.02)
-    fake_nemo.chunks = [NemoUnavailable("down"), Final("Bonjour.", ())]
+    fake_nemo.chunks = [EngineUnavailable("down"), Final("Bonjour.", ())]
     stats = RunStats()
     await process(services, audio_task(services, 3.0), stats)
     assert stats.retries == 1 and stats.nemo_ms >= 40
 
 
 async def test_a_failure_of_nemo_leaves_no_trace_in_the_logs(services, fake_nemo, caplog):
-    # NemoError recopie le message de NeMo, qui peut citer la requête et donc le glossaire.
-    fake_nemo.chunks = [NemoError("rejected the glossary term Nemotron")]
-    with caplog.at_level(logging.DEBUG), pytest.raises(NemoError):
+    # EngineError recopie le message de NeMo, qui peut citer la requête et donc le glossaire.
+    fake_nemo.chunks = [EngineError("rejected the glossary term Nemotron")]
+    with caplog.at_level(logging.DEBUG), pytest.raises(EngineError):
         await process(services, audio_task(services, 3.0), RunStats())
     assert [record for record in caplog.records if record.name.startswith("dictee")] == []
     assert "Nemotron" not in caplog.text

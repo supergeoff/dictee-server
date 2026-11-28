@@ -25,9 +25,9 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from dictee.audio import SAMPLE_WIDTH
 from dictee.auth import resolve_caller
-from dictee.errors import NEMO_ERRORS, ApiError, nemo_failure, unexpected_error
+from dictee.engines.ports import ENGINE_ERRORS, LiveSession
+from dictee.errors import ApiError, engine_failure, unexpected_error
 from dictee.modes import MODELS, UNDETERMINED_LANGUAGE, to_iso_language, to_nemo_language
-from dictee.nemo import LiveSession
 from dictee.profile import glossary_terms, glossary_too_large, load_profile, prompt_glossary
 from dictee.types import Cleared, Committed, Final, Partial
 
@@ -39,13 +39,6 @@ DEFAULT_RATE = 24000
 MIN_RATE = 8000
 MAX_RATE = 96000
 DEFAULT_SILENCE_MS = 500  # silence qui ferme une prise de parole avec `server_vad`, quand le client n'en donne pas
-
-# Mesures de la tâche 1 sur NeMo 0.3.0. Une session NeMo accepte plusieurs commits et rend un `completed` puis un
-# `committed` pour chacun : une seule session sert toute la connexion. Avec `endpointing_ms` à 500, aucun `completed`
-# n'arrive avant le commit, même après 2 s de silence : NeMo ne ferme pas seul une prise de parole, et `server_vad`
-# est refusé.
-NEMO_MANY_COMMITS = True
-SERVER_VAD = False
 
 _MODEL = "dictee"  # le modèle du texte brut, que la session annonce quel que soit le modèle demandé
 _INPUT = "session.audio.input"
@@ -152,17 +145,18 @@ def _read_transcription(transcription: dict, config: _Config) -> _Config:
     return config
 
 
-def _read_turn_detection(turn_detection: object) -> int | None:
+def _read_turn_detection(turn_detection: object, *, server_vad: bool) -> int | None:
     """Silence de `server_vad`, ou `None` quand le client valide chaque prise de parole par un commit.
 
-    `semantic_vad` est toujours refusé, et `server_vad` tant que NeMo ne ferme pas seul une prise de parole.
+    `semantic_vad` est toujours refusé, et `server_vad` tant que le moteur ne ferme pas seul une prise de parole
+    (`server_vad` faux).
     """
     if turn_detection is None:
         return None
     param = f"{_INPUT}.turn_detection"
     kind = turn_detection.get("type") if isinstance(turn_detection, dict) else None
-    if kind != "server_vad" or not SERVER_VAD:
-        accepted = "null or server_vad" if SERVER_VAD else "null, with a commit for each turn"
+    if kind != "server_vad" or not server_vad:
+        accepted = "null or server_vad" if server_vad else "null, with a commit for each turn"
         raise ApiError(
             400, f"Unsupported turn_detection: use {accepted}.", code="unsupported_turn_detection", param=param
         )
@@ -174,7 +168,7 @@ def _read_turn_detection(turn_detection: object) -> int | None:
     return silence
 
 
-def _read_session(session: object, current: _Config) -> _Config:
+def _read_session(session: object, current: _Config, *, server_vad: bool) -> _Config:
     """Réglages que donne un `session.update`, à partir de ceux en vigueur : un champ absent garde sa valeur.
 
     Lève une `ApiError` dont `param` désigne le champ refusé ; les réglages en vigueur ne changent alors pas.
@@ -190,7 +184,7 @@ def _read_session(session: object, current: _Config) -> _Config:
     if (transcription := _object(audio_input, "transcription", f"{_INPUT}.transcription")) is not None:
         config = _read_transcription(transcription, config)
     if "turn_detection" in audio_input:
-        config = replace(config, silence_ms=_read_turn_detection(audio_input["turn_detection"]))
+        config = replace(config, silence_ms=_read_turn_detection(audio_input["turn_detection"], server_vad=server_vad))
     return config
 
 
@@ -211,8 +205,8 @@ def _failure(error: Exception) -> _End:
     est journalisée."""
     if isinstance(error, WebSocketDisconnect):
         return _End("closed")
-    if isinstance(error, NEMO_ERRORS):
-        failure = nemo_failure(error)
+    if isinstance(error, ENGINE_ERRORS):
+        failure = engine_failure(error)
         return _End(failure.code, failure, 1011)
     failure = unexpected_error(error)
     return _End(failure.type, failure, 1011)
@@ -237,7 +231,7 @@ class _LiveConnection:
     def __init__(self, websocket: WebSocket) -> None:
         state = websocket.app.state
         self._ws = websocket
-        self._db, self._settings, self._nemo = state.db, state.settings, state.nemo
+        self._db, self._settings, self._engine = state.db, state.settings, state.engines.live
         self._id = f"sess_{secrets.token_hex(12)}"
         self._config = _Config()
         self._terms: list[str] = []
@@ -402,7 +396,7 @@ class _LiveConnection:
         if self._sending is not None:
             message = "The session settings cannot change once its audio has started."
             raise ApiError(400, message, code="session_already_started", param="session")
-        self._config = _read_session(session, self._config)
+        self._config = _read_session(session, self._config, server_vad=self._engine.server_vad)
         await self._send("session.updated", session=self._session())
 
     async def _append(self, audio: object, event_id: str | None) -> _End | None:
@@ -442,7 +436,7 @@ class _LiveConnection:
         config = self._config
         stack = contextlib.AsyncExitStack()
         session = await stack.enter_async_context(
-            self._nemo.live(
+            self._engine.live(
                 sample_rate=config.rate,
                 language=to_nemo_language(config.language),
                 phrases=list(dict.fromkeys([*self._terms, *config.prompt_terms, *config.keywords])),
@@ -460,7 +454,7 @@ class _LiveConnection:
             message = "The audio buffer is empty: append audio before committing."
             raise ApiError(400, message, code="input_audio_buffer_commit_empty")
         self._current = None
-        if not NEMO_MANY_COMMITS:
+        if not self._engine.many_commits:
             self._sending = None  # la prise de parole suivante ouvre une autre session
         await self._announce(item)
         await session.commit()
@@ -483,14 +477,14 @@ class _LiveConnection:
     async def _read_nemo(self) -> NoReturn:
         """Relaie les événements des sessions NeMo, une session après l'autre, dans l'ordre de leur ouverture.
 
-        Quand une session n'accepte qu'un commit (`NEMO_MANY_COMMITS` faux), elle se ferme après son `Committed`.
+        Quand une session n'accepte qu'un commit (`many_commits` faux), elle se ferme après son `Committed`.
         """
         while True:
             session = await self._opened.get()
             async with contextlib.aclosing(session.events()) as events:
                 async for event in events:
                     await self._relay(event)
-                    if isinstance(event, Committed) and not NEMO_MANY_COMMITS:
+                    if isinstance(event, Committed) and not self._engine.many_commits:
                         break
             await self._stacks.pop(0).aclose()
 
