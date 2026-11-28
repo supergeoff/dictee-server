@@ -40,8 +40,10 @@ FINAL_ON_SILENCE_MS = 800
 CLOSING_SILENCE_S = 3.0
 # Un `silence` dont le temps atteint celui de la validation plus cette durée prouve que tout ce qui précède est fermé.
 _CLOSED_AFTER_S = (FINAL_ON_SILENCE_MS + STREAM_STEP_MS) / 1000
-# Audio du client en attente d'écriture vers ffmpeg, en secondes, au-delà duquel le moteur est déclaré saturé : il ne
-# suit plus le temps réel, et le client reçoit l'erreur de saturation au lieu d'une file sans fin.
+# Audio en attente d'écriture vers ffmpeg, en secondes, au-delà duquel le moteur est déclaré saturé : il ne suit plus
+# le temps réel, et le client reçoit l'erreur de saturation au lieu d'une file sans fin. La mesure compte tout ce que
+# le moteur n'a pas encore reçu, silences de validation et de vidage compris : ces silences ne sont jamais refusés,
+# mais chacun réduit d'autant la place laissée à l'audio du client.
 MAX_PENDING_S = 120.0
 
 # Ce qui n'est ni lettre ni chiffre : la ponctuation d'un mot change d'un texte partiel à l'autre.
@@ -71,7 +73,8 @@ class CrispasrLiveSession:
     ordonnée, qu'une tâche propre à la session écrit sur l'entrée de ffmpeg. Quand CrispASR prend du retard, la route
     continue donc de lire le client, et les temps d'audio se comptent sur les octets rangés, qui sont ceux du flux que
     CrispASR verra dans le même ordre. Au-delà de `MAX_PENDING_S` d'audio en attente, `send_audio` lève
-    `EngineOverloaded` ; les silences de `commit` et de `clear` ne sont jamais refusés.
+    `EngineOverloaded`. Les silences de `commit` et de `clear` ne sont jamais refusés, mais ils comptent dans cette
+    attente.
 
     Les textes partiels sortent au fil de l'eau : un mot n'est émis qu'une fois vu à la même place dans deux événements
     `partial` successifs de la même prise de parole, et jamais retiré ensuite. Le premier mot d'une prise de parole qui
@@ -130,8 +133,9 @@ class CrispasrLiveSession:
     async def _write_pending(self) -> None:
         """Écrit la file sur l'entrée de ffmpeg, dans l'ordre, en attendant que le tube l'accepte.
 
-        Un échec de l'écriture (tube fermé, ffmpeg arrêté) marque la session comme cassée et met `EngineUnavailable`
-        dans la file des événements.
+        Tout échec de l'écriture autre qu'une annulation (tube fermé, ffmpeg arrêté, exception imprévue) marque la
+        session comme cassée et met `EngineUnavailable` dans la file des événements. Une exception imprévue laisse en
+        plus une ligne de journal, avec le seul nom de son type.
         """
         stdin = self._ffmpeg.stdin
         try:
@@ -143,7 +147,9 @@ class CrispasrLiveSession:
                     stdin.write(pcm)
                     await stdin.drain()
                     self._pending_bytes -= len(pcm)
-        except (OSError, RuntimeError):
+        except Exception as exc:
+            if not isinstance(exc, OSError | RuntimeError):
+                logger.warning("live transcription write stopped error=%s", type(exc).__name__)
             self._broken = True
             self._pending.clear()
             self._pending_bytes = 0

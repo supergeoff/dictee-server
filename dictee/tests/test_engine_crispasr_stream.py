@@ -553,3 +553,49 @@ async def test_writer_failure_makes_the_session_unavailable(scenario):
             await asyncio.wait_for(anext(live_session.events()), 5)
 
     assert children() == []
+
+
+async def test_room_comes_back_once_the_writer_catches_up(scenario, tmp_path):
+    go = tmp_path / "go"
+    scenario([], read_after=str(go))
+    async with session(engine()) as live_session:
+        with pytest.raises(EngineOverloaded):
+            for _ in range(round(crispasr_stream.MAX_PENDING_S) + 10):
+                await live_session.send_audio(speech(1))
+        go.touch()
+
+        async def send_until_accepted() -> None:
+            while True:
+                try:
+                    await live_session.send_audio(speech(1))
+                    return
+                except EngineOverloaded:
+                    await asyncio.sleep(0.05)
+
+        await asyncio.wait_for(send_until_accepted(), 10)
+
+
+async def test_an_unexpected_writer_error_makes_the_session_unavailable(scenario, monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    scenario([])
+    async with session(engine()) as live_session:
+
+        def fail(data: bytes) -> None:
+            raise ValueError("Nemotron")
+
+        monkeypatch.setattr(live_session._ffmpeg.stdin, "write", fail)
+
+        async def send_until_refused() -> None:
+            while True:
+                await live_session.send_audio(speech(0.1))
+                await asyncio.sleep(0.01)
+
+        with pytest.raises(EngineUnavailable):
+            await asyncio.wait_for(send_until_refused(), 5)
+        with pytest.raises(EngineUnavailable):
+            await asyncio.wait_for(anext(live_session.events()), 5)
+
+    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert warnings == ["live transcription write stopped error=ValueError"]
+    assert "Nemotron" not in caplog.text
+    assert children() == []
