@@ -1,0 +1,37 @@
+{
+  "task": "transcribe",
+  "language": "fr",
+  "duration": 6.046,
+  "text": "Bonjour, ceci est un cours essai de transcription. Nous parlons de la météo et du week-end prochain.",
+  "segments": [
+    {
+      "id": 0,
+      "start": 0.00,
+      "end": 5.92,
+      "text": "Bonjour, ceci est un cours essai de transcription. Nous parlons de la météo et du week-end prochain.",
+      "temperature": 0.000000,
+      "avg_logprob": -0.015301,
+      "no_speech_prob": 0.0,
+      "words": [
+        {"word": "Bonjour,", "start": 0.00, "end": 0.64},
+        {"word": "ceci", "start": 0.64, "end": 1.04},
+        {"word": "est", "start": 1.04, "end": 1.20},
+        {"word": "un", "start": 1.20, "end": 1.36},
+        {"word": "cours", "start": 1.36, "end": 1.52},
+        {"word": "essai", "start": 1.60, "end": 1.92},
+        {"word": "de", "start": 2.00, "end": 2.16},
+        {"word": "transcription.", "start": 2.16, "end": 2.96},
+        {"word": "Nous", "start": 3.04, "end": 3.28},
+        {"word": "parlons", "start": 3.28, "end": 3.68},
+        {"word": "de", "start": 3.68, "end": 3.76},
+        {"word": "la", "start": 3.76, "end": 3.92},
+        {"word": "météo", "start": 3.92, "end": 4.40},
+        {"word": "et", "start": 4.40, "end": 4.56},
+        {"word": "du", "start": 4.56, "end": 4.72},
+        {"word": "week-end", "start": 4.72, "end": 5.04},
+        {"word": "prochain.", "start": 5.20, "end": 5.92}
+      ],
+      "tokens": [426, 289, 791, 344, 7877, 872, 350, 661, 352, 867, 1410, 2496, 369, 318, 2983, 6973, 7878, 1240, 7883, 4246, 7845, 800, 318, 393, 282, 1355, 7906, 7869, 453, 560, 750, 377, 7918, 488, 433, 2490, 281, 7883]
+    }
+  ]
+}

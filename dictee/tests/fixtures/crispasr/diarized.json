@@ -1,0 +1,61 @@
+{
+  "task": "transcribe",
+  "language": "fr",
+  "duration": 12.596,
+  "text": "Bonjour, ceci est un cours essai de transcription. Nous parlons de la météo et du week-end prochain. Oui, il fait repos des main, donne nos sciences now sproomeno bordel.",
+  "segments": [
+    {
+      "id": 0,
+      "start": 0.00,
+      "end": 6.24,
+      "text": "Bonjour, ceci est un cours essai de transcription. Nous parlons de la météo et du week-end prochain.",
+      "temperature": 0.000000,
+      "avg_logprob": 0.000000,
+      "no_speech_prob": 0.0,
+      "speaker": "A",
+      "words": [
+        {"word": "Bonjour,", "start": 0.00, "end": 0.64},
+        {"word": "ceci", "start": 0.64, "end": 1.04},
+        {"word": "est", "start": 1.04, "end": 1.20},
+        {"word": "un", "start": 1.20, "end": 1.36},
+        {"word": "cours", "start": 1.36, "end": 1.52},
+        {"word": "essai", "start": 1.60, "end": 1.92},
+        {"word": "de", "start": 2.00, "end": 2.16},
+        {"word": "transcription.", "start": 2.16, "end": 2.96},
+        {"word": "Nous", "start": 3.04, "end": 3.28},
+        {"word": "parlons", "start": 3.28, "end": 3.68},
+        {"word": "de", "start": 3.68, "end": 3.76},
+        {"word": "la", "start": 3.76, "end": 3.92},
+        {"word": "météo", "start": 3.92, "end": 4.40},
+        {"word": "et", "start": 4.40, "end": 4.56},
+        {"word": "du", "start": 4.56, "end": 4.72},
+        {"word": "week-end", "start": 4.72, "end": 5.12},
+        {"word": "prochain.", "start": 5.28, "end": 6.24}
+      ]
+    },
+    {
+      "id": 1,
+      "start": 6.32,
+      "end": 12.16,
+      "text": "Oui, il fait repos des main, donne nos sciences now sproomeno bordel.",
+      "temperature": 0.000000,
+      "avg_logprob": 0.000000,
+      "no_speech_prob": 0.0,
+      "speaker": "B",
+      "words": [
+        {"word": "Oui,", "start": 6.32, "end": 6.88},
+        {"word": "il", "start": 6.88, "end": 7.04},
+        {"word": "fait", "start": 7.20, "end": 7.28},
+        {"word": "repos", "start": 7.44, "end": 7.76},
+        {"word": "des", "start": 7.92, "end": 8.00},
+        {"word": "main,", "start": 8.16, "end": 8.56},
+        {"word": "donne", "start": 8.56, "end": 8.88},
+        {"word": "nos", "start": 8.96, "end": 9.04},
+        {"word": "sciences", "start": 9.20, "end": 9.52},
+        {"word": "now", "start": 9.60, "end": 9.68},
+        {"word": "sproomeno", "start": 9.84, "end": 10.32},
+        {"word": "bordel.", "start": 10.64, "end": 12.16}
+      ]
+    }
+  ]
+}

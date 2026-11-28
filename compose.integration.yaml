@@ -8,7 +8,61 @@ x-nemo-build: &nemo-build
   args:
     NEMO_VERSION: "${NEMO_VERSION:-}"
 
+# La version de CrispASR suit le même principe : CRISPASR_VERSION=<version> make integration. HF_TOKEN et PTTS_MODEL
+# (hf://gradium/phonon-40m-fr@<commit>) viennent de l'environnement de celui qui lance, jamais du dépôt.
+x-crispasr-build: &crispasr-build
+  context: ./crispasr
+  args:
+    CRISPASR_VERSION: "${CRISPASR_VERSION:-}"
+
 services:
+  crispasr-models:
+    build: *crispasr-build
+    restart: "no"
+    env_file: .env
+    command: ["pull-models.sh"]
+    volumes:
+      - crispasr-models:/models
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+  crispasr:
+    build: *crispasr-build
+    restart: unless-stopped
+    env_file: .env
+    command: ["serve.sh"]
+    ports:
+      - "127.0.0.1:18002:8080"
+    volumes:
+      - crispasr-models:/models:ro
+    depends_on:
+      crispasr-models:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+  phonon:
+    image: ghcr.io/gradium-ai/ptts-openai-server:0.7.1
+    restart: unless-stopped
+    environment:
+      HF_TOKEN: "${HF_TOKEN:-}"
+      PTTS_MODEL: "${PTTS_MODEL:-}"
+      PTTS_LANG: fr
+      PTTS_QUANT: q8
+    ports:
+      - "127.0.0.1:18003:8880"
+    deploy:
+      resources:
+        limits:
+          memory: 768M
   models:
     build: *nemo-build
     restart: "no"
@@ -70,3 +124,4 @@ services:
 volumes:
   dictee-data: null
   nemo-models: null
+  crispasr-models: null

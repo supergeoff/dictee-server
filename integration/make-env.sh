@@ -3,8 +3,17 @@
 # Les clés sont aléatoires ; LiteLLM est injoignable exprès et les valeurs OIDC sont factices.
 set -eu
 
+# HF_TOKEN et PTTS_MODEL viennent de l'environnement de celui qui lance : le compose les lit directement.
 cat <<EOF
+ASR_BACKEND=parakeet
+ASR_MODEL_SHA256=96899b633f7513ce5ad95fa74ee39d3c5f60ab6a00b8d4472c9d154e848efb98
+ASR_MODEL_URL=https://huggingface.co/cstr/fluid-speech-pro-GGUF/resolve/main/fluid-speech-pro-q8_0.gguf
 CLEANUP_MODEL=simple
+CRISPASR_API_KEYS=$(openssl rand -hex 32)
+CRISPASR_THREADS=4
+DIAR_METHOD=sortformer
+DIAR_MODEL_SHA256=08456d9e22cd9a323c0364d98375f3746d6e68507ebb705cd46438c534c7a3a1
+DIAR_MODEL_URL=https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/main/Nemotron-3-Diarization.q8_0.gguf
 DEFAULT_VOICE=Leo
 LITELLM_API_KEY=sk-test-not-a-real-key
 LITELLM_URL=http://127.0.0.1:9
@@ -16,6 +25,8 @@ OIDC_CLIENT_ID=dictee-test
 OIDC_CLIENT_SECRET=not-a-real-secret
 OIDC_ISSUER=http://127.0.0.1:9
 OPENWEBUI_SERVICE_KEY=$(openssl rand -hex 32)
+PTTS_LANG=fr
+PTTS_QUANT=q8
 PUBLIC_URL=http://127.0.0.1:18000
 SESSION_SECRET=$(openssl rand -hex 32)
 EOF
