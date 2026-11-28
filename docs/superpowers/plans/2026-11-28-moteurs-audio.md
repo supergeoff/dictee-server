@@ -60,25 +60,25 @@
 **Interfaces:**
 - Produces, dans `ports.py` :
   - `class EngineUnavailable(Exception)`, `class EngineOverloaded(Exception)`, `class EngineError(Exception)`, `ENGINE_ERRORS = (EngineOverloaded, EngineUnavailable, EngineError)`. Ils remplacent `NemoUnavailable`, `NemoOverloaded`, `NemoError` et `NEMO_ERRORS`, avec le même sens.
-  - `class FileTranscriber(Protocol)` : attributs `speakers: bool` et `progress: bool` ; `transcribe(wav: Path, *, language: str, phrases: Sequence[str], boost: float, speakers: bool = False, partials: bool = False, on_progress: Callable[[float], None] | None = None) -> AsyncIterator[Final | Partial]` ; `async transcribe_chunk(wav: bytes, *, language: str, phrases: Sequence[str], boost: float) -> Final` ; `async ready() -> bool`.
+  - `class FileTranscriber(Protocol)` : attribut `speakers: bool` ; `transcribe(wav: Path, *, language: str, phrases: Sequence[str], boost: float, speakers: bool = False, partials: bool = False, on_progress: Callable[[float], None] | None = None) -> AsyncIterator[Final | Partial]`, dont `on_progress` reçoit les secondes d'audio traitées ; `async transcribe_chunk(wav: bytes, *, language: str, phrases: Sequence[str], boost: float) -> Final` ; `async ready() -> bool`.
   - `class LiveSession(Protocol)` : `async send_audio(pcm: bytes)`, `async commit()`, `async clear()`, `events() -> AsyncIterator[Partial | Final | Committed | Cleared]`.
   - `class LiveTranscriber(Protocol)` : attributs `server_vad: bool` et `many_commits: bool` ; `live(*, sample_rate: int, language: str, phrases: Sequence[str], boost: float, endpointing_ms: int | None = None) -> AbstractAsyncContextManager[LiveSession]`.
   - `class Synthesizer(Protocol)` : attribut `sample_rate: int` ; `async speak(text: str, *, voice: str, language: str) -> bytes` ; `async voices() -> list[str]` ; `async ready() -> bool`.
 - Produces, dans `engines/__init__.py` : `@dataclass(frozen=True) class Engines` avec `stt: FileTranscriber`, `live: LiveTranscriber`, `tts: Synthesizer` ; `def build_engines(settings: Settings, http: httpx.AsyncClient) -> Engines`.
 - Produces, dans `settings.py` : `stt_engine: str = "nemo"`, `live_engine: str = "nemo"`, `tts_engine: str = "nemo"` (variables `STT_ENGINE`, `LIVE_ENGINE`, `TTS_ENGINE`).
 - Le code des routes lit `app.state.engines.stt`, `.live` et `.tts` à la place de `app.state.nemo`. `create_app(settings, engines=None, http=None)` remplace le paramètre `nemo`. `Services` porte `engines: Engines` à la place de `nemo`.
-- `NemoClient` reçoit les attributs `speakers = True`, `progress = True`, `server_vad` et `many_commits` (les valeurs actuelles des constantes `SERVER_VAD` et `NEMO_MANY_COMMITS` de `live.py`, qui disparaissent) et `sample_rate = 22050` (l'actuelle `TTS_SAMPLE_RATE`).
+- `NemoClient` reçoit les attributs `speakers = True`, `server_vad` et `many_commits` (les valeurs actuelles des constantes `SERVER_VAD` et `NEMO_MANY_COMMITS` de `live.py`, qui disparaissent) et `sample_rate = 22050` (l'actuelle `TTS_SAMPLE_RATE`).
 - La langue garde sa forme actuelle aux points d'appel (le résultat de `to_nemo_language`, par exemple `fr-FR` ou `auto`).
 
-- [ ] **Step 1 : écrire les tests qui échouent** dans `tests/test_engines.py` :
+- [x] **Step 1 : écrire les tests qui échouent** dans `tests/test_engines.py` :
   - `test_build_engines_defaults_to_nemo` : avec `REQUIRED_ENV`, `build_engines` rend un `Engines` dont les trois rôles sont la même instance de `NemoClient`.
   - `test_unknown_engine_names_the_variable` : `STT_ENGINE=foo` lève `ValueError` dont le message contient `STT_ENGINE` et `foo`. Même test pour `LIVE_ENGINE` et `TTS_ENGINE`.
-  - `test_nemo_declares_its_capabilities` : `speakers`, `progress` vrais, `sample_rate == 22050`.
+  - `test_nemo_declares_its_capabilities` : `speakers` vrai, `sample_rate == 22050`.
   - `test_engine_without_speakers_is_refused_at_startup` : un moteur de fichier dont `speakers` est faux fait lever à `build_engines` une `ValueError` qui nomme `STT_ENGINE` et le modèle `dictee-diarize`. Aucun adaptateur livré n'est dans ce cas : le test passe par un faux moteur. La progression par paliers fixes d'un moteur sans `progress` n'est pas construite, puisque les deux adaptateurs livrés la rendent.
-- [ ] **Step 2 : lancer** `make test ARGS="tests/test_engines.py"`. Attendu : échec à l'import de `dictee.engines`.
-- [ ] **Step 3 : écrire `ports.py` et `engines/__init__.py`, déplacer `nemo.py`, puis remplacer chaque usage** de `state.nemo`, `services.nemo`, `Nemo*` et des trois constantes. Dans `fakes.py`, `FakeNemo` reçoit les mêmes attributs de capacité, et `conftest.py` construit `Engines(stt=fake, live=fake, tts=fake)`.
-- [ ] **Step 4 : lancer** `make test`. Attendu : toute la suite passe, sans autre changement dans les tests que les renommages.
-- [ ] **Step 5 : commit** « Sépare le moteur en trois rôles derrière des protocoles ».
+- [x] **Step 2 : lancer** `make test ARGS="tests/test_engines.py"`. Attendu : échec à l'import de `dictee.engines`.
+- [x] **Step 3 : écrire `ports.py` et `engines/__init__.py`, déplacer `nemo.py`, puis remplacer chaque usage** de `state.nemo`, `services.nemo`, `Nemo*` et des trois constantes. Dans `fakes.py`, `FakeNemo` reçoit les mêmes attributs de capacité, et `conftest.py` construit `Engines(stt=fake, live=fake, tts=fake)`.
+- [x] **Step 4 : lancer** `make test`. Attendu : toute la suite passe, sans autre changement dans les tests que les renommages.
+- [x] **Step 5 : commit** « Sépare le moteur en trois rôles derrière des protocoles ».
 
 ### Task 2 : l'image `crispasr/` et le compose de test
 
@@ -89,14 +89,14 @@
 **Interfaces:**
 - Produces : l'image construite depuis `crispasr/` avec l'argument de build `CRISPASR_VERSION`. Le Dockerfile reprend le schéma de `nemo/Dockerfile` : base `debian:trixie-…-slim`, téléchargement de `crispasr-linux-x86_64.tar.gz` de la release `v${CRISPASR_VERSION}` du dépôt `CrispStrobe/CrispASR`, empreinte lue dans l'API des releases et vérifiée, `ffmpeg` installé, utilisateur `10001`, binaire `crispasr` dans le `PATH`.
 - `pull-models.sh` télécharge dans `/models/current/` les fichiers `asr.gguf` (`ASR_MODEL_URL`, `ASR_MODEL_SHA256`) et `diar.gguf` (`DIAR_MODEL_URL`, `DIAR_MODEL_SHA256`), vérifie chaque empreinte et ne retélécharge pas un fichier déjà bon. Une variable manquante arrête le script en la nommant.
-- `serve.sh` lance `crispasr --server --host 0.0.0.0 --port 8080 --backend "$ASR_BACKEND" -m /models/current/asr.gguf --diarize-model /models/current/diar.gguf -t "$CRISPASR_THREADS" --server-workers 2`, avec les clés de `CRISPASR_API_KEYS`.
+- `serve.sh` lance `crispasr --server --host 0.0.0.0 --port 8080 --backend "$ASR_BACKEND" -m /models/current/asr.gguf --diarize-model /models/current/diar.gguf -t "$CRISPASR_THREADS" --server-workers "$CRISPASR_WORKERS"`, avec les clés de `CRISPASR_API_KEYS`. Une variable manquante arrête le script en la nommant.
 - `compose.integration.yaml` reçoit les services `crispasr-models` et `crispasr` (port local `127.0.0.1:18002:8080`, limite 3 Go, healthcheck sur `/health`) et `phonon` (image `ghcr.io/gradium-ai/ptts-openai-server` au tag de la release `0.7.1`, `PTTS_MODEL`, `PTTS_LANG=fr`, `PTTS_QUANT=q8`, `HF_TOKEN`, port local `127.0.0.1:18003:8880`, limite 768 Mo). Les services `nemo` et `models` restent jusqu'à la Task 14.
 - `Makefile` : cible `check-crispasr-version`, sur le modèle de `check-nemo-version`, exigée par `integration`.
 
-- [ ] **Step 1 : écrire les trois fichiers de `crispasr/`** et les services du compose de test. `integration/make-env.sh` écrit les nouvelles variables avec les valeurs de la spec (tableau « Images, modèles et compose ») ; `HF_TOKEN` et `PTTS_MODEL` viennent de l'environnement de celui qui lance, jamais du dépôt. `PTTS_MODEL` s'écrit `hf://gradium/phonon-40m-fr@<commit>` : relever le commit courant de la branche `main` de ce dépôt Hugging Face et le noter dans DIC-29, pour le `.env` de Dokploy.
-- [ ] **Step 2 : vérifier** `CRISPASR_VERSION=0.8.55 docker compose -f compose.integration.yaml up -d --build crispasr-models crispasr`, puis `curl -fs http://127.0.0.1:18002/health`. Attendu : `{"status": "ok", …}` après le chargement.
-- [ ] **Step 3 : relever le format réel des réponses** sur un court extrait public de `dictee/tests/fixtures/` : une requête `verbose_json` avec mots, une requête avec `diarize=true` et `diarize_method=sortformer`, et `GET /progress`. Ranger les trois réponses dans `dictee/tests/fixtures/crispasr/` (`chunk.json`, `diarized.json`, `progress.json`). Elles fondent les faux serveurs des Tasks 6 et 7.
-- [ ] **Step 4 : commit** « Ajoute l'image du serveur CrispASR et son compose de test ».
+- [x] **Step 1 : écrire les trois fichiers de `crispasr/`** et les services du compose de test. `integration/make-env.sh` écrit les nouvelles variables avec les valeurs de la spec (tableau « Images, modèles et compose ») ; `HF_TOKEN` et `PTTS_MODEL` viennent de l'environnement de celui qui lance, jamais du dépôt. `PTTS_MODEL` s'écrit `hf://gradium/phonon-40m-fr@<commit>` : relever le commit courant de la branche `main` de ce dépôt Hugging Face et le noter dans DIC-29, pour le `.env` de Dokploy.
+- [x] **Step 2 : vérifier** `CRISPASR_VERSION=0.8.55 docker compose -f compose.integration.yaml up -d --build crispasr-models crispasr`, puis `curl -fs http://127.0.0.1:18002/health`. Attendu : `{"status": "ok", …}` après le chargement.
+- [x] **Step 3 : relever le format réel des réponses** sur un court extrait public de `dictee/tests/fixtures/` : une requête `verbose_json` avec mots, une requête avec `diarize=true` et `diarize_method=sortformer`, et `GET /progress`. Ranger les trois réponses dans `dictee/tests/fixtures/crispasr/` (`chunk.json`, `diarized.json`, `progress.json`). Elles fondent les faux serveurs des Tasks 6 et 7.
+- [x] **Step 4 : commit** « Ajoute l'image du serveur CrispASR et son compose de test ».
 
 ### Task 3 : le critère du direct, avant de construire le reste
 
@@ -108,11 +108,11 @@ Cette tâche est une mesure. Son résultat décide si la Task 8 se construit tel
 **Interfaces:**
 - Produces : `integration/live_words.py --audio <wav 16 kHz> --model <gguf> [--stream-length MS] [--stream-step MS]` envoie l'audio au rythme réel à `crispasr --stream --stream-json --vad`, transcrit le même audio hors direct, et imprime le nombre de mots des textes finals, celui de la transcription hors direct, leur rapport, et les délais médians du texte partiel et du texte final. Il n'imprime aucun texte transcrit.
 
-- [ ] **Step 1 : écrire le script.**
-- [ ] **Step 2 : préparer l'audio.** Lire l'enregistrement du banc dans le Drive de Geoff (voir la spec, « Les enregistrements des mesures »), en extraire le passage de 255 à 431 s en WAV mono 16 kHz dans un dossier temporaire hors du dépôt.
-- [ ] **Step 3 : mesurer** dans le conteneur `crispasr` du compose de test, avec les réglages par défaut puis avec `--stream-length` et `--stream-step` ajustés.
-- [ ] **Step 4 : décider.** Si un réglage atteint 95 % des mots, noter ce réglage et les délais dans DIC-29 : la Task 8 l'utilise. Sinon, **s'arrêter et rapporter à Geoff** avec les mesures : la spec prévoit alors un adaptateur `window`, qui demande son accord.
-- [ ] **Step 5 : effacer la copie de travail de l'audio**, puis commit « Ajoute la mesure des mots rendus par le direct de CrispASR ».
+- [x] **Step 1 : écrire le script.**
+- [x] **Step 2 : préparer l'audio.** Lire l'enregistrement du banc dans le Drive de Geoff (voir la spec, « Les enregistrements des mesures »), en extraire le passage de 255 à 431 s en WAV mono 16 kHz dans un dossier temporaire hors du dépôt.
+- [x] **Step 3 : mesurer** dans le conteneur `crispasr` du compose de test, avec les réglages par défaut puis avec `--stream-length` et `--stream-step` ajustés.
+- [x] **Step 4 : décider.** Si un réglage atteint 95 % des mots, noter ce réglage et les délais dans DIC-29 : la Task 8 l'utilise. Sinon, **s'arrêter et rapporter à Geoff** avec les mesures : la spec prévoit alors un adaptateur `window`, qui demande son accord.
+- [x] **Step 5 : effacer la copie de travail de l'audio**, puis commit « Ajoute la mesure des mots rendus par le direct de CrispASR ».
 
 ### Task 4 : la correction du glossaire
 
@@ -127,20 +127,20 @@ Cette tâche est une mesure. Son résultat décide si la Task 8 se construit tel
 - Règles : chaque variante de `heard_as` est remplacée par `term`, par mot entier, sans tenir compte de la casse. Les variantes les plus longues passent d'abord. Une variante de plusieurs mots remplace la suite de mots correspondante par un seul `Word` (début du premier, fin du dernier, personne du premier). La ponctuation collée au dernier mot est gardée. Une entrée sans variante ne change rien.
 - `correct_final` s'applique à chaque `Final` qui sort d'un moteur, aux trois endroits où il est lu : la boucle de `_Job.recognize` (`transcribe.py`), les deux chemins de `processing.py` (morceau et session), et le relais des textes finals de `live.py`. Le glossaire utilisé est celui que ces endroits passent déjà au moteur.
 
-- [ ] **Step 1 : écrire les tests qui échouent** dans `tests/test_glossary.py` :
-  - `test_variant_is_replaced_by_term` : `correct_text("le projet septéo avance", [GlossaryEntry("Septeo", ("septéo",))]) == "le projet Septeo avance"`.
-  - `test_match_ignores_case` : `"SEPTÉO"` et `"Septéo"` donnent `"Septeo"`.
+- [x] **Step 1 : écrire les tests qui échouent** dans `tests/test_glossary.py` :
+  - `test_variant_is_replaced_by_term` : `correct_text("le projet tarvél avance", [GlossaryEntry("Tarvel", ("tarvél",))]) == "le projet Tarvel avance"`.
+  - `test_match_ignores_case` : `"TARVÉL"` et `"Tarvél"` donnent `"Tarvel"`.
   - `test_variant_inside_longer_word_is_kept` : avec `GlossaryEntry("IT", ("it",))`, `"itlm"` reste `"itlm"`.
   - `test_variant_with_regex_characters` : une variante `"c++ (lang)"` se remplace sans erreur et sans rien toucher d'autre.
   - `test_longest_variant_wins` : avec les variantes `"claude"` et `"claude enterprise"` de deux entrées, `"claude enterprise"` donne le terme de la seconde.
   - `test_multi_word_variant_merges_words` : trois `Word` dont deux forment la variante deviennent deux `Word`, avec le début du premier et la fin du dernier.
-  - `test_punctuation_is_kept` : `"septéo,"` donne `"Septeo,"`.
+  - `test_punctuation_is_kept` : `"tarvél,"` donne `"Tarvel,"`.
   - `test_entry_without_variant_changes_nothing`.
-- [ ] **Step 2 : lancer** `make test ARGS="tests/test_glossary.py"`. Attendu : échec à l'import.
-- [ ] **Step 3 : écrire `glossary.py`.** Une seule expression régulière compilée par appel, faite des variantes échappées et triées par longueur décroissante, bornée par des limites de mot Unicode.
-- [ ] **Step 4 : brancher `correct_final`** aux trois endroits, avec un test par endroit qui passe un glossaire à une variante et lit le terme corrigé dans la réponse (`verbose_json` d'une tâche, texte d'un flux, texte final du direct).
-- [ ] **Step 5 : lancer** `make test`. Attendu : tout passe.
-- [ ] **Step 6 : commit** « Corrige le glossaire dans dictee après chaque transcription ».
+- [x] **Step 2 : lancer** `make test ARGS="tests/test_glossary.py"`. Attendu : échec à l'import.
+- [x] **Step 3 : écrire `glossary.py`.** Une seule expression régulière compilée par appel, faite des variantes échappées et triées par longueur décroissante, bornée par des limites de mot Unicode.
+- [x] **Step 4 : brancher `correct_final`** aux trois endroits, avec un test par endroit qui passe un glossaire à une variante et lit le terme corrigé dans la réponse (`verbose_json` d'une tâche, texte d'un flux, texte final du direct).
+- [x] **Step 5 : lancer** `make test`. Attendu : tout passe.
+- [x] **Step 6 : commit** « Corrige le glossaire dans dictee après chaque transcription ».
 
 ### Task 5 : les réglages des nouveaux adaptateurs
 
@@ -152,9 +152,9 @@ Cette tâche est une mesure. Son résultat décide si la Task 8 se construit tel
 - Produces, dans `Settings` (variable d'environnement, valeur par défaut) : `crispasr_url` (`CRISPASR_URL`, `http://crispasr:8080`), `crispasr_api_key` (`CRISPASR_API_KEY`, vide), `live_command` (`LIVE_COMMAND`, `crispasr`), `live_model_path` (`LIVE_MODEL_PATH`, `/models/current/asr.gguf`), `live_max_sessions` (`LIVE_MAX_SESSIONS`, `2`), `live_threads` (`LIVE_THREADS`, `4`), `live_stream_args` (`LIVE_STREAM_ARGS`, vide : les réglages de fenêtre retenus en Task 3), `tts_url` (`TTS_URL`, `http://phonon:8880`), `tts_sample_rate` (`TTS_SAMPLE_RATE`, `24000`), `tts_max_concurrent` (`TTS_MAX_CONCURRENT`, `1`).
 - `NEMO_API_KEY` n'est exigée que si un des trois rôles vaut `nemo`. `CRISPASR_API_KEY` n'est exigée que si `STT_ENGINE` vaut `crispasr`.
 
-- [ ] **Step 1 : tests qui échouent** : `test_nemo_key_not_required_without_nemo_engine`, `test_crispasr_key_required_with_crispasr_engine` (le message nomme `CRISPASR_API_KEY`), `test_live_max_sessions_must_be_an_integer`.
-- [ ] **Step 2 : lancer**, voir l'échec, **écrire les champs**, relancer, voir le succès.
-- [ ] **Step 3 : commit** « Ajoute les réglages des adaptateurs CrispASR et de voix ».
+- [x] **Step 1 : tests qui échouent** : `test_nemo_key_not_required_without_nemo_engine`, `test_crispasr_key_required_with_crispasr_engine` (le message nomme `CRISPASR_API_KEY`), `test_live_max_sessions_must_be_an_integer`.
+- [x] **Step 2 : lancer**, voir l'échec, **écrire les champs**, relancer, voir le succès.
+- [x] **Step 3 : commit** « Ajoute les réglages des adaptateurs CrispASR et de voix ».
 
 ### Task 6 : adaptateur `crispasr`, morceau et disponibilité
 
@@ -165,22 +165,22 @@ Cette tâche est une mesure. Son résultat décide si la Task 8 se construit tel
 
 **Interfaces:**
 - Consumes : les fixtures de la Task 2, `Settings.crispasr_url` et `crispasr_api_key`.
-- Produces : `class CrispasrTranscriber` avec `__init__(self, base_url: str, api_key: str, http: httpx.AsyncClient)`, `speakers = True`, `progress = True`, `async transcribe_chunk(...) -> Final`, `async ready() -> bool`. `build_engines` le rend pour `STT_ENGINE=crispasr`.
+- Produces : `class CrispasrTranscriber` avec `__init__(self, base_url: str, api_key: str, http: httpx.AsyncClient)`, `speakers = True`, `async transcribe_chunk(...) -> Final`, `async ready() -> bool`. `build_engines` le rend pour `STT_ENGINE=crispasr`.
 - `FakeCrispasr` dans `fakes.py` : un `httpx.MockTransport` qui sert `/health`, `/progress` et `/v1/audio/transcriptions` d'après les fixtures et garde la liste des requêtes reçues (champs du formulaire compris).
 - Comportement : `POST /v1/audio/transcriptions` en multipart avec `response_format=verbose_json`, l'horodatage par mot et `language` (le code reçu ramené à ISO-639-1 par `to_iso_language`, `auto` gardé tel quel). L'en-tête `Authorization: Bearer` porte la clé. `phrases` et `boost` sont reçus et ignorés. Une erreur de connexion, un délai dépassé ou un 503 lèvent `EngineUnavailable` ; une autre réponse d'erreur lève `EngineError` avec un message fixe, sans reprendre le corps de la réponse.
 
-- [ ] **Step 1 : tests qui échouent** :
+- [x] **Step 1 : tests qui échouent** :
   - `test_chunk_returns_words_with_times` : les mots de `chunk.json` sortent en `Word` avec `start` et `end`.
-  - `test_chunk_never_sends_hotwords` : avec `phrases=["Septeo"]`, le formulaire reçu ne contient ni `hotwords` ni `hotwords_boost`.
+  - `test_chunk_never_sends_hotwords` : avec `phrases=["Tarvel"]`, le formulaire reçu ne contient ni `hotwords` ni `hotwords_boost`.
   - `test_language_is_iso` : `fr-FR` part en `fr`, `auto` part en `auto`.
   - `test_ready_is_false_while_loading` : `/health` à 503 donne `False`, à 200 donne `True`.
   - `test_unreachable_server_is_unavailable` et `test_error_message_does_not_quote_the_body`.
-- [ ] **Step 2 : lancer**, voir l'échec.
-- [ ] **Step 3 : écrire `CrispasrTranscriber`.**
-- [ ] **Step 4 : lancer**, voir le succès.
-- [ ] **Step 5 : jouer `test_processing.py` avec ce moteur** : un test `test_task_runs_on_crispasr_chunks` monte `Services` avec `FakeCrispasr` et vérifie le résultat d'une tâche sans locuteurs.
-- [ ] **Step 6 : vérifier l'attente du démarrage** : `test_task_waits_while_engine_loads` fait répondre 503 puis 200 à `/health` et vérifie que la tâche finit sans échec.
-- [ ] **Step 7 : commit** « Ajoute l'adaptateur CrispASR pour les morceaux de fichier ».
+- [x] **Step 2 : lancer**, voir l'échec.
+- [x] **Step 3 : écrire `CrispasrTranscriber`.**
+- [x] **Step 4 : lancer**, voir le succès.
+- [x] **Step 5 : jouer `test_processing.py` avec ce moteur** : un test `test_task_runs_on_crispasr_chunks` monte `Services` avec `FakeCrispasr` et vérifie le résultat d'une tâche sans locuteurs.
+- [x] **Step 6 : vérifier l'attente du démarrage** : `test_task_waits_while_engine_loads` fait répondre 503 puis 200 à `/health` et vérifie que la tâche finit sans échec.
+- [x] **Step 7 : commit** « Ajoute l'adaptateur CrispASR pour les morceaux de fichier ».
 
 ### Task 7 : adaptateur `crispasr`, locuteurs et fichier en flux
 
@@ -190,21 +190,21 @@ Cette tâche est une mesure. Son résultat décide si la Task 8 se construit tel
 
 **Interfaces:**
 - Produces : `CrispasrTranscriber.transcribe(wav, *, language, phrases, boost, speakers=False, partials=False, on_progress=None) -> AsyncIterator[Final | Partial]`.
-  - Avec `speakers=True` : une seule requête pour le fichier entier, avec `diarize=true` et `diarize_method=sortformer`. Pendant la requête, `GET /progress` est lu toutes les 5 s et sa valeur (0 à 100) appelle `on_progress` avec une fraction de 0 à 1. Le résultat sort en un seul `Final` dont chaque `Word` porte sa personne.
+  - Avec `speakers=True` : une seule requête pour le fichier entier, avec `diarize=true` et `diarize_method=sortformer`. Pendant la requête, `GET /progress` est lu toutes les 5 s et sa valeur (0 à 100), rapportée à la durée du fichier, appelle `on_progress` avec les secondes d'audio traitées. Le résultat sort en un seul `Final` dont chaque `Word` porte sa personne.
   - Avec `speakers=False` : le fichier est coupé aux silences en morceaux de 15 s au plus, chaque morceau passe par `transcribe_chunk`, et chaque morceau fini sort en un `Final` dont les mots sont décalés à leur instant dans le fichier. Aucun `Partial` ne sort.
 - Produces, dans `cuts.py` : `plan_cuts(duration: float, silences: Sequence[Silence], max_chunk_s: float = MAX_CHUNK_S) -> list[float]`. La valeur par défaut garde le comportement actuel.
 - Constante `STREAM_CHUNK_S = 15.0` dans `crispasr.py`.
 
-- [ ] **Step 1 : tests qui échouent** :
+- [x] **Step 1 : tests qui échouent** :
   - `test_speakers_request_asks_for_sortformer` : le formulaire porte `diarize=true` et `diarize_method=sortformer`, et les mots de `diarized.json` sortent avec leur personne.
-  - `test_progress_is_reported_as_fraction` : `/progress` à 42 appelle `on_progress(0.42)`.
+  - `test_progress_is_reported_in_seconds_of_audio` : `/progress` à 50 sur un fichier de 20 s appelle `on_progress(10.0)`.
   - `test_stream_yields_one_final_per_chunk` : un audio de 40 s avec deux silences donne trois `Final`, aux instants décalés.
   - `test_plan_cuts_respects_max_chunk` : avec `max_chunk_s=15`, aucun morceau ne dépasse 15 s.
   - Dans `test_transcriptions.py`, `test_stream_emits_one_delta_per_chunk_on_crispasr` : une requête `stream=true` rend autant de `transcript.text.delta` que de morceaux, puis `transcript.text.done` avec le texte entier.
-- [ ] **Step 2 : lancer**, voir l'échec.
-- [ ] **Step 3 : écrire `transcribe` et le paramètre de `plan_cuts`.**
-- [ ] **Step 4 : lancer** `make test`. Attendu : tout passe.
-- [ ] **Step 5 : commit** « Ajoute les locuteurs et le fichier en flux à l'adaptateur CrispASR ».
+- [x] **Step 2 : lancer**, voir l'échec.
+- [x] **Step 3 : écrire `transcribe` et le paramètre de `plan_cuts`.**
+- [x] **Step 4 : lancer** `make test`. Attendu : tout passe.
+- [x] **Step 5 : commit** « Ajoute les locuteurs et le fichier en flux à l'adaptateur CrispASR ».
 
 ### Task 8 : adaptateur `crispasr-stream`, la dictée en direct
 
@@ -224,7 +224,7 @@ Cette tâche est une mesure. Son résultat décide si la Task 8 se construit tel
 - Au-delà de `max_sessions` sessions ouvertes, `live(...)` lève `EngineOverloaded`. Un binaire introuvable ou un processus qui s'arrête lève `EngineUnavailable`. La sortie du bloc `async with`, une annulation ou une erreur tue les deux processus et libère la place.
 - `fake_crispasr_stream.py` est un script Python exécutable qui joue le rôle du binaire dans les tests : il lit l'entrée standard et écrit des événements JSON d'après un scénario donné par une variable d'environnement.
 
-- [ ] **Step 1 : tests qui échouent** :
+- [x] **Step 1 : tests qui échouent** :
   - `test_partial_emits_only_stable_new_words` : les textes `"bonjour"`, `"bonjour à"`, `"bonjour à tous"` donnent les `Partial` `"bonjour"`, `" à"`, puis `" tous"` après confirmation.
   - `test_revised_partial_never_retracts` : après `"bonjour à"` émis, un texte `"bonsoir à tous"` n'émet rien qui retire `"bonjour"`.
   - `test_final_event_becomes_final`.
@@ -235,11 +235,11 @@ Cette tâche est une mesure. Son résultat décide si la Task 8 se construit tel
   - `test_third_session_is_overloaded_then_slot_frees`.
   - `test_process_is_killed_when_session_closes` et `test_process_is_killed_when_cancelled` : aucun processus fils ne reste.
   - `test_missing_binary_is_unavailable`.
-- [ ] **Step 2 : lancer**, voir l'échec.
-- [ ] **Step 3 : écrire `CrispasrLive` et sa session.**
-- [ ] **Step 4 : rejouer `test_live.py` avec ce moteur** : `test_live_dictation_on_crispasr_stream` ouvre `/v1/realtime`, envoie de l'audio, valide, et lit `conversation.item.input_audio_transcription.delta` puis `completed`. `test_live_overloaded_closes_with_engine_busy` vérifie l'erreur que `live.py` rend déjà pour un moteur saturé.
-- [ ] **Step 5 : lancer** `make test`. Attendu : tout passe.
-- [ ] **Step 6 : commit** « Ajoute la dictée en direct par un processus CrispASR par session ».
+- [x] **Step 2 : lancer**, voir l'échec.
+- [x] **Step 3 : écrire `CrispasrLive` et sa session.**
+- [x] **Step 4 : rejouer `test_live.py` avec ce moteur** : `test_live_dictation_on_crispasr_stream` ouvre `/v1/realtime`, envoie de l'audio, valide, et lit `conversation.item.input_audio_transcription.delta` puis `completed`. `test_live_overloaded_closes_with_engine_busy` vérifie l'erreur que `live.py` rend déjà pour un moteur saturé.
+- [x] **Step 5 : lancer** `make test`. Attendu : tout passe.
+- [x] **Step 6 : commit** « Ajoute la dictée en direct par un processus CrispASR par session ».
 
 ### Task 9 : adaptateur `openai`, la voix
 
@@ -257,7 +257,7 @@ Cette tâche est une mesure. Son résultat décide si la Task 8 se construit tel
 - `speech.py` : `encode_stream(..., input_rate=state.engines.tts.sample_rate)`. `resolve_voice(requested, profile_voice, available, default_voice)` rend la voix demandée si le moteur la propose, sinon celle du profil si le moteur la propose, sinon `default_voice`. Une voix de profil inconnue ne part plus telle quelle au moteur ; l'avertissement au journal reste.
 - `FakeVoiceServer` dans `fakes.py` : un `httpx.MockTransport` qui sert les trois routes et garde les requêtes reçues.
 
-- [ ] **Step 1 : tests qui échouent** :
+- [x] **Step 1 : tests qui échouent** :
   - `test_speak_asks_for_pcm_without_speed`.
   - `test_voices_reads_the_voices_list` : `{"voices": ["Lucien", "Arnaud"], "aliases": {"nova": "Lucien"}}` donne `["Lucien", "Arnaud"]`.
   - `test_calls_wait_for_their_turn` : deux `speak` lancés ensemble avec `max_concurrent=1` n'atteignent jamais le serveur en même temps.
@@ -265,10 +265,10 @@ Cette tâche est une mesure. Son résultat décide si la Task 8 se construit tel
   - `test_unreachable_voice_server_is_upstream_error` : dans `test_speech.py`, la route rend 502 avec le code `upstream_error`.
   - `test_unknown_profile_voice_falls_back_to_default` : un profil à la voix `Leo` obtient du son, et le serveur a reçu `Lucien`.
   - `test_output_rate_follows_the_engine` : avec `sample_rate=24000`, un WAV rendu dure le bon temps.
-- [ ] **Step 2 : lancer**, voir l'échec.
-- [ ] **Step 3 : écrire `OpenAISpeech` et adapter `speech.py` et `web.py`.**
-- [ ] **Step 4 : lancer** `make test`. Attendu : tout passe.
-- [ ] **Step 5 : commit** « Ajoute l'adaptateur de voix compatible OpenAI ».
+- [x] **Step 2 : lancer**, voir l'échec.
+- [x] **Step 3 : écrire `OpenAISpeech` et adapter `speech.py` et `web.py`.**
+- [x] **Step 4 : lancer** `make test`. Attendu : tout passe.
+- [x] **Step 5 : commit** « Ajoute l'adaptateur de voix compatible OpenAI ».
 
 ### Task 10 : l'image de dictee et l'intégration avec les vrais modèles
 
@@ -281,19 +281,19 @@ Cette tâche est une mesure. Son résultat décide si la Task 8 se construit tel
 - `compose.integration.yaml` : le service `dictee` monte le volume des modèles en lecture seule, dépend de `crispasr` et de `phonon`, et son `.env` de test met `STT_ENGINE=crispasr`, `LIVE_ENGINE=crispasr-stream`, `TTS_ENGINE=openai`, `DEFAULT_VOICE=Lucien`.
 - `integration/run.py` garde ses contrôles (transcription, flux, tâche avec locuteurs, direct, voix, raccrochage) et les joue contre les nouveaux moteurs.
 
-- [ ] **Step 1 : modifier l'image, le compose de test et les contrôles.**
-- [ ] **Step 2 : lancer** `CRISPASR_VERSION=0.8.55 make integration`. Attendu : tous les contrôles passent. Le contrôle de voix vérifie que le WAV rendu est à 24000 Hz et qu'il dure plus de 1 s pour la phrase d'essai.
-- [ ] **Step 3 : relever** la mémoire du conteneur `dictee` au repos et pendant une dictée en direct, et la noter dans DIC-29.
-- [ ] **Step 4 : commit** « Branche l'intégration sur CrispASR et le serveur de voix ».
+- [x] **Step 1 : modifier l'image, le compose de test et les contrôles.**
+- [x] **Step 2 : lancer** `CRISPASR_VERSION=0.8.55 make integration`. Attendu : tous les contrôles passent. Le contrôle de voix vérifie que le WAV rendu est à 24000 Hz et qu'il dure plus de 1 s pour la phrase d'essai.
+- [x] **Step 3 : relever** la mémoire du conteneur `dictee` au repos et pendant une dictée en direct, et la noter dans DIC-29.
+- [x] **Step 4 : commit** « Branche l'intégration sur CrispASR et le serveur de voix ».
 
 ### Task 11 : documentation et demande de fusion
 
 **Files:**
 - Modify: `README.md`, `AGENTS.md`
 
-- [ ] **Step 1 : mettre à jour `README.md`** : les moteurs et les trois variables, le glossaire porté par dictee, le rythme des deltas d'un fichier en flux, les voix, et les licences (liste de la spec, « Ce qui reste au constructeur »).
-- [ ] **Step 2 : mettre à jour `AGENTS.md`** : les principes parlent des moteurs par rôle et non plus de NeMo seul, la commande `make integration` demande `CRISPASR_VERSION`, et les specs en cours citent la spec du 28 novembre.
-- [ ] **Step 3 : commit** « Documente les moteurs par rôle ».
+- [x] **Step 1 : mettre à jour `README.md`** : les moteurs et les trois variables, le glossaire porté par dictee, le rythme des deltas d'un fichier en flux, les voix, et les licences (liste de la spec, « Ce qui reste au constructeur »).
+- [x] **Step 2 : mettre à jour `AGENTS.md`** : les principes parlent des moteurs par rôle et non plus de NeMo seul, la commande `make integration` demande `CRISPASR_VERSION`, et les specs en cours citent la spec du 28 novembre.
+- [x] **Step 3 : commit** « Documente les moteurs par rôle ».
 - [ ] **Step 4 : [accord] pousser la branche et ouvrir la PR.** Geoff relit et fusionne. La fusion ne déploie rien.
 
 ### Task 12 : le catalogue de l'updater
@@ -308,7 +308,16 @@ Cette tâche est une mesure. Son résultat décide si la Task 8 se construit tel
 
 Toutes les écritures de cette tâche demandent l'accord de Geoff. Les lectures et les écritures passent par `dokployconfig/lib/dokploy.py` avec le secret `DOKPLOY` (skill bitwarden, `run --only`), et n'impriment que des noms et des empreintes.
 
-- [ ] **Step 1 : relever l'état de départ** : la mémoire disponible de sideboxnode, les empreintes de l'environnement des conteneurs `dictee`, `nemo`, `conversation` et `conversation-gate`, et le compose actuel gardé pour le retour arrière.
+**Constats de la construction à prendre en compte.**
+
+- **Ordre de fusion.** L'image de dictee arrête son build quand l'argument `CRISPASR_VERSION` manque, et Dokploy construit depuis `main`. L'argument de build entre donc dans le compose de Dokploy, pour le service `dictee`, avant la fusion de la branche ; il est sans effet sur l'image d'avant.
+- **Variables en plus.** `CRISPASR_WORKERS` manque au tableau des variables de la spec, et `crispasr/serve.sh` refuse de démarrer sans elle. `VAD_MODEL_URL` et `VAD_MODEL_SHA256` ont été ajoutées au tableau pendant la construction, et `DIAR_METHOD`, qui y figure, est désormais lue par dictee. Ces quatre variables doivent être dans le `.env` de Dokploy.
+- **Voix par défaut.** `DEFAULT_VOICE=Lucien` doit être en place avant `TTS_ENGINE=openai`, parce que la valeur par défaut du code (`Leo`) est une voix de l'ancien moteur, que le serveur de voix refuse.
+- **Mémoire de dictee.** Sa limite doit couvrir les processus de dictée en direct : la mesure donne 913 Mio avec une session et 1,1 Gio avec deux, et elle est à refaire sur la sidebox.
+- **Fils de calcul.** Deux sessions de direct à 4 fils et le serveur CrispASR à 4 fils dépassent les 6 vCPU de la sidebox. `LIVE_THREADS` et `LIVE_STREAM_ARGS` se règlent donc à la mesure ; par exemple, `--stream-partial-decode-ms 2000` a été essayé avec succès sur une machine lente.
+- **Vérifications à faire après la bascule.** Il faut lancer une transcription réelle, parce que `/health` de CrispASR se lit sans clé et qu'une clé fausse ne se voit qu'à la première requête. Il faut aussi lancer une dictée en direct, parce que dictee démarre sain même sans le volume des modèles. Il faut vérifier que les apps ferment le WebSocket après chaque dictée, parce qu'une connexion garde sa place et son processus jusqu'à sa fermeture. Il faut enfin transcrire une réunion de plus d'une heure avec locuteurs, pour la mémoire et la durée.
+
+- [ ] **Step 1 : relever l'état de départ** : la mémoire disponible de la sidebox, les empreintes de l'environnement des conteneurs `dictee`, `nemo`, `conversation` et `conversation-gate`, et le compose actuel gardé pour le retour arrière.
 - [ ] **Step 2 : [accord] ajouter les services** `crispasr-models`, `crispasr` et `phonon`, les arguments de build `CRISPASR_VERSION`, le volume des modèles monté en lecture seule dans `dictee`, et les variables du tableau de la spec. `CRISPASR_API_KEYS` reçoit une valeur aléatoire générée sur place. `HF_TOKEN` est copié depuis Bitwarden dans le `.env` par le script, sans jamais être affiché. Les trois variables de moteur restent sur `nemo`.
 - [ ] **Step 3 : redéployer et vérifier** : les six services sont sains, l'environnement de `nemo`, `conversation` et `conversation-gate` n'a pas changé (empreintes), et la mémoire disponible est relevée. Si elle ne suffit pas, appliquer l'ordre de la spec : `LIVE_MAX_SESSIONS=1`, puis un seul worker CrispASR.
 - [ ] **Step 4 : [accord] basculer** : `STT_ENGINE=crispasr`, `LIVE_ENGINE=crispasr-stream`, `TTS_ENGINE=openai`, `DEFAULT_VOICE=Lucien`, puis redémarrer `dictee`.
@@ -344,6 +353,6 @@ Le service `conversation` ne change pas dans cette tâche.
 ### Task 16 : clôture
 
 - [ ] **Step 1 : [accord] supprimer le compose temporaire `dictee-bench`** de Dokploy et son volume.
-- [ ] **Step 2 : effacer les fichiers de travail** : le dossier `.scratch-voix` du dépôt, le dossier `dictee-bench` de la devbox (qui contient un extrait de la voix de Geoff) et les copies de l'enregistrement du banc.
+- [ ] **Step 2 : effacer les fichiers de travail** : le dossier `.scratch-voix` du dépôt, le dossier `dictee-bench` de la devbox (qui contient des extraits audio de travail) et les copies de l'enregistrement du banc.
 - [ ] **Step 3 : archiver le plan** : `git mv docs/superpowers/plans/2026-11-28-moteurs-audio.md docs/archive/`, commit « Archive le plan des moteurs audio ».
 - [ ] **Step 4 : inscrire dans DIC-29** le bilan : les mesures finales, ce qui a été retiré, et ce qui reste ouvert s'il en reste.
