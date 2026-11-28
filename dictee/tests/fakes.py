@@ -395,3 +395,62 @@ class FakeCrispasr:
                 return httpx.Response(status, json={"error": self.SECRET})
             return httpx.Response(200, content=(CRISPASR_FIXTURES / self.fixture).read_bytes())
         return httpx.Response(404)
+
+
+class FakeVoiceServer:
+    """Faux serveur de voix (phonon) : `/health`, `/v1/audio/voices` et `/v1/audio/speech`.
+
+    `requests` garde chaque requête reçue : `method`, `path`, `headers` et, pour la synthèse, `json` (le corps). La
+    synthèse rend `pcm` ; une voix absente de `voices` donne 400 comme le vrai serveur. `speech_statuses` sont les
+    codes que les synthèses successives reçoivent (le dernier se répète) : 429 répond le code d'erreur `server_busy`,
+    tout autre code d'erreur un corps qui cite `SECRET`, pour vérifier que l'adaptateur ne le reprend pas.
+    `speech_delay` est le temps, en secondes, que la synthèse met à répondre ; `max_active` le plus grand nombre de
+    synthèses en cours en même temps. `unreachable` fait échouer toute requête par une erreur de connexion. `http` est
+    le client HTTP à donner à l'adaptateur.
+    """
+
+    SECRET = "texte-secret-du-serveur"
+
+    def __init__(self, *, pcm: bytes = b"", voices: Sequence[str] = ("Lucien", "Arnaud")) -> None:
+        self.pcm = pcm
+        self.voices = list(voices)
+        self.aliases = {"nova": "Lucien"}
+        self.speech_statuses = [200]
+        self.speech_delay = 0.0
+        self.unreachable = False
+        self.max_active = 0
+        self.requests: list[dict] = []
+        self._active = 0
+        self.http = httpx.AsyncClient(transport=httpx.MockTransport(self._serve))
+
+    @property
+    def speech_requests(self) -> list[dict]:
+        return [request for request in self.requests if request["path"] == "/v1/audio/speech"]
+
+    async def _serve(self, request: httpx.Request) -> httpx.Response:
+        if self.unreachable:
+            raise httpx.ConnectError("connection refused", request=request)
+        record = {"method": request.method, "path": request.url.path, "headers": dict(request.headers)}
+        self.requests.append(record)
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.url.path == "/v1/audio/voices":
+            return httpx.Response(200, json={"voices": self.voices, "aliases": self.aliases})
+        if request.url.path == "/v1/audio/speech":
+            record["json"] = json.loads(request.content)
+            self._active += 1
+            self.max_active = max(self.max_active, self._active)
+            try:
+                if self.speech_delay:
+                    await asyncio.sleep(self.speech_delay)
+            finally:
+                self._active -= 1
+            status = self.speech_statuses.pop(0) if len(self.speech_statuses) > 1 else self.speech_statuses[0]
+            if status == 429:
+                return httpx.Response(429, json={"error": {"code": "server_busy", "message": self.SECRET}})
+            if status != 200:
+                return httpx.Response(status, json={"error": {"message": self.SECRET}})
+            if record["json"]["voice"] not in self.voices:
+                return httpx.Response(400, json={"error": {"message": self.SECRET}})
+            return httpx.Response(200, content=self.pcm)
+        return httpx.Response(404)

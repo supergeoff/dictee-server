@@ -221,8 +221,8 @@ async def _known_voice(state: State, requested: str) -> str:
 
     Lève `WebError` 400 si NeMo ne la propose pas ; un échec de NeMo à la lecture des voix remonte tel quel.
     """
-    # Sans voix de repli, `resolve_voice` rend une chaîne vide pour un nom que NeMo ne propose pas.
-    voice = resolve_voice(requested.strip(), "", await list_voices(state))
+    # Sans voix de repli, `resolve_voice` rend une chaîne vide pour un nom que le moteur ne propose pas.
+    voice = resolve_voice(requested.strip(), "", await list_voices(state), "")
     if not voice:
         raise WebError(400, "Cette voix n'existe pas.")
     return voice
@@ -261,7 +261,7 @@ async def _render_index(request: Request, user_id: int, *, new_key: str | None =
         "glossary": state.db.get_settings(user_id).glossary,
         "instructions": profile.instructions,
         "voices": voices,
-        "current_voice": resolve_voice(profile.voice, "", voices),
+        "current_voice": resolve_voice(profile.voice, "", voices, state.settings.default_voice),
         "saved": request.query_params.get("saved") == "1",
     }
     return _page(request, "index.html", context)

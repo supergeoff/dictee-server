@@ -133,8 +133,8 @@ def split_sentences(text: str, max_chars: int = MAX_SENTENCE_CHARS) -> list[str]
     return _attach_silent(sentences)
 
 
-def _nemo_name(voice: str | None, available: Sequence[str]) -> str | None:
-    """Nom de `voice` tel que NeMo l'écrit, sans tenir compte de la casse ; `None` si NeMo ne la propose pas."""
+def _engine_name(voice: str | None, available: Sequence[str]) -> str | None:
+    """Nom de `voice` tel que le moteur l'écrit, sans tenir compte de la casse ; `None` si le moteur ne la propose pas."""
     if voice:
         wanted = voice.casefold()
         for name in available:
@@ -143,23 +143,29 @@ def _nemo_name(voice: str | None, available: Sequence[str]) -> str | None:
     return None
 
 
-def resolve_voice(requested: str | None, profile_voice: str, available: Sequence[str]) -> str:
-    """Voix de la synthèse : celle demandée si NeMo la propose, sinon celle du profil, sans tenir compte de la casse.
+def resolve_voice(requested: str | None, profile_voice: str, available: Sequence[str], default_voice: str) -> str:
+    """Voix de la synthèse : la demandée si le moteur la propose, sinon celle du profil, sinon `default_voice`.
 
-    Le nom rendu est écrit comme NeMo l'écrit (`leo` donne `Leo`), pour la voix du profil comme pour celle de la requête
-    (la voix par défaut du service, que `DEFAULT_VOICE` fixe, passe par là). Les voix d'OpenAI (`alloy`, `nova`), que
-    les clients envoient par défaut, ne sont pas des voix de NeMo : elles donnent la voix du profil. Une voix du profil
-    que NeMo ne propose pas part telle quelle, NeMo restant seul juge, et laisse un avertissement au journal : elle
-    vient d'un réglage et non de la requête, donc le même nom reviendra à chaque appel. Sans voix de repli (chaîne
-    vide), la fonction rend une chaîne vide pour un nom inconnu, sans rien dire.
+    La comparaison ignore la casse, et le nom rendu est écrit comme le moteur l'écrit (`lucien` donne `Lucien`). Les
+    voix d'OpenAI (`alloy`, `nova`), que les clients envoient par défaut, ne sont pas des voix du moteur : elles
+    donnent la voix du profil. Une voix de profil que le moteur ne propose pas (une voix d'un ancien moteur) donne
+    `default_voice` et laisse un avertissement au journal : elle vient d'un réglage et non de la requête, donc le même
+    nom reviendra à chaque appel. Si `default_voice` n'est pas non plus dans la liste, elle part telle quelle, le
+    moteur restant seul juge, avec un avertissement lui aussi ; aucun ne cite de texte à dire. Sans voix de repli
+    (`default_voice` vide), la fonction rend une chaîne vide pour un nom inconnu, sans rien dire.
     """
     for voice in (requested, profile_voice):
-        name = _nemo_name(voice, available)
+        name = _engine_name(voice, available)
         if name is not None:
             return name
     if profile_voice:
-        logger.warning("voice unknown to nemo name=%s", loggable(profile_voice))
-    return profile_voice
+        logger.warning("voice unknown to engine name=%s", loggable(profile_voice))
+    name = _engine_name(default_voice, available)
+    if name is not None:
+        return name
+    if default_voice and default_voice != profile_voice:
+        logger.warning("default voice unknown to engine name=%s", loggable(default_voice))
+    return default_voice
 
 
 @dataclass(kw_only=True)
@@ -304,7 +310,7 @@ async def _open(state: State, params: _Params, profile_voice: str, sentence: str
     """Choisit la voix et fait synthétiser la première phrase ; rend la voix et le PCM de cette phrase."""
     with trace.nemo_call():
         available = await list_voices(state)
-    voice = resolve_voice(params.voice, profile_voice, available)
+    voice = resolve_voice(params.voice, profile_voice, available, state.settings.default_voice)
     trace.voice = loggable(voice)
     return voice, await trace.speak(state.engines.tts, sentence, voice)
 

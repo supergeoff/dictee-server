@@ -9,6 +9,7 @@ from fakes import FakeNemo
 from dictee.engines import Engines, _check, build_engines
 from dictee.engines.crispasr import CrispasrTranscriber
 from dictee.engines.nemo import NemoClient
+from dictee.engines.openai_tts import OpenAISpeech
 from dictee.settings import Settings
 
 
@@ -76,3 +77,14 @@ def test_engine_without_speakers_is_refused_at_startup():
 
     with pytest.raises(ValueError, match="STT_ENGINE.*dictee-diarize"):
         _check(Engines(stt=fake, live=fake, tts=fake))
+
+
+def test_openai_replaces_only_the_synthesizer(http):
+    engines = build_engines(
+        _settings(TTS_ENGINE="openai", TTS_URL="http://phonon.test:8880", TTS_SAMPLE_RATE="24000"), http
+    )
+
+    assert isinstance(engines.tts, OpenAISpeech)
+    assert engines.tts.sample_rate == 24000
+    assert isinstance(engines.stt, NemoClient)
+    assert engines.live is engines.stt

@@ -9,16 +9,21 @@ import os
 import re
 import signal
 import time
+import wave
+from io import BytesIO
 
 import anyio
 import pytest
 from conftest import wait_until
-from fakes import TTS_SAMPLE_RATE, FakeNemo, engines_of
+from fakes import TTS_SAMPLE_RATE, FakeNemo, FakeVoiceServer, engines_of
 from starlette.requests import Request
+from starlette.testclient import TestClient
 
 from dictee import speech
 from dictee.app import create_app
 from dictee.audio import OUTPUT_FORMATS, SPEECH_RATE
+from dictee.engines import Engines
+from dictee.engines.openai_tts import OpenAISpeech
 from dictee.engines.ports import EngineError, EngineOverloaded, EngineUnavailable
 from dictee.speech import MAX_INPUT_CHARS, MAX_SENTENCE_CHARS, resolve_voice, split_sentences
 
@@ -186,40 +191,47 @@ def test_split_of_text_without_letter_or_digit_keeps_the_pieces_as_they_are():
     "requested,expected", [("alloy", "Sofia"), ("leo", "Leo"), (None, "Sofia"), ("default", "Sofia")]
 )
 def test_resolve_voice(requested, expected):
-    assert resolve_voice(requested, "Sofia", ["John", "Sofia", "Aria", "Jason", "Leo"]) == expected
+    assert resolve_voice(requested, "Sofia", ["John", "Sofia", "Aria", "Jason", "Leo"], "Leo") == expected
 
 
 def test_resolve_voice_returns_the_name_as_nemo_writes_it():
-    assert resolve_voice("JASON", "Sofia", ("John", "Jason")) == "Jason"
-    assert resolve_voice("", "Aria", ("John", "Jason", "Aria")) == "Aria"
+    assert resolve_voice("JASON", "Sofia", ("John", "Jason"), "John") == "Jason"
+    assert resolve_voice("", "Aria", ("John", "Jason", "Aria"), "John") == "Aria"
 
 
 @pytest.mark.parametrize("requested", ["alloy", None, ""])
 @pytest.mark.parametrize("profile_voice,expected", [("sofia", "Sofia"), ("SOFIA", "Sofia"), ("Sofia", "Sofia")])
 def test_resolve_voice_recases_the_profile_voice_on_the_list_of_nemo(caplog, requested, profile_voice, expected):
     caplog.set_level(logging.DEBUG)
-    assert resolve_voice(requested, profile_voice, ["John", "Sofia", "Leo"]) == expected
+    assert resolve_voice(requested, profile_voice, ["John", "Sofia", "Leo"], "Leo") == expected
     assert log_lines(caplog) == []  # une voix que NeMo connaît n'a rien à signaler
 
 
-def test_resolve_voice_sends_an_unknown_profile_voice_as_it_is_and_says_so_in_the_log(caplog):
+def test_resolve_voice_gives_the_default_voice_for_an_unknown_profile_voice_and_says_so_in_the_log(caplog):
     caplog.set_level(logging.DEBUG)
-    assert resolve_voice("alloy", "Zorg", ["John", "Sofia"]) == "Zorg"
-    assert log_lines(caplog) == ["voice unknown to nemo name=Zorg"]
+    assert resolve_voice("alloy", "Zorg", ["John", "Sofia", "Leo"], "leo") == "Leo"
+    assert log_lines(caplog) == ["voice unknown to engine name=Zorg"]
+
+
+def test_resolve_voice_gives_the_default_voice_even_if_the_engine_does_not_list_it(caplog):
+    # Le moteur reste juge : la voix par défaut vient d'un réglage et part telle quelle, avec un avertissement.
+    caplog.set_level(logging.DEBUG)
+    assert resolve_voice(None, "Zorg", ["John"], "Lucien") == "Lucien"
+    assert log_lines(caplog) == ["voice unknown to engine name=Zorg", "default voice unknown to engine name=Lucien"]
 
 
 def test_the_warning_about_an_unknown_profile_voice_cannot_forge_a_log_line(caplog):
     caplog.set_level(logging.DEBUG)
-    resolve_voice(None, "Zorg\nuser=1 status=200 " + "y" * 200, ["John"])
+    resolve_voice(None, "Zorg\nuser=1 status=200 " + "y" * 200, ["John"], "John")
     (line,) = log_lines(caplog)
-    assert "\n" not in line and line.startswith("voice unknown to nemo name=Zorg") and len(line) < 120
+    assert "\n" not in line and line.startswith("voice unknown to engine name=Zorg") and len(line) < 120
 
 
 def test_resolve_voice_without_a_profile_voice_says_nothing(caplog):
     # La page de configuration l'appelle ainsi : sans voix de repli, un nom inconnu donne une chaîne vide.
     caplog.set_level(logging.DEBUG)
-    assert resolve_voice("alloy", "", ["John"]) == ""
-    assert resolve_voice("", "", ["John"]) == ""
+    assert resolve_voice("alloy", "", ["John"], "") == ""
+    assert resolve_voice("", "", ["John"], "") == ""
     assert log_lines(caplog) == []
 
 
@@ -332,7 +344,7 @@ def test_the_profile_voice_and_the_default_voice_are_recased_on_the_list_of_nemo
     assert not any(line.startswith("voice unknown") for line in log_lines(caplog))
 
 
-def test_an_unknown_profile_voice_goes_through_as_it_is_with_a_warning(transcriptions_client, fake_nemo, db, caplog):
+def test_an_unknown_profile_voice_takes_the_default_voice_with_a_warning(transcriptions_client, fake_nemo, db, caplog):
     fake_nemo.pcm = silence(0.5)
     user = db.upsert_user("sub-1", "ana@example.org", "Ana")
     db.save_settings(user, voice="Zorg")
@@ -340,8 +352,8 @@ def test_an_unknown_profile_voice_goes_through_as_it_is_with_a_warning(transcrip
     caplog.set_level(logging.INFO, logger="dictee")
     r = transcriptions_client.post(URL, headers=headers, json={"input": "Salut.", "voice": "nova"})
     assert r.status_code == 200
-    assert fake_nemo.speak_calls[-1]["voice"] == "Zorg"  # NeMo reste seul juge d'une voix qu'il ne connaît pas
-    assert log_lines(caplog).count("voice unknown to nemo name=Zorg") == 1
+    assert fake_nemo.speak_calls[-1]["voice"] == "Leo"  # la voix par défaut du service, que NeMo propose
+    assert log_lines(caplog).count("voice unknown to engine name=Zorg") == 1
 
 
 def test_language_is_always_french_and_other_fields_are_ignored(say, fake_nemo):
@@ -629,8 +641,8 @@ def test_voice_of_the_profile_cannot_forge_a_log_line(caplog, transcriptions_cli
     headers = {"Authorization": f"Bearer {db.create_key(user, 'Android')}"}
     caplog.set_level(logging.INFO, logger="dictee")
     transcriptions_client.post(URL, headers=headers, json={"input": "Salut."})
-    warning, line = log_lines(caplog)  # l'avertissement sur la voix inconnue de NeMo, puis la ligne de la requête
-    assert warning.startswith("voice unknown to nemo name=Sofia?user")
+    warning, line = log_lines(caplog)  # l'avertissement sur la voix inconnue du moteur, puis la ligne de la requête
+    assert warning.startswith("voice unknown to engine name=Sofia?user")
     for text in (warning, line):
         assert "\n" not in text and len(text) < 250
 
@@ -940,3 +952,57 @@ async def test_client_hanging_up_during_the_body_is_not_an_error(
     assert fake_nemo.calls == []
     (line,) = log_lines(caplog)
     assert line.endswith("status=499")
+
+
+# --- Avec le serveur de voix compatible OpenAI ---
+
+VOICE_RATE = 24000
+
+
+@pytest.fixture
+def voice_server():
+    return FakeVoiceServer(pcm=bytes(2 * VOICE_RATE))  # une seconde de silence par phrase
+
+
+@pytest.fixture
+def voice_client(settings, fake_nemo, fake_llm, voice_server):
+    """Client HTTP d'une app dont la voix vient du faux serveur de voix ; `default_voice` vaut `Lucien`."""
+    tts = OpenAISpeech("http://phonon.test", voice_server.http, sample_rate=VOICE_RATE, max_concurrent=1)
+    settings = dataclasses.replace(settings, default_voice="Lucien")
+    app = create_app(settings, engines=Engines(stt=fake_nemo, live=fake_nemo, tts=tts), http=fake_llm.http)
+    with TestClient(app, base_url="https://testserver") as test_client:
+        yield test_client
+
+
+def test_unknown_profile_voice_falls_back_to_default(voice_client, voice_server, db, caplog):
+    caplog.set_level(logging.INFO, logger="dictee")
+    user = db.upsert_user("sub-1", "ana@example.org", "Ana")
+    db.save_settings(user, voice="Leo")
+    headers = {"Authorization": f"Bearer {db.create_key(user, 'Android')}"}
+    r = voice_client.post(URL, headers=headers, json={"input": "Salut.", "voice": "nova"})
+    assert r.status_code == 200 and r.content.startswith(MP3_MAGIC)
+    assert [request["json"]["voice"] for request in voice_server.speech_requests] == ["Lucien"]
+    assert "voice unknown to engine name=Leo" in log_lines(caplog)
+
+
+def test_a_voice_the_server_lists_is_sent_as_the_server_writes_it(voice_client, voice_server, service_headers):
+    r = voice_client.post(URL, headers=service_headers, json={"input": "Salut.", "voice": "arnaud"})
+    assert r.status_code == 200
+    assert [request["json"]["voice"] for request in voice_server.speech_requests] == ["Arnaud"]
+
+
+def test_output_rate_follows_the_engine(voice_client, service_headers):
+    r = voice_client.post(URL, headers=service_headers, json={"input": "Un. Deux.", "response_format": "wav"})
+    assert r.status_code == 200
+    with wave.open(BytesIO(r.content)) as wav:  # ffmpeg écrit un WAV en flux : sa taille déclarée n'est pas fiable
+        assert wav.getnchannels() == 1
+        rate = wav.getframerate()
+    seconds = (len(r.content) - r.content.index(b"data") - 8) / (2 * rate)
+    assert abs(seconds - 2.0) < 0.1  # deux phrases d'une seconde à 24 kHz ; lues à 22,05 kHz, elles dureraient 2,18 s
+
+
+def test_unreachable_voice_server_is_upstream_error(voice_client, voice_server, service_headers):
+    voice_server.unreachable = True
+    r = voice_client.post(URL, headers=service_headers, json={"input": "Bonjour."})
+    assert r.status_code == 502
+    assert r.json()["error"]["code"] == "upstream_error"

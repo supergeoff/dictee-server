@@ -6,6 +6,7 @@ import httpx
 
 from dictee.engines.crispasr import CrispasrTranscriber
 from dictee.engines.nemo import NemoClient
+from dictee.engines.openai_tts import OpenAISpeech
 from dictee.engines.ports import FileTranscriber, LiveTranscriber, Synthesizer
 from dictee.settings import Settings
 
@@ -32,7 +33,7 @@ def build_engines(settings: Settings, http: httpx.AsyncClient) -> Engines:
     """Construit les adaptateurs que les réglages nomment ; `ValueError` si un nom est inconnu ou le choix incohérent.
 
     Un adaptateur n'est construit que si un rôle le choisit. Le moteur « nemo » est un seul client, partagé par les
-    rôles qui le choisissent. Le moteur « crispasr » ne joue que le rôle de transcription de fichier (`STT_ENGINE`).
+    rôles qui le choisissent. Le moteur « crispasr » ne joue que le rôle de transcription de fichier (`STT_ENGINE`), et le moteur « openai » que celui de synthèse (`TTS_ENGINE`).
     """
 
     def nemo() -> NemoClient:
@@ -41,10 +42,18 @@ def build_engines(settings: Settings, http: httpx.AsyncClient) -> Engines:
     def crispasr() -> CrispasrTranscriber:
         return CrispasrTranscriber(settings.crispasr_url, settings.crispasr_api_key, http)
 
+    def openai_speech() -> OpenAISpeech:
+        return OpenAISpeech(
+            settings.tts_url,
+            http,
+            sample_rate=settings.tts_sample_rate,
+            max_concurrent=settings.tts_max_concurrent,
+        )
+
     factories = {
         "STT_ENGINE": {"nemo": nemo, "crispasr": crispasr},
         "LIVE_ENGINE": {"nemo": nemo},
-        "TTS_ENGINE": {"nemo": nemo},
+        "TTS_ENGINE": {"nemo": nemo, "openai": openai_speech},
     }
     built: dict[str, object] = {}
     chosen = []
