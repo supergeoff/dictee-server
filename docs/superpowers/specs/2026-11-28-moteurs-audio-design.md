@@ -219,7 +219,7 @@ Cette section note ce que la construction a établi là où la spec laissait le 
 
 ## Les enregistrements des mesures
 
-Les mesures et le critère du direct se jouent sur l'enregistrement du banc, un enregistrement privé du propriétaire du dépôt, gardé hors du dépôt. Il est privé : le constructeur le lit au moment du test, ne le copie ni dans le dépôt ni dans une image, et efface sa copie de travail après la mesure. La phrase lue par la synthèse vocale est un texte neutre écrit dans le script de mesure.
+Les mesures et le critère du direct se jouent sur l'enregistrement du banc, un enregistrement du propriétaire du dépôt, gardé hors du dépôt. Il est privé : le constructeur le lit au moment du test, ne le copie ni dans le dépôt ni dans une image, et efface sa copie de travail après la mesure. La phrase lue par la synthèse vocale est un texte neutre écrit dans le script de mesure.
 
 ## Ce qui reste au constructeur
 

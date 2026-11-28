@@ -3,19 +3,29 @@
 Les moteurs n'appliquent pas le glossaire de l'appelant. La correction est déterministe : une variante se reconnaît
 sans tenir compte de la casse quand elle est bornée par autre chose qu'un caractère de mot (début ou fin du texte,
 espace, apostrophe, trait d'union, ponctuation), et les variantes les plus longues passent d'abord. La même règle vaut
-pour le texte et pour les mots, que le moteur rend avec l'élision et la ponctuation collées (`d'tarvél,`). Elle ne
-journalise rien.
+pour le texte et pour les mots, que le moteur rend avec l'élision et la ponctuation collées (`d'tarvél,`).
+L'apostrophe droite et l'apostrophe typographique se valent dans une variante, puisque les moteurs rendent l'une ou
+l'autre selon le modèle. Elle ne journalise rien.
 """
 
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 
 from dictee.profile import GlossaryEntry
 from dictee.types import Final, Word
 
 
+_APOSTROPHES = "'’"
+
+
 def _key(variant: str) -> str:
-    return " ".join(variant.casefold().split())
+    """Clé d'une variante : en minuscules, à espaces simples et à apostrophe droite."""
+    return " ".join(variant.casefold().replace("’", "'").split())
+
+
+def _escape(token: str) -> str:
+    """Le motif d'un mot de variante, où chaque apostrophe reconnaît les deux apostrophes."""
+    return "".join(f"[{_APOSTROPHES}]" if char in _APOSTROPHES else re.escape(char) for char in token)
 
 
 def _terms_by_variant(entries: Iterable[GlossaryEntry]) -> dict[str, str]:
@@ -28,14 +38,18 @@ def _terms_by_variant(entries: Iterable[GlossaryEntry]) -> dict[str, str]:
     return terms
 
 
+def _text_corrector(terms: dict[str, str]) -> Callable[[str], str]:
+    """La fonction qui remplace, dans un texte, chaque variante de `terms` par son terme."""
+    if not terms:
+        return lambda text: text
+    alternatives = (r"\s+".join(map(_escape, key.split())) for key in sorted(terms, key=len, reverse=True))
+    pattern = re.compile(rf"(?<!\w)(?:{'|'.join(alternatives)})(?!\w)", re.IGNORECASE)
+    return lambda text: pattern.sub(lambda match: terms[_key(match.group())], text)
+
+
 def correct_text(text: str, entries: Iterable[GlossaryEntry]) -> str:
     """Le texte dont chaque variante entendue est remplacée par son terme."""
-    terms = _terms_by_variant(entries)
-    if not terms:
-        return text
-    alternatives = (r"\s+".join(map(re.escape, key.split())) for key in sorted(terms, key=len, reverse=True))
-    pattern = re.compile(rf"(?<!\w)(?:{'|'.join(alternatives)})(?!\w)", re.IGNORECASE)
-    return pattern.sub(lambda match: terms[_key(match.group())], text)
+    return _text_corrector(_terms_by_variant(entries))(text)
 
 
 def _word_pattern(token: str, *, first: bool, last: bool) -> re.Pattern[str]:
@@ -45,16 +59,18 @@ def _word_pattern(token: str, *, first: bool, last: bool) -> re.Pattern[str]:
     """
     lead = r"(?P<lead>.*?)(?<!\w)" if first else ""
     trail = r"(?!\w)(?P<trail>.*)" if last else ""
-    return re.compile(f"{lead}{re.escape(token)}{trail}", re.IGNORECASE | re.DOTALL)
+    return re.compile(f"{lead}{_escape(token)}{trail}", re.IGNORECASE | re.DOTALL)
 
 
 def correct_words(words: Sequence[Word], entries: Iterable[GlossaryEntry]) -> tuple[Word, ...]:
     """Les mots dont chaque suite égale à une variante devient un seul mot du terme.
 
     Le nouveau mot commence où commence le premier, finit où finit le dernier et garde la personne du premier. Ce qui
-    entoure la variante dans le premier et le dernier mot (élision, préfixe et trait d'union, ponctuation) est gardé.
+    entoure la variante dans le premier et le dernier mot (élision, préfixe et trait d'union, ponctuation) est gardé,
+    et corrigé comme le texte quand la variante y revient (`tarvél-tarvél`).
     """
     terms = _terms_by_variant(entries)
+    correct = _text_corrector(terms)
     patterns = [
         (
             terms[key],
@@ -73,7 +89,8 @@ def correct_words(words: Sequence[Word], entries: Iterable[GlossaryEntry]) -> tu
             if all(matches):
                 lead = matches[0].groupdict().get("lead") or ""
                 trail = matches[-1].groupdict().get("trail") or ""
-                result.append(Word(f"{lead}{term}{trail}", span[0].start, span[-1].end, span[0].speaker))
+                text = f"{correct(lead)}{term}{correct(trail)}"
+                result.append(Word(text, span[0].start, span[-1].end, span[0].speaker))
                 index += len(parts)
                 break
         else:

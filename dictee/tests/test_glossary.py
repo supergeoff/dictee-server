@@ -84,3 +84,26 @@ def test_final_with_an_elision_gives_a_text_and_words_that_agree():
     final = correct_final(Final("Le modèle d'tarvél est bon.", words), [TARVEL])
     assert final.text == "Le modèle d'Tarvel est bon."
     assert " ".join(word.text for word in final.words) in final.text
+
+
+def test_variant_repeated_in_one_word_is_replaced_each_time_like_in_the_text():
+    assert correct_text("tarvél-tarvél", [TARVEL]) == "Tarvel-Tarvel"
+    assert correct_words([Word("tarvél-tarvél", 0.0, 1.0)], [TARVEL]) == (Word("Tarvel-Tarvel", 0.0, 1.0),)
+
+
+IA = GlossaryEntry("l'IA", ("l'ia",))
+IA_CURLY = GlossaryEntry("l’IA", ("l’ia",))
+
+
+@pytest.mark.parametrize(("entry", "heard"), [(IA, "l’ia"), (IA_CURLY, "l'ia")])
+def test_both_apostrophes_match_a_variant_in_the_text(entry, heard):
+    assert correct_text(f"« {heard} » parle", [entry]) == f"« {entry.term} » parle"
+
+
+@pytest.mark.parametrize(("entry", "heard"), [(IA, "l’ia,"), (IA_CURLY, "l'ia,")])
+def test_both_apostrophes_match_a_variant_in_the_words(entry, heard):
+    assert correct_words([Word(heard, 0.0, 1.0)], [entry]) == (Word(f"{entry.term},", 0.0, 1.0),)
+
+
+def test_apostrophes_around_a_variant_are_kept_as_written():
+    assert correct_text("d’tarvél et l'tarvél", [TARVEL]) == "d’Tarvel et l'Tarvel"
