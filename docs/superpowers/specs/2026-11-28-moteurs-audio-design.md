@@ -155,7 +155,7 @@ Le compose de Dokploy passe de cinq à six services pendant la bascule, puis rev
 | `models` | Télécharge les modèles dans un volume, puis s'arrête | Build `crispasr/` | 512 Mo |
 | `crispasr` | Serveur de transcription, sans domaine | Build `crispasr/` | 3 Go |
 | `phonon` | Serveur de voix, sans domaine ni authentification | `ghcr.io/gradium-ai/ptts-openai-server`, tag explicite | 768 Mo |
-| `dictee` | Inchangé, plus le binaire du direct et le volume des modèles en lecture seule | Build `dictee/` | À relever, puis augmentée de 1,7 Go par session en direct |
+| `dictee` | Inchangé, plus le binaire du direct et le volume des modèles en lecture seule | Build `dictee/` | 913 Mio mesurés avec une session en direct ; 3 Go dans le compose de test, valeur de production à mesurer au déploiement |
 | `conversation`, `conversation-gate` | Inchangés | | |
 | `nemo` | Gardé jusqu'à l'étape 6, puis retiré | | |
 
@@ -169,6 +169,7 @@ Les modèles se choisissent dans le `.env`, que lisent le script de télécharge
 | `DIAR_MODEL_URL`, `DIAR_MODEL_SHA256` | Le fichier `Nemotron-3-Diarization.q8_0.gguf` du dépôt `nvidia/Nemotron-3-Diarization` et son empreinte |
 | `CRISPASR_API_KEYS`, `CRISPASR_THREADS` | Une clé générée au déploiement, et 4 fils |
 | `PTTS_MODEL`, `PTTS_LANG`, `PTTS_QUANT` | `hf://gradium/phonon-40m-fr@<commit>`, `fr`, `q8` |
+| `VAD_MODEL_URL`, `VAD_MODEL_SHA256` | Le fichier `ggml-silero-v6.2.0.bin` du dépôt `ggml-org/whisper-vad` et son empreinte (constat de construction : sans lui, le binaire du direct retélécharge ce modèle à chaque session ; dictee le lit par `LIVE_VAD_MODEL_PATH`) |
 | `HF_TOKEN` | Le jeton Hugging Face de Geoff, écrit dans le `.env` de Dokploy sans passer par la conversation |
 | `STT_ENGINE`, `LIVE_ENGINE`, `TTS_ENGINE`, `DEFAULT_VOICE`, `LIVE_MAX_SESSIONS` | `crispasr`, `crispasr-stream`, `openai`, `Lucien`, `2` |
 
@@ -193,6 +194,19 @@ L'updater suit `CRISPASR_VERSION` par les releases GitHub de `CrispStrobe/CrispA
 ## Retour arrière
 
 Jusqu'à l'étape 6, remettre `STT_ENGINE`, `LIVE_ENGINE` et `TTS_ENGINE` sur `nemo` et redémarrer dictee suffit à revenir au moteur actuel. Chaque rôle peut revenir seul. Après l'étape 6, un retour à NeMo demande de rétablir le service et l'adaptateur depuis git.
+
+## Constats de construction
+
+Cette section note ce que la construction a établi là où la spec laissait le choix au constructeur. Elle ne change aucune décision de Geoff.
+
+- **Réglage de la dictée en direct.** Le réglage retenu est `--stream-step 1000 --stream-final-on-silence-ms 800`. Avec le pas par défaut de 3000 ms, deux textes finals sur cinq perdaient leurs derniers mots, alors qu'ils sont complets avec 1000 ms.
+- **Critère d'acceptation du direct.** Mesuré sur une machine de développement x86_64 (4 cœurs) avec les réglages par défaut, le critère donne 489 mots sur 492, puis 492 sur 492 à une seconde mesure. Les délais restent à mesurer sur la sidebox.
+- **Validation d'une prise de parole.** À la validation, la session écrit 3 s de silence, attend l'événement `silence` qui prouve la fermeture, puis rend les textes finals et accuse le commit. Les textes finals que CrispASR rend avant le commit sont gardés jusqu'au commit, pour que le client ne voie aucune prise de parole close qu'il n'a pas validée.
+- **Fichiers du direct.** Le binaire ne s'arrête pas quand le modèle de détection de voix manque : l'adaptateur vérifie donc les deux fichiers de modèle avant de lancer un processus.
+- **Modèle de détection de voix.** Il s'obtient par `VAD_MODEL_URL` et `VAD_MODEL_SHA256` (voir le tableau des variables) et se lit par `LIVE_VAD_MODEL_PATH` côté dictee.
+- **Langue.** Sans langue demandée, la réponse porte `und`, avec NeMo comme avec CrispASR. Interrogé avec `language=auto`, CrispASR annonce `en` sur un audio français : ce champ n'est pas une détection, et l'adaptateur ne le lit pas.
+- **Port WebSocket de CrispASR.** Il est écarté pour le direct : sa route Realtime ne rend de texte partiel que pour le moteur Nemotron, et elle répond seulement au commit pour parakeet.
+- **Intégration.** Tous les contrôles de `integration/run.py` passent sur x86_64 avec les nouveaux moteurs. Le contrôle de langue ne couvre plus le cas anglais, faute de voix anglaise.
 
 ## Les enregistrements des mesures
 
