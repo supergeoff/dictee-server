@@ -106,14 +106,15 @@ def segments_of(response: httpx.Response) -> list[dict]:
     return segments
 
 
-def check_health(_wav: bytes) -> str:
+def check_health(_audio: Callable[[], bytes]) -> str:
     response = httpx.get(f"{BASE_URL}/health", timeout=10)
     expect(response.status_code == 200, f"HTTP {response.status_code}")
     expect(response.json().get("status") == "ok", f"status {response.json().get('status')!r} au lieu de 'ok'")
     return "200, status ok"
 
 
-def check_words(wav: bytes) -> str:
+def check_words(audio: Callable[[], bytes]) -> str:
+    wav = audio()
     started = time.monotonic()
     segments = segments_of(transcribe(wav))
     words = [word for segment in segments for word in segment.get("words") or ()]
@@ -129,15 +130,16 @@ def check_words(wav: bytes) -> str:
     )
 
 
-def check_speakers(wav: bytes) -> str:
-    segments = segments_of(transcribe(wav, {"diarize": "true", "diarize_method": "sortformer"}))
+def check_speakers(audio: Callable[[], bytes]) -> str:
+    segments = segments_of(transcribe(audio(),{"diarize": "true", "diarize_method": "sortformer"}))
     speakers = {segment.get("speaker") for segment in segments}
     expect(None not in speakers, "un segment sans locuteur")
     return f"{len(segments)} segments, locuteurs {sorted(speakers)}"
 
 
-def check_progress(wav: bytes) -> str:
-    """`GET /progress` répond pendant un fichier avec locuteurs, et la valeur reste entre 0 et 100."""
+def check_progress(audio: Callable[[], bytes]) -> str:
+    """`GET /progress` répond pendant un fichier avec locuteurs : 0 à 100 au travail, -1 au repos."""
+    wav = audio()
     seen: list[dict] = []
     stop = threading.Event()
 
@@ -160,15 +162,16 @@ def check_progress(wav: bytes) -> str:
         thread.join(timeout=10)
     expect(seen, "/progress n'a jamais répondu 200")
     expect(all(isinstance(body.get("busy"), bool) for body in seen), "un relevé sans champ booléen `busy`")
-    values = [body.get("progress") for body in seen]
-    expect(
-        all(isinstance(v, (int, float)) and 0 <= v <= 100 for v in values), f"progress hors de 0 à 100 : {values[:5]}"
-    )
+    # Au repos le serveur répond {"busy": false, "progress": -1} ; 0 à 100 n'a de sens que pendant un travail.
+    for body in seen:
+        value = body.get("progress")
+        ok = isinstance(value, (int, float)) and (0 <= value <= 100 if body["busy"] else value == -1)
+        expect(ok, f"relevé incohérent : busy={body['busy']} progress={value!r}")
     busy = sum(1 for body in seen if body["busy"])
-    return f"{len(seen)} relevés, busy vu {busy} fois, progress de {min(values)} à {max(values)}"
+    return f"{len(seen)} relevés, busy vu {busy} fois (progress de 0 à 100), au repos progress vaut -1"
 
 
-CHECKS: list[tuple[str, str, Callable[[bytes], str]]] = [
+CHECKS: list[tuple[str, str, Callable[[Callable[[], bytes]], str]]] = [
     ("health", "GET /health", check_health),
     ("words", "Transcription avec mots horodatés", check_words),
     ("speakers", "Transcription avec locuteurs", check_speakers),
@@ -185,14 +188,21 @@ def main() -> int:
     unknown = only - {check[0] for check in CHECKS}
     if unknown:
         parser.error(f"contrôle inconnu : {', '.join(sorted(unknown))}")
-    wav = dialogue() if not only or only - {"health"} else b""
+    cache: list[bytes] = []
+
+    def audio() -> bytes:
+        """L'audio d'essai, demandé à phonon une seule fois et seulement quand un contrôle en a besoin."""
+        if not cache:
+            cache.append(dialogue())
+        return cache[0]
+
     failed = False
     for key, title, func in CHECKS:
         if only and key not in only:
             continue
         started = time.monotonic()
         try:
-            detail, ok = func(wav), True
+            detail, ok = func(audio), True
         except Failure as error:
             detail, ok = str(error), False
         except Exception as error:  # un échec de transport ou du script compte comme un échec du contrôle

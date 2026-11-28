@@ -14,7 +14,8 @@ from starlette.routing import Route, WebSocketRoute
 
 from dictee.auth import require_caller
 from dictee.db import Database
-from dictee.engines import Engines, build_engines
+from dictee.engines import Engines
+from dictee.engines.factory import build_engines
 from dictee.errors import ApiError, handle_api_error, handle_http_exception, handle_unexpected_error
 from dictee.live import realtime
 from dictee.modes import MODELS

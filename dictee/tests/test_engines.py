@@ -6,7 +6,8 @@ import pytest
 from conftest import REQUIRED_ENV
 from fakes import FakeNemo
 
-from dictee.engines import Engines, _check, build_engines
+from dictee.engines import Engines
+from dictee.engines.factory import _check, build_engines
 from dictee.engines.crispasr import CrispasrTranscriber
 from dictee.engines.nemo import NemoClient
 from dictee.engines.openai_tts import OpenAISpeech
@@ -55,7 +56,7 @@ def test_crispasr_leaves_nemo_shared_by_the_other_roles(http):
 
 def test_crispasr_is_not_built_when_no_role_chooses_it(http, monkeypatch):
     created = []
-    monkeypatch.setattr("dictee.engines.CrispasrTranscriber", lambda *args: created.append(args))
+    monkeypatch.setattr("dictee.engines.factory.CrispasrTranscriber", lambda *args: created.append(args))
 
     engines = build_engines(_settings(), http)
 

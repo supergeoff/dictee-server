@@ -58,6 +58,9 @@ services:
     env_file: .env
     ports:
       - "127.0.0.1:18003:8880"
+    volumes:
+      # Le cache Hugging Face : sans lui, le serveur retélécharge son modèle à chaque démarrage.
+      - phonon-cache:/home/phonon/.cache/huggingface
     deploy:
       resources:
         limits:
@@ -136,3 +139,4 @@ volumes:
   dictee-data: null
   nemo-models: null
   crispasr-models: null
+  phonon-cache: null
