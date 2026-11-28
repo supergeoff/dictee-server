@@ -1628,3 +1628,17 @@ def test_an_audio_decoded_to_zero_seconds_is_refused_like_an_unreadable_one(ask,
     tasks_dir = transcriptions_client.app.state.settings.tasks_dir
     assert tasks_of(transcriptions_client) == [] and not any(tasks_dir.iterdir())
     take_every_place(transcriptions_client.app)
+
+
+def test_stream_is_corrected_with_the_glossary_of_the_user(openai_client, fake_nemo, db, tone_mp3):
+    user = db.upsert_user("sub-1", "Ana@Example.org", "Ana")
+    db.save_settings(user, glossary="Septeo (souvent entendu : septéo)")
+    fake_nemo.finals = (Partial("Le projet"), Final("Le projet septéo.", (Word("septéo.", 0.0, 1.0, "0"),)))
+    stream = openai_client.audio.transcriptions.create(
+        model="whisper-1",
+        file=("a.mp3", tone_mp3),
+        stream=True,
+        extra_headers={"X-OpenWebUI-User-Email": "ana@example.org"},
+    )
+    events = list(stream)
+    assert events[-1].text == "Le projet Septeo."

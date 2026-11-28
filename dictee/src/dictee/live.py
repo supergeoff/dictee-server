@@ -27,8 +27,9 @@ from dictee.audio import SAMPLE_WIDTH
 from dictee.auth import resolve_caller
 from dictee.engines.ports import ENGINE_ERRORS, LiveSession
 from dictee.errors import ApiError, engine_failure, unexpected_error
+from dictee.glossary import correct_final
 from dictee.modes import MODELS, UNDETERMINED_LANGUAGE, to_iso_language, to_nemo_language
-from dictee.profile import glossary_terms, glossary_too_large, load_profile, prompt_glossary
+from dictee.profile import GlossaryEntry, glossary_terms, glossary_too_large, load_profile, prompt_glossary
 from dictee.types import Cleared, Committed, Final, Partial
 
 logger = logging.getLogger("dictee")
@@ -54,7 +55,7 @@ class _Config:
     rate: int = DEFAULT_RATE
     language: str | None = None  # code ISO-639-1 ; `None` quand NeMo détecte la langue
     keywords: tuple[str, ...] = ()
-    prompt_terms: tuple[str, ...] = ()  # termes du `prompt`, qui complètent le glossaire du compte
+    prompt_entries: tuple[GlossaryEntry, ...] = ()  # entrées du `prompt`, qui complètent le glossaire du compte
     silence_ms: int | None = None  # silence de `server_vad` ; `None` quand le client valide lui-même
 
 
@@ -141,7 +142,7 @@ def _read_transcription(transcription: dict, config: _Config) -> _Config:
             raise _invalid(param, "'prompt' must be a string.")
         if glossary_too_large(prompt):
             raise _invalid(param, "'prompt' is limited to 20000 characters and 500 lines.")
-        config = replace(config, prompt_terms=tuple(glossary_terms(prompt_glossary(prompt))))
+        config = replace(config, prompt_entries=tuple(prompt_glossary(prompt)))
     return config
 
 
@@ -234,7 +235,7 @@ class _LiveConnection:
         self._db, self._settings, self._engine = state.db, state.settings, state.engines.live
         self._id = f"sess_{secrets.token_hex(12)}"
         self._config = _Config()
-        self._terms: list[str] = []
+        self._glossary: list[GlossaryEntry] = []
         self._event_numbers = itertools.count(1)
         self._item_numbers = itertools.count(1)
         self._send_lock = asyncio.Lock()
@@ -305,7 +306,7 @@ class _LiveConnection:
         if model is not None and model not in MODELS and "transcribe" not in model:
             message = "This route serves transcription models only."
             return _End("unsupported_model", ApiError(400, message, code="unsupported_model", param="model"), 1008)
-        self._terms = glossary_terms(load_profile(self._db, self._settings, caller).glossary)
+        self._glossary = list(load_profile(self._db, self._settings, caller).glossary)
         await self._send("session.created", session=self._session())
         return None
 
@@ -435,11 +436,12 @@ class _LiveConnection:
         """
         config = self._config
         stack = contextlib.AsyncExitStack()
+        terms = [*glossary_terms(self._glossary), *glossary_terms(config.prompt_entries), *config.keywords]
         session = await stack.enter_async_context(
             self._engine.live(
                 sample_rate=config.rate,
                 language=to_nemo_language(config.language),
-                phrases=list(dict.fromkeys([*self._terms, *config.prompt_terms, *config.keywords])),
+                phrases=list(dict.fromkeys(terms)),
                 boost=self._settings.glossary_boost,
                 endpointing_ms=config.silence_ms,
             )
@@ -498,6 +500,7 @@ class _LiveConnection:
         elif isinstance(event, Partial):
             await self._send(_DELTA, item_id=item.id, content_index=0, delta=event.text)
         elif isinstance(event, Final):
+            event = correct_final(event, [*self._glossary, *self._config.prompt_entries])
             item.texts.append(event.text)
             if not item.committed:
                 # NeMo a fermé seul la prise de parole après le silence de `server_vad` : il n'enverra pas de

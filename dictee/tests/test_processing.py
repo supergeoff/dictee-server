@@ -13,6 +13,7 @@ from dictee import processing
 from dictee.cuts import Silence
 from dictee.engines.ports import EngineError, EngineOverloaded, EngineUnavailable
 from dictee.modes import Mode
+from dictee.profile import GlossaryEntry
 from dictee.processing import RunStats, process, task_audio, wait_ready
 from dictee.taskstore import ChunkRecord
 from dictee.types import Final, Word
@@ -406,3 +407,27 @@ async def test_a_failure_of_nemo_leaves_no_trace_in_the_logs(services, fake_nemo
         await process(services, audio_task(services, 3.0), RunStats())
     assert [record for record in caplog.records if record.name.startswith("dictee")] == []
     assert "Nemotron" not in caplog.text
+
+
+# La correction du glossaire.
+
+
+def with_glossary(task):
+    """La même tâche, avec un glossaire d'une entrée qui a une variante."""
+    return replace(task, params=replace(task.params, glossary=(GlossaryEntry("Septeo", ("septéo",)),)))
+
+
+async def test_a_chunk_is_corrected_with_the_glossary_of_the_task(services, fake_nemo):
+    words = (Word("Le", 0.0, 0.2), Word("projet", 0.3, 0.6), Word("septéo.", 0.7, 1.0))
+    fake_nemo.chunks = [Final("Le projet septéo.", words)]
+    result = await process(services, with_glossary(audio_task(services, 3.0)), RunStats())
+    assert result.text == "Le projet Septeo."
+    assert [word.text for word in result.words] == ["Le", "projet", "Septeo."]
+
+
+async def test_a_meeting_is_corrected_with_the_glossary_of_the_task(services, fake_nemo):
+    fake_nemo.finals = (Final("Le projet septéo.", (Word("Le", 0.0, 0.2, "0"), Word("septéo.", 0.7, 1.0, "0"))),)
+    task = with_glossary(audio_task(services, 3.0, mode=Mode.DIARIZE))
+    result = await process(services, task, RunStats())
+    assert result.text == "Le projet Septeo."
+    assert [word.text for word in result.words] == ["Le", "Septeo."]

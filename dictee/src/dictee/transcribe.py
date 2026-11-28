@@ -46,6 +46,7 @@ from dictee.lifecycle import (
 )
 from dictee.modes import Mode, resolve_mode, to_iso_language, to_nemo_language
 from dictee.processing import task_audio, task_dir
+from dictee.glossary import correct_final
 from dictee.profile import Profile, glossary_terms, glossary_too_large, load_profile, with_extra_glossary
 from dictee.runner import LongTicket
 from dictee.speakers import build_segments, label_speakers
@@ -263,6 +264,7 @@ class _Job:
                             if feed is not None:
                                 feed.partial(event.text)
                             continue
+                        event = correct_final(event, self.profile.glossary)
                         words.extend(event.words)
                         text = event.text.strip()
                         if text:

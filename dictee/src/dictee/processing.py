@@ -25,6 +25,7 @@ from dictee.engines import Engines
 from dictee.engines.ports import EngineOverloaded, EngineUnavailable, FileTranscriber
 from dictee.lifecycle import elapsed_ms
 from dictee.modes import Mode, to_iso_language
+from dictee.glossary import correct_final
 from dictee.profile import Profile, glossary_terms
 from dictee.settings import Settings
 from dictee.speakers import build_segments, label_speakers
@@ -141,7 +142,7 @@ async def _transcribe_chunk(
         finally:
             stats.nemo_ms += elapsed_ms(started)
 
-    final = await _with_retries(services.engines.stt, stats, attempt)
+    final = correct_final(await _with_retries(services.engines.stt, stats, attempt), params.glossary)
     words = tuple(replace(word, start=word.start + start, end=word.end + start) for word in final.words)
     return ChunkRecord(index, start, end, final.text.strip(), words)
 
@@ -212,6 +213,7 @@ async def _transcribe_meeting(
             ) as events:
                 async for event in events:
                     if isinstance(event, Final):
+                        event = correct_final(event, params.glossary)
                         words.extend(event.words)
                         if text := event.text.strip():
                             texts.append(text)
