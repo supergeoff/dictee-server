@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dictee : les moteurs audio après la bascule</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@500;700&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; background: #ffffff; }
+  .wrap { overflow-x: auto; }
+  svg { display: block; width: 1600px; min-width: 1600px; height: 900px; font-family: "Figtree", system-ui, sans-serif; }
+  .title { font-size: 40px; font-weight: 700; letter-spacing: -0.02em; fill: #0b0b0b; }
+  .lede { font-size: 20px; font-weight: 500; fill: #5c5c5c; }
+  .name { font-size: 26px; font-weight: 700; fill: #0b0b0b; }
+  .sub { font-size: 18px; font-weight: 500; fill: #5c5c5c; }
+  .label { font-size: 14px; font-weight: 700; letter-spacing: 0.06em; text-anchor: middle; }
+  .legend { font-size: 18px; font-weight: 500; fill: #0b0b0b; }
+  .box { fill: #ffffff; stroke: #e2e2e2; stroke-width: 1.5; }
+  .engine { fill: #f3f3f3; stroke: #e2e2e2; stroke-width: 1.5; }
+  .focus { fill: #ececec; stroke: #0b0b0b; stroke-width: 2; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<svg viewBox="0 0 1600 900" role="img" aria-labelledby="2026-11-28-moteurs-audio-schema-title 2026-11-28-moteurs-audio-schema-desc">
+  <title id="2026-11-28-moteurs-audio-schema-title">dictee : les moteurs audio après la bascule</title>
+  <desc id="2026-11-28-moteurs-audio-schema-desc">Les clients appellent dictee, dont chaque rôle audio passe par un adaptateur vers CrispASR ou Phonon.</desc>
+  <defs>
+    <marker id="arrow-api" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a4fc0"/></marker>
+    <marker id="arrow-http" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#05713a"/></marker>
+    <marker id="arrow-proc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#7c4a00"/></marker>
+  </defs>
+
+  <rect x="0" y="0" width="1600" height="900" fill="#ffffff"/>
+  <text class="title" x="64" y="96">dictee : les moteurs audio après la bascule</text>
+  <text class="lede" x="64" y="132">Chaque rôle a son adaptateur, choisi dans le .env</text>
+
+  <!-- Zone dictee -->
+  <rect class="focus" x="432" y="184" width="424" height="560" rx="16"/>
+  <text class="name" x="464" y="236">dictee</text>
+  <text class="sub" x="464" y="264">routes, tâches, glossaire</text>
+
+  <!-- Liens, tracés avant les briques -->
+  <line x1="360" y1="488" x2="430" y2="488" stroke="#1a4fc0" stroke-width="2.5" marker-end="url(#arrow-api)"/>
+  <line x1="832" y1="348" x2="1070" y2="348" stroke="#05713a" stroke-width="2.5" marker-end="url(#arrow-http)"/>
+  <line x1="832" y1="488" x2="1070" y2="488" stroke="#7c4a00" stroke-width="2.5" marker-end="url(#arrow-proc)"/>
+  <line x1="832" y1="628" x2="1070" y2="628" stroke="#05713a" stroke-width="2.5" marker-end="url(#arrow-http)"/>
+
+  <rect x="372" y="456" width="48" height="24" fill="#ffffff"/>
+  <text class="label" x="396" y="473" fill="#1a4fc0">API</text>
+  <rect x="928" y="316" width="72" height="24" fill="#ffffff"/>
+  <text class="label" x="964" y="333" fill="#05713a">HTTP</text>
+  <rect x="904" y="456" width="120" height="24" fill="#ffffff"/>
+  <text class="label" x="964" y="473" fill="#7c4a00">PROCESSUS</text>
+  <rect x="928" y="596" width="72" height="24" fill="#ffffff"/>
+  <text class="label" x="964" y="613" fill="#05713a">HTTP</text>
+
+  <!-- Clients -->
+  <rect class="box" x="32" y="436" width="328" height="104" rx="10"/>
+  <text class="name" x="56" y="482">Clients</text>
+  <text class="sub" x="56" y="512">dictee-app, Dictate, Open WebUI</text>
+
+  <!-- Rôles de dictee -->
+  <rect class="box" x="488" y="296" width="344" height="104" rx="10"/>
+  <text class="name" x="512" y="342">Fichiers et locuteurs</text>
+  <text class="sub" x="512" y="372">adaptateur crispasr</text>
+
+  <rect class="box" x="488" y="436" width="344" height="104" rx="10"/>
+  <text class="name" x="512" y="482">Dictée en direct</text>
+  <text class="sub" x="512" y="512">adaptateur crispasr-stream</text>
+
+  <rect class="box" x="488" y="576" width="344" height="104" rx="10"/>
+  <text class="name" x="512" y="622">Synthèse vocale</text>
+  <text class="sub" x="512" y="652">adaptateur openai</text>
+
+  <!-- Moteurs -->
+  <rect class="engine" x="1072" y="296" width="448" height="104" rx="10"/>
+  <text class="name" x="1096" y="342">CrispASR, serveur</text>
+  <text class="sub" x="1096" y="372">Fluid Speech Pro, Nemotron 3</text>
+
+  <rect class="engine" x="1072" y="436" width="448" height="104" rx="10"/>
+  <text class="name" x="1096" y="482">CrispASR, flux</text>
+  <text class="sub" x="1096" y="512">un processus par session</text>
+
+  <rect class="engine" x="1072" y="576" width="448" height="104" rx="10"/>
+  <text class="name" x="1096" y="622">Phonon</text>
+  <text class="sub" x="1096" y="652">phonon-40m-fr, voix Lucien</text>
+
+  <!-- Légende -->
+  <line x1="64" y1="832" x2="1536" y2="832" stroke="#e2e2e2" stroke-width="1"/>
+  <line x1="64" y1="864" x2="112" y2="864" stroke="#1a4fc0" stroke-width="3"/>
+  <text class="legend" x="124" y="870">API audio des clients</text>
+  <line x1="400" y1="864" x2="448" y2="864" stroke="#05713a" stroke-width="3"/>
+  <text class="legend" x="460" y="870">HTTP interne au compose</text>
+  <line x1="760" y1="864" x2="808" y2="864" stroke="#7c4a00" stroke-width="3"/>
+  <text class="legend" x="820" y="870">Processus lancé par dictee</text>
+</svg>
+</div>
+</body>
+</html>

@@ -1,15 +1,74 @@
 # Compose de test local, autonome : `make integration` construit les images depuis le dépôt et publie les ports sur
 # 127.0.0.1. Le compose qui fait tourner dictee en production vit dans Dokploy, seule source des composes. Celui-ci en
-# reprend les services et les limites de mémoire. La version de NeMo-Speech.cpp n'y est pas écrite : elle vient de la
-# variable NEMO_VERSION, que `make integration` exige (NEMO_VERSION=<version> make integration, avec la valeur du compose
-# de Dokploy).
+# reprend les services et les limites de mémoire. La version de CrispASR n'y est pas écrite : elle vient de la variable
+# CRISPASR_VERSION, que `make integration` exige (CRISPASR_VERSION=<version> make integration, avec la valeur du compose
+# de Dokploy). `make integration` demande donc CRISPASR_VERSION, PTTS_MODEL et HF_TOKEN : les deux dernières vont dans
+# le .env que fabrique integration/make-env.sh. La version de NeMo-Speech.cpp suit le même principe (NEMO_VERSION), mais
+# seul `make nemo-up` la demande.
+# Les services `models` et `nemo` restent jusqu'à la tâche 14 derrière le profil `nemo` : la machine d'intégration n'a pas
+# la mémoire pour faire tourner NeMo, CrispASR, phonon et dictee ensemble. Aucun rôle du .env de test ne passe par NeMo
+# (la dictée en direct passe par LIVE_ENGINE=crispasr-stream) : le Makefile laisse ce profil éteint (COMPOSE_PROFILES
+# vide), et `make nemo-up` démarre ces deux services en les nommant.
 x-nemo-build: &nemo-build
   context: ./nemo
   args:
     NEMO_VERSION: "${NEMO_VERSION:-}"
 
+# La version de CrispASR vient de CRISPASR_VERSION (voir plus haut) : CRISPASR_VERSION=<version> make integration.
+x-crispasr-build: &crispasr-build
+  context: ./crispasr
+  args:
+    CRISPASR_VERSION: "${CRISPASR_VERSION:-}"
+
 services:
+  crispasr-models:
+    build: *crispasr-build
+    restart: "no"
+    env_file: .env
+    command: ["pull-models.sh"]
+    volumes:
+      - crispasr-models:/models
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+  crispasr:
+    build: *crispasr-build
+    restart: unless-stopped
+    env_file: .env
+    command: ["serve.sh"]
+    ports:
+      - "127.0.0.1:18002:8080"
+    volumes:
+      - crispasr-models:/models:ro
+    depends_on:
+      crispasr-models:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+  phonon:
+    image: ghcr.io/gradium-ai/ptts-openai-server:0.7.1
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:18003:8880"
+    volumes:
+      # Le cache Hugging Face : sans lui, le serveur retélécharge son modèle à chaque démarrage.
+      - phonon-cache:/home/phonon/.cache/huggingface
+    deploy:
+      resources:
+        limits:
+          memory: 768M
   models:
+    profiles: ["nemo"]
     build: *nemo-build
     restart: "no"
     env_file: .env
@@ -21,6 +80,7 @@ services:
         limits:
           memory: 512M
   nemo:
+    profiles: ["nemo"]
     build: *nemo-build
     restart: unless-stopped
     env_file: .env
@@ -46,6 +106,8 @@ services:
     build:
       context: ./dictee
       target: runtime
+      args:
+        CRISPASR_VERSION: "${CRISPASR_VERSION:-}"
     restart: unless-stopped
     # Docker attend 30 s après SIGTERM avant SIGKILL : uvicorn en laisse 20 aux requêtes, puis arrête les tâches.
     stop_grace_period: 30s
@@ -54,9 +116,20 @@ services:
       - "127.0.0.1:18000:8000"
     volumes:
       - dictee-data:/data
+      # Les modèles de la dictée en direct (LIVE_MODEL_PATH=/models/current/asr.gguf et
+      # LIVE_VAD_MODEL_PATH=/models/current/vad.bin), au même chemin que dans crispasr.
+      - crispasr-models:/models:ro
     depends_on:
+      crispasr:
+        condition: service_healthy
+      # L'image de phonon n'a ni curl, ni wget, ni Python : aucun healthcheck ne peut y tourner, d'où
+      # `service_started` au lieu de `service_healthy`.
+      phonon:
+        condition: service_started
+      # nemo n'existe que sous le profil `nemo` : sans lui, cette dépendance est ignorée.
       nemo:
         condition: service_healthy
+        required: false
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
       interval: 30s
@@ -66,7 +139,13 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          # Les processus CrispASR de la dictée en direct tournent dans ce conteneur, LIVE_MAX_SESSIONS au plus : dictee
+          # monte à environ 1 Go avec une session ouverte (mesure de la tâche 8), le modèle étant partagé entre les
+          # sessions. Avec 512 Mo, le garde-fou mémoire de CrispASR refuse de décoder. La valeur de production se mesure
+          # au déploiement.
+          memory: 3G
 volumes:
   dictee-data: null
   nemo-models: null
+  crispasr-models: null
+  phonon-cache: null

@@ -1,13 +1,10 @@
 import asyncio
-import math
 import os
 import random
-import struct
-import wave
-from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
+from conftest import wav_with_silences
 
 from dictee import cuts
 from dictee.audio import AudioDecodeError
@@ -16,24 +13,6 @@ from dictee.cuts import MAX_CHUNK_S, Silence, chunk_bounds, detect_silences, pla
 pytestmark = pytest.mark.anyio
 
 RATE = 16000
-
-
-def wav_with_silences(directory: Path, seconds: float, silences: Sequence[tuple[float, float]]) -> Path:
-    """WAV canonique mono 16 kHz : un sinus d'amplitude 8000, remplacé par des zéros dans chaque intervalle."""
-    count = round(seconds * RATE)
-    # 400 Hz fait un nombre entier de périodes par seconde : les secondes se mettent bout à bout sans raccord.
-    one_second = struct.pack(f"<{RATE}h", *(round(8000 * math.sin(2 * math.pi * 400 * n / RATE)) for n in range(RATE)))
-    pcm = bytearray((one_second * math.ceil(seconds))[: count * 2])
-    for start, end in silences:
-        first, last = round(start * RATE), round(end * RATE)
-        pcm[first * 2 : last * 2] = bytes((last - first) * 2)
-    path = directory / "silences.wav"
-    with wave.open(str(path), "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(RATE)
-        wav.writeframes(pcm)
-    return path
 
 
 def random_silences(rng: random.Random, duration: float) -> list[Silence]:
@@ -88,6 +67,21 @@ def test_a_tie_goes_to_the_earlier_silence():
     # Les milieux, 28 et 32 s, sont à 2 s de la cible. L'audio dure 65 s et non 70 : après une coupe à 28 s, il en
     # resterait 42, plus que le maximum d'un morceau, et une seconde coupe s'ajouterait.
     assert plan_cuts(65.0, [Silence(27.9, 28.1), Silence(31.9, 32.1)]) == pytest.approx([28.0])
+
+
+def test_plan_cuts_respects_max_chunk():
+    rng = random.Random(11)
+    for _ in range(200):
+        duration = rng.uniform(1.0, 600.0)
+        silences = random_silences(rng, duration)
+        bounds = chunk_bounds(duration, plan_cuts(duration, silences, max_chunk_s=15.0))
+        assert all(end - start <= 15.0 for start, end in bounds)
+        assert all(end - start >= 7.5 for start, end in bounds[:-1])
+
+
+def test_a_smaller_maximum_aims_for_three_quarters_of_it():
+    assert plan_cuts(25.0, [Silence(10.9, 11.3), Silence(19.0, 19.2)], max_chunk_s=15.0) == pytest.approx([11.1])
+    assert plan_cuts(20.0, [], max_chunk_s=15.0) == pytest.approx([11.25])
 
 
 def test_each_chunk_looks_from_its_own_start():

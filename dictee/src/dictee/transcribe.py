@@ -31,8 +31,10 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from dictee.audio import AudioDecodeError, AudioTooLong, decode_wav16k
 from dictee.auth import require_caller
 from dictee.cleanup import clean
-from dictee.errors import NEMO_ERRORS, ApiError, nemo_failure, unexpected_error
+from dictee.engines.ports import ENGINE_ERRORS
+from dictee.errors import ApiError, engine_failure, unexpected_error
 from dictee.formats import delta_event, done_event, error_event, render, segment_event
+from dictee.glossary import correct_final
 from dictee.lifecycle import (
     CLIENT_CLOSED,
     Trace,
@@ -54,7 +56,9 @@ from dictee.types import Partial, Transcript, Word
 from dictee.upload import Upload, read_upload
 
 # Plafond de durée d'un envoi, tous modes confondus : 2 heures, la durée de l'enregistreur. Le WAV décodé vit sur le
-# disque, 230 Mio à ce plafond (32 000 octets par seconde), et seule une trame d'une seconde passe en mémoire.
+# disque, 230 Mio à ce plafond (32 000 octets par seconde), et n'en passe en mémoire qu'une part à la fois : une trame
+# d'une seconde avec le moteur `nemo` ; avec `crispasr`, un morceau de 15 s au plus, ou les blocs que httpx lit dans le
+# fichier pendant l'envoi d'une réunion.
 MAX_AUDIO_SECONDS = 7200.0
 GRANULARITIES = frozenset({"word", "segment"})
 
@@ -180,9 +184,13 @@ class _DeltaFeed:
     """Découpe en deltas le texte que NeMo rend : un par `Partial`, puis le reste de la phrase finale de l'item.
 
     Le texte de `done` joint les phrases finales par une espace : le premier delta de chaque item, sauf du premier
-    item non vide, la porte, quelles que soient les espaces que NeMo met en tête de ses morceaux. Quand la phrase
-    finale ne commence pas par ce qui est déjà parti pour son item, rien de plus ne part : le texte de `done` fait
-    foi, la suite reprend avec l'item suivant, et `mismatches` compte ces items.
+    item non vide, la porte, quelles que soient les espaces que NeMo met en tête de ses morceaux. La phrase finale
+    arrive sous deux formes, celle du moteur et celle que le glossaire corrige. Quand des deltas sont déjà partis pour
+    l'item, ils portent le texte du moteur : la fin de la phrase se calcule sur la forme du moteur, et seul le texte de
+    `done` porte la correction. Quand rien n'est encore parti (un moteur sans texte partiel), le delta de la phrase
+    porte la forme corrigée, et les deltas mis bout à bout égalent `done`. Quand la phrase finale ne commence pas par
+    ce qui est déjà parti pour son item, rien de plus ne part : le texte de `done` fait foi, la suite reprend avec
+    l'item suivant, et `mismatches` compte ces items.
     """
 
     def __init__(self, emit: Callable[[str], None]) -> None:
@@ -195,8 +203,9 @@ class _DeltaFeed:
         # Le premier morceau d'un item perd ses espaces de tête : seule celle qui sépare les items est posée.
         self._send(text if self._item else text.lstrip())
 
-    def final(self, text: str) -> None:
-        """Termine l'item avec le texte de sa phrase finale, sans espaces autour, vide ou non."""
+    def final(self, raw: str, corrected: str) -> None:
+        """Termine l'item avec sa phrase finale, telle que le moteur la rend et corrigée, sans espaces autour."""
+        text = raw if self._item else corrected
         if text.startswith(self._item):
             self._send(text[len(self._item) :])
         else:
@@ -248,7 +257,7 @@ class _Job:
             started = time.monotonic()
             try:
                 async with contextlib.aclosing(
-                    state.nemo.transcribe(
+                    state.engines.stt.transcribe(
                         self.wav,
                         language=params.nemo_language,
                         phrases=glossary_terms(self.profile.glossary),
@@ -262,12 +271,13 @@ class _Job:
                             if feed is not None:
                                 feed.partial(event.text)
                             continue
-                        words.extend(event.words)
-                        text = event.text.strip()
+                        corrected = correct_final(event, self.profile.glossary)
+                        words.extend(corrected.words)
+                        text = corrected.text.strip()
                         if text:
                             texts.append(text)
                         if feed is not None:
-                            feed.final(text)
+                            feed.final(event.text.strip(), text)
             finally:
                 self.trace.nemo_ms = elapsed_ms(started)
                 if feed is not None:
@@ -321,8 +331,8 @@ class _Job:
             if first is _END:
                 try:
                     recognition.result()
-                except NEMO_ERRORS as error:
-                    raise nemo_failure(error) from None
+                except ENGINE_ERRORS as error:
+                    raise engine_failure(error) from None
         except BaseException:
             cancel_once(recognition)
             raise
@@ -356,8 +366,8 @@ class _Job:
         except (asyncio.CancelledError, GeneratorExit):
             self.trace.status = CLIENT_CLOSED
             raise
-        except NEMO_ERRORS as error:
-            yield self._fail(nemo_failure(error))
+        except ENGINE_ERRORS as error:
+            yield self._fail(engine_failure(error))
         except Exception as error:
             yield self._fail(unexpected_error(error))
         finally:

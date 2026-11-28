@@ -18,15 +18,9 @@ from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
-from dictee import nemo as nemo_module
-from dictee.nemo import (
-    SPEAKER_KEY,
-    TTS_SAMPLE_RATE,
-    NemoClient,
-    NemoError,
-    NemoOverloaded,
-    NemoUnavailable,
-)
+from dictee.engines import nemo as nemo_module
+from dictee.engines.nemo import SPEAKER_KEY, NemoClient
+from dictee.engines.ports import EngineError, EngineOverloaded, EngineUnavailable
 from dictee.types import Cleared, Committed, Final, Partial, Word
 
 pytestmark = pytest.mark.anyio
@@ -347,26 +341,26 @@ async def test_the_client_closes_the_socket_when_the_session_ends(fake_ws, nemo,
 @pytest.mark.parametrize(
     ("code", "expected"),
     [
-        ("resource_exhausted", NemoOverloaded),
-        ("invalid_argument", NemoError),
-        ("unavailable", NemoError),
-        ("internal_error", NemoError),
+        ("resource_exhausted", EngineOverloaded),
+        ("invalid_argument", EngineError),
+        ("unavailable", EngineError),
+        ("internal_error", EngineError),
     ],
 )
 async def test_error_event_raises_the_exception_of_its_code(fake_ws, nemo, wav_1s, code, expected):
     fake_ws.error_code = code
-    with pytest.raises(expected, match=f"{code} sent by the fake NeMo" if expected is NemoError else None):
+    with pytest.raises(expected, match=f"{code} sent by the fake NeMo" if expected is EngineError else None):
         await transcribe(nemo, wav_1s)
     await asyncio.wait_for(fake_ws.closed.wait(), 1)
 
 
 async def test_error_event_after_the_audio_raises_too(fake_ws, nemo, wav_1s):
     fake_ws.after_commit = [error_event("resource_exhausted", "rate_limit_error")]
-    with pytest.raises(NemoOverloaded):
+    with pytest.raises(EngineOverloaded):
         await transcribe(nemo, wav_1s)
 
 
-@pytest.mark.parametrize(("status", "expected"), [(429, NemoOverloaded), (401, NemoError), (503, NemoError)])
+@pytest.mark.parametrize(("status", "expected"), [(429, EngineOverloaded), (401, EngineError), (503, EngineError)])
 async def test_refused_handshake_maps_the_http_status(fake_ws, nemo, wav_1s, status, expected):
     fake_ws.reject_status = status
     with pytest.raises(expected):
@@ -380,20 +374,20 @@ async def test_unreachable_server_raises_unavailable(wav_1s):
     # Le port est libéré : personne n'y écoute.
     async with httpx.AsyncClient() as http:
         nemo = NemoClient(f"http://127.0.0.1:{port}", "test-nemo-key", http)
-        with pytest.raises(NemoUnavailable):
+        with pytest.raises(EngineUnavailable):
             await transcribe(nemo, wav_1s)
 
 
 async def test_connection_dropped_by_nemo_raises_unavailable(fake_ws, nemo, wav_1s):
     fake_ws.drop_on_commit = True
-    with pytest.raises(NemoUnavailable):
+    with pytest.raises(EngineUnavailable):
         await transcribe(nemo, wav_1s)
 
 
 async def test_silence_from_nemo_raises_nemo_error(fake_ws, nemo, wav_1s, monkeypatch):
     monkeypatch.setattr(nemo_module, "EVENT_TIMEOUT", 0.2)
     fake_ws.after_commit = []
-    with pytest.raises(NemoError, match="no event"):
+    with pytest.raises(EngineError, match="no event"):
         await transcribe(nemo, wav_1s)
     await asyncio.wait_for(fake_ws.closed.wait(), 1)
 
@@ -405,7 +399,7 @@ async def test_with_speakers_the_wait_between_two_events_goes_up_to_the_speakers
     monkeypatch.setattr(nemo_module, "EVENT_TIMEOUT", 0.2)
     monkeypatch.setattr(nemo_module, "SPEAKERS_EVENT_TIMEOUT", 3.0)
     fake_ws.commit_delay = 0.6
-    with pytest.raises(NemoError, match="no event from NeMo for 0.2 seconds"):
+    with pytest.raises(EngineError, match="no event from NeMo for 0.2 seconds"):
         await transcribe(nemo, wav_1s)
     fake_ws.after_commit = SPEAKERS_AFTER_COMMIT
     items = await transcribe(nemo, wav_1s, speakers=True)
@@ -418,7 +412,7 @@ async def test_with_speakers_silence_from_nemo_still_ends_after_the_speakers_tim
     monkeypatch.setattr(nemo_module, "SPEAKERS_EVENT_TIMEOUT", 0.3)
     fake_ws.after_commit = []
     started = time.monotonic()
-    with pytest.raises(NemoError, match="no event from NeMo for 0.3 seconds"):
+    with pytest.raises(EngineError, match="no event from NeMo for 0.3 seconds"):
         await transcribe(nemo, wav_1s, speakers=True)
     assert time.monotonic() - started >= 0.3
     await asyncio.wait_for(fake_ws.closed.wait(), 1)
@@ -450,7 +444,7 @@ async def test_a_session_that_stops_taking_audio_and_stays_silent_fails_after_th
 
     monkeypatch.setattr(nemo_module, "_send_audio", stuck_upload)
     started = time.monotonic()
-    with pytest.raises(NemoError, match="no event from NeMo for 0.2 seconds"):
+    with pytest.raises(EngineError, match="no event from NeMo for 0.2 seconds"):
         await transcribe(nemo, wav_1s)
     assert 0.2 <= time.monotonic() - started < 1.0
     await asyncio.wait_for(fake_ws.closed.wait(), 1)
@@ -563,7 +557,7 @@ async def test_logs_never_carry_the_api_key_nor_the_session_content(fake_ws, nem
 
 
 def live_items(after_commit: list[dict]) -> list:
-    """Ce que `LiveSession.events` doit rendre des événements d'un commit : un `Partial` par delta non vide, le texte
+    """Ce que `NemoLiveSession.events` doit rendre des événements d'un commit : un `Partial` par delta non vide, le texte
     du `completed` en `Final`, puis `Committed`."""
     partials = [
         Partial(event["delta"]) for event in after_commit if event["type"].endswith(".delta") and event["delta"]
@@ -620,7 +614,7 @@ async def test_a_live_clear_is_sent_and_acknowledged(fake_ws, nemo):
 
 async def test_a_live_error_event_raises_the_exception_of_its_code(fake_ws, nemo):
     fake_ws.after_commit = [error_event("resource_exhausted", "rate_limit_error")]
-    with pytest.raises(NemoOverloaded):
+    with pytest.raises(EngineOverloaded):
         async with nemo.live(sample_rate=24000, language="fr-FR", phrases=[], boost=1.0) as session:
             await session.commit()
             async with aclosing(session.events()) as events:
@@ -630,7 +624,7 @@ async def test_a_live_error_event_raises_the_exception_of_its_code(fake_ws, nemo
 
 async def test_a_live_session_dropped_by_nemo_raises_unavailable(fake_ws, nemo):
     fake_ws.drop_on_commit = True
-    with pytest.raises(NemoUnavailable):
+    with pytest.raises(EngineUnavailable):
         async with nemo.live(sample_rate=24000, language="fr-FR", phrases=[], boost=1.0) as session:
             await session.commit()
             async with aclosing(session.events()) as events:
@@ -718,14 +712,14 @@ CALLS = {
 @pytest.mark.parametrize("call", CALLS.values(), ids=CALLS.keys())
 async def test_http_429_raises_overloaded(http_nemo, call):
     nemo = http_nemo(Recorder(httpx.Response(429, json=envelope("queue full", "rate_limit_error"))))
-    with pytest.raises(NemoOverloaded):
+    with pytest.raises(EngineOverloaded):
         await call(nemo)
 
 
 @pytest.mark.parametrize("call", CALLS.values(), ids=CALLS.keys())
 async def test_connect_error_raises_unavailable(http_nemo, call):
     nemo = http_nemo(Recorder(error=httpx.ConnectError("refused")))
-    with pytest.raises(NemoUnavailable):
+    with pytest.raises(EngineUnavailable):
         await call(nemo)
 
 
@@ -737,7 +731,7 @@ async def test_connect_error_raises_unavailable(http_nemo, call):
 @pytest.mark.parametrize("call", CALLS.values(), ids=CALLS.keys())
 async def test_timeout_or_lost_connection_raises_unavailable(http_nemo, call, error):
     nemo = http_nemo(Recorder(error=error))
-    with pytest.raises(NemoUnavailable):
+    with pytest.raises(EngineUnavailable):
         await call(nemo)
 
 
@@ -755,7 +749,7 @@ async def test_timeout_or_lost_connection_raises_unavailable(http_nemo, call, er
 @pytest.mark.parametrize("call", CALLS.values(), ids=CALLS.keys())
 async def test_other_error_status_raises_nemo_error(http_nemo, call, response, expected):
     nemo = http_nemo(Recorder(response))
-    with pytest.raises(NemoError, match=expected):
+    with pytest.raises(EngineError, match=expected):
         await call(nemo)
 
 
@@ -774,8 +768,8 @@ async def test_speak_asks_for_pcm(http_nemo):
     assert audio == b"\x01\x00" * 100
 
 
-def test_tts_sample_rate_is_the_measured_one():
-    assert TTS_SAMPLE_RATE == 22050
+async def test_tts_sample_rate_is_the_measured_one(nemo):
+    assert nemo.sample_rate == 22050
 
 
 async def test_voices_come_from_the_models_listing(http_nemo):
@@ -791,7 +785,7 @@ async def test_voices_without_a_speech_model_raises_nemo_error(http_nemo):
     listing = json.loads((FIXTURES / "models.json").read_text())
     listing["data"] = [model for model in listing["data"] if model["capability"] != "speech"]
     nemo = http_nemo(Recorder(httpx.Response(200, json=listing)))
-    with pytest.raises(NemoError, match="speech"):
+    with pytest.raises(EngineError, match="speech"):
         await nemo.voices()
 
 
@@ -881,7 +875,7 @@ async def test_a_silent_chunk_gives_an_empty_final(http_nemo):
     ids=["not json", "not an object", "no text", "null text", "word without times"],
 )
 async def test_a_chunk_answer_that_cannot_be_read_raises_nemo_error(http_nemo, answer):
-    with pytest.raises(NemoError, match="unreadable"):
+    with pytest.raises(EngineError, match="unreadable"):
         await http_nemo(Recorder(answer)).transcribe_chunk(WAV_1S, language="fr-FR", phrases=[], boost=1.0)
 
 

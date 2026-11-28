@@ -1,8 +1,8 @@
 """Dictée en direct : `/v1/realtime?intent=transcription`, au format du Realtime d'OpenAI en mode transcription.
 
-dictee relaie l'audio du client vers une session temps réel de NeMo et traduit les événements dans les deux sens
-(section 6.5 de la spec). La dictée en direct ne rend que le texte brut, sans reformulation ni personnes ; elle n'est
-pas enregistrée et ne passe pas par la file des tâches longues.
+dictee relaie l'audio du client vers une session du moteur de dictée en direct (`LIVE_ENGINE` : NeMo ou un processus
+CrispASR) et traduit les événements dans les deux sens (section 6.5 de la spec). La dictée en direct ne rend que le
+texte brut, sans reformulation ni personnes ; elle n'est pas enregistrée et ne passe pas par la file des tâches longues.
 
 Le journal ne reçoit qu'une ligne par connexion, sans texte, sans audio et sans glossaire. Les erreurs envoyées au
 client portent des messages fixes : celui d'une exception de NeMo n'est jamais repris, car il peut citer le glossaire.
@@ -25,10 +25,11 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from dictee.audio import SAMPLE_WIDTH
 from dictee.auth import resolve_caller
-from dictee.errors import NEMO_ERRORS, ApiError, nemo_failure, unexpected_error
+from dictee.engines.ports import ENGINE_ERRORS, LiveSession
+from dictee.errors import ApiError, engine_failure, unexpected_error
+from dictee.glossary import correct_final
 from dictee.modes import MODELS, UNDETERMINED_LANGUAGE, to_iso_language, to_nemo_language
-from dictee.nemo import LiveSession
-from dictee.profile import glossary_terms, glossary_too_large, load_profile, prompt_glossary
+from dictee.profile import GlossaryEntry, glossary_terms, glossary_too_large, load_profile, prompt_glossary
 from dictee.types import Cleared, Committed, Final, Partial
 
 logger = logging.getLogger("dictee")
@@ -39,13 +40,6 @@ DEFAULT_RATE = 24000
 MIN_RATE = 8000
 MAX_RATE = 96000
 DEFAULT_SILENCE_MS = 500  # silence qui ferme une prise de parole avec `server_vad`, quand le client n'en donne pas
-
-# Mesures de la tâche 1 sur NeMo 0.3.0. Une session NeMo accepte plusieurs commits et rend un `completed` puis un
-# `committed` pour chacun : une seule session sert toute la connexion. Avec `endpointing_ms` à 500, aucun `completed`
-# n'arrive avant le commit, même après 2 s de silence : NeMo ne ferme pas seul une prise de parole, et `server_vad`
-# est refusé.
-NEMO_MANY_COMMITS = True
-SERVER_VAD = False
 
 _MODEL = "dictee"  # le modèle du texte brut, que la session annonce quel que soit le modèle demandé
 _INPUT = "session.audio.input"
@@ -61,7 +55,7 @@ class _Config:
     rate: int = DEFAULT_RATE
     language: str | None = None  # code ISO-639-1 ; `None` quand NeMo détecte la langue
     keywords: tuple[str, ...] = ()
-    prompt_terms: tuple[str, ...] = ()  # termes du `prompt`, qui complètent le glossaire du compte
+    prompt_entries: tuple[GlossaryEntry, ...] = ()  # entrées du `prompt`, qui complètent le glossaire du compte
     silence_ms: int | None = None  # silence de `server_vad` ; `None` quand le client valide lui-même
 
 
@@ -148,21 +142,22 @@ def _read_transcription(transcription: dict, config: _Config) -> _Config:
             raise _invalid(param, "'prompt' must be a string.")
         if glossary_too_large(prompt):
             raise _invalid(param, "'prompt' is limited to 20000 characters and 500 lines.")
-        config = replace(config, prompt_terms=tuple(glossary_terms(prompt_glossary(prompt))))
+        config = replace(config, prompt_entries=tuple(prompt_glossary(prompt)))
     return config
 
 
-def _read_turn_detection(turn_detection: object) -> int | None:
+def _read_turn_detection(turn_detection: object, *, server_vad: bool) -> int | None:
     """Silence de `server_vad`, ou `None` quand le client valide chaque prise de parole par un commit.
 
-    `semantic_vad` est toujours refusé, et `server_vad` tant que NeMo ne ferme pas seul une prise de parole.
+    `semantic_vad` est toujours refusé, et `server_vad` tant que le moteur ne ferme pas seul une prise de parole
+    (`server_vad` faux).
     """
     if turn_detection is None:
         return None
     param = f"{_INPUT}.turn_detection"
     kind = turn_detection.get("type") if isinstance(turn_detection, dict) else None
-    if kind != "server_vad" or not SERVER_VAD:
-        accepted = "null or server_vad" if SERVER_VAD else "null, with a commit for each turn"
+    if kind != "server_vad" or not server_vad:
+        accepted = "null or server_vad" if server_vad else "null, with a commit for each turn"
         raise ApiError(
             400, f"Unsupported turn_detection: use {accepted}.", code="unsupported_turn_detection", param=param
         )
@@ -174,7 +169,7 @@ def _read_turn_detection(turn_detection: object) -> int | None:
     return silence
 
 
-def _read_session(session: object, current: _Config) -> _Config:
+def _read_session(session: object, current: _Config, *, server_vad: bool) -> _Config:
     """Réglages que donne un `session.update`, à partir de ceux en vigueur : un champ absent garde sa valeur.
 
     Lève une `ApiError` dont `param` désigne le champ refusé ; les réglages en vigueur ne changent alors pas.
@@ -190,7 +185,7 @@ def _read_session(session: object, current: _Config) -> _Config:
     if (transcription := _object(audio_input, "transcription", f"{_INPUT}.transcription")) is not None:
         config = _read_transcription(transcription, config)
     if "turn_detection" in audio_input:
-        config = replace(config, silence_ms=_read_turn_detection(audio_input["turn_detection"]))
+        config = replace(config, silence_ms=_read_turn_detection(audio_input["turn_detection"], server_vad=server_vad))
     return config
 
 
@@ -211,8 +206,8 @@ def _failure(error: Exception) -> _End:
     est journalisée."""
     if isinstance(error, WebSocketDisconnect):
         return _End("closed")
-    if isinstance(error, NEMO_ERRORS):
-        failure = nemo_failure(error)
+    if isinstance(error, ENGINE_ERRORS):
+        failure = engine_failure(error)
         return _End(failure.code, failure, 1011)
     failure = unexpected_error(error)
     return _End(failure.type, failure, 1011)
@@ -237,10 +232,10 @@ class _LiveConnection:
     def __init__(self, websocket: WebSocket) -> None:
         state = websocket.app.state
         self._ws = websocket
-        self._db, self._settings, self._nemo = state.db, state.settings, state.nemo
+        self._db, self._settings, self._engine = state.db, state.settings, state.engines.live
         self._id = f"sess_{secrets.token_hex(12)}"
         self._config = _Config()
-        self._terms: list[str] = []
+        self._glossary: list[GlossaryEntry] = []
         self._event_numbers = itertools.count(1)
         self._item_numbers = itertools.count(1)
         self._send_lock = asyncio.Lock()
@@ -311,7 +306,7 @@ class _LiveConnection:
         if model is not None and model not in MODELS and "transcribe" not in model:
             message = "This route serves transcription models only."
             return _End("unsupported_model", ApiError(400, message, code="unsupported_model", param="model"), 1008)
-        self._terms = glossary_terms(load_profile(self._db, self._settings, caller).glossary)
+        self._glossary = list(load_profile(self._db, self._settings, caller).glossary)
         await self._send("session.created", session=self._session())
         return None
 
@@ -402,7 +397,7 @@ class _LiveConnection:
         if self._sending is not None:
             message = "The session settings cannot change once its audio has started."
             raise ApiError(400, message, code="session_already_started", param="session")
-        self._config = _read_session(session, self._config)
+        self._config = _read_session(session, self._config, server_vad=self._engine.server_vad)
         await self._send("session.updated", session=self._session())
 
     async def _append(self, audio: object, event_id: str | None) -> _End | None:
@@ -441,11 +436,12 @@ class _LiveConnection:
         """
         config = self._config
         stack = contextlib.AsyncExitStack()
+        terms = [*glossary_terms(self._glossary), *glossary_terms(config.prompt_entries), *config.keywords]
         session = await stack.enter_async_context(
-            self._nemo.live(
+            self._engine.live(
                 sample_rate=config.rate,
                 language=to_nemo_language(config.language),
-                phrases=list(dict.fromkeys([*self._terms, *config.prompt_terms, *config.keywords])),
+                phrases=list(dict.fromkeys(terms)),
                 boost=self._settings.glossary_boost,
                 endpointing_ms=config.silence_ms,
             )
@@ -460,7 +456,7 @@ class _LiveConnection:
             message = "The audio buffer is empty: append audio before committing."
             raise ApiError(400, message, code="input_audio_buffer_commit_empty")
         self._current = None
-        if not NEMO_MANY_COMMITS:
+        if not self._engine.many_commits:
             self._sending = None  # la prise de parole suivante ouvre une autre session
         await self._announce(item)
         await session.commit()
@@ -483,14 +479,14 @@ class _LiveConnection:
     async def _read_nemo(self) -> NoReturn:
         """Relaie les événements des sessions NeMo, une session après l'autre, dans l'ordre de leur ouverture.
 
-        Quand une session n'accepte qu'un commit (`NEMO_MANY_COMMITS` faux), elle se ferme après son `Committed`.
+        Quand une session n'accepte qu'un commit (`many_commits` faux), elle se ferme après son `Committed`.
         """
         while True:
             session = await self._opened.get()
             async with contextlib.aclosing(session.events()) as events:
                 async for event in events:
                     await self._relay(event)
-                    if isinstance(event, Committed) and not NEMO_MANY_COMMITS:
+                    if isinstance(event, Committed) and not self._engine.many_commits:
                         break
             await self._stacks.pop(0).aclose()
 
@@ -504,6 +500,7 @@ class _LiveConnection:
         elif isinstance(event, Partial):
             await self._send(_DELTA, item_id=item.id, content_index=0, delta=event.text)
         elif isinstance(event, Final):
+            event = correct_final(event, [*self._glossary, *self._config.prompt_entries])
             item.texts.append(event.text)
             if not item.committed:
                 # NeMo a fermé seul la prise de parole après le silence de `server_vad` : il n'enverra pas de

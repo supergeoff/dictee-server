@@ -7,10 +7,17 @@ import json
 import wave
 from collections.abc import Callable, Sequence
 from dataclasses import replace
+from email.parser import BytesParser
+from email.policy import default
+from pathlib import Path
 
 import httpx
 
+from dictee.engines import Engines
 from dictee.types import Cleared, Committed, Final, Partial, Word
+
+# Fréquence de la synthèse du faux moteur, celle de NeMo : `speak` rend du PCM16 mono à cette fréquence.
+TTS_SAMPLE_RATE = 22050
 
 # Deux phrases finales de deux personnes, que la session temps réel de NeMo numérote « 0 » puis « 1 » : le texte
 # attendu est « Bonjour à tous. Salut. ».
@@ -100,8 +107,16 @@ class FakeLiveSession:
             yield await self._events.get()
 
 
+def engines_of(fake: "FakeNemo") -> Engines:
+    """Les trois rôles joués par le même faux moteur, comme le fait `build_engines` avec NeMo."""
+    return Engines(stt=fake, live=fake, tts=fake)
+
+
 class FakeNemo:
-    """Faux `NemoClient` : mêmes méthodes, rien d'autre.
+    """Faux `NemoClient` : mêmes méthodes et mêmes capacités, rien d'autre.
+
+    Les attributs de classe `speakers`, `server_vad`, `many_commits` et `sample_rate` sont les capacités que NeMo
+    déclare ; un test les change sur l'instance pour essayer un autre moteur.
 
     `finals` sont rendus par `transcribe` (avec des `Partial` mêlés aux `Final`, ils ne sortent que si l'appel passe
     `partials=True`), `pcm` par `speak`. Les mots de `finals` portent les personnes brutes de la session ; comme
@@ -138,6 +153,11 @@ class FakeNemo:
     la liste épuisée. `live_error`, s'il est donné, est levée par `events` de chaque session ; `error` ne touche pas
     la dictée en direct.
     """
+
+    speakers = True
+    server_vad = False
+    many_commits = True
+    sample_rate = TTS_SAMPLE_RATE
 
     def __init__(
         self,
@@ -306,3 +326,133 @@ class FakeLlm:
         self.calls.append(json.loads(request.content))
         body = {"choices": [{"index": 0, "message": {"role": "assistant", "content": self.reply}}]}
         return httpx.Response(200, json=body)
+
+
+CRISPASR_FIXTURES = Path(__file__).parent / "fixtures" / "crispasr"
+
+
+def _multipart_parts(request: httpx.Request) -> tuple[dict[str, str], bytes | None]:
+    """Les champs de formulaire d'un corps multipart, hors fichier, et le contenu du fichier envoyé (`None` sans)."""
+    message = BytesParser(policy=default).parsebytes(
+        b"Content-Type: " + request.headers["content-type"].encode() + b"\r\n\r\n" + request.content
+    )
+    fields, file = {}, None
+    for part in message.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        if name is not None and part.get_filename() is None:
+            fields[name] = part.get_content()
+        elif part.get_filename() is not None:
+            file = part.get_content()
+    return fields, file
+
+
+class FakeCrispasr:
+    """Faux serveur CrispASR : `/health`, `/progress` et `/v1/audio/transcriptions` servis d'après les fixtures.
+
+    `requests` garde chaque requête reçue : `method`, `path`, `headers` et, pour un multipart, `form` (les champs de
+    formulaire hors fichier) et `file` (le contenu du fichier envoyé). `health_statuses` et `transcription_statuses`
+    sont les codes que les appels successifs reçoivent ; le dernier se répète une fois la liste épuisée. Un code de
+    transcription autre que 200 répond un corps d'erreur qui cite `SECRET`, pour vérifier que l'adaptateur ne le
+    reprend pas. `fixture` est le fichier de `tests/fixtures/crispasr/` que la transcription rend. `http` est le
+    client HTTP à donner à l'adaptateur.
+    """
+
+    SECRET = "texte-secret-du-serveur"
+
+    def __init__(self, fixture: str = "chunk.json") -> None:
+        self.fixture = fixture
+        self.health_statuses = [200]
+        self.transcription_statuses = [200]
+        self.transcription_delay = 0.0  # secondes que la transcription met à répondre
+        self.progress_body: dict | None = None  # corps de `/progress` ; sans lui, celui de `progress.json`
+        self.requests: list[dict] = []
+        self.http = httpx.AsyncClient(transport=httpx.MockTransport(self._serve))
+
+    @staticmethod
+    def _next(statuses: list[int]) -> int:
+        return statuses.pop(0) if len(statuses) > 1 else statuses[0]
+
+    async def _serve(self, request: httpx.Request) -> httpx.Response:
+        response = self._handle(request)
+        if request.url.path == "/v1/audio/transcriptions" and self.transcription_delay:
+            await asyncio.sleep(self.transcription_delay)
+        return response
+
+    def _handle(self, request: httpx.Request) -> httpx.Response:
+        record = {"method": request.method, "path": request.url.path, "headers": dict(request.headers)}
+        if request.headers.get("content-type", "").startswith("multipart/"):
+            record["form"], record["file"] = _multipart_parts(request)
+        self.requests.append(record)
+        if request.url.path == "/health":
+            status = self._next(self.health_statuses)
+            body = {"status": "ok", "backend": "parakeet"} if status == 200 else {"status": "loading"}
+            return httpx.Response(status, json=body)
+        if request.url.path == "/progress":
+            if self.progress_body is not None:
+                return httpx.Response(200, json=self.progress_body)
+            return httpx.Response(200, content=(CRISPASR_FIXTURES / "progress.json").read_bytes())
+        if request.url.path == "/v1/audio/transcriptions":
+            status = self._next(self.transcription_statuses)
+            if status != 200:
+                return httpx.Response(status, json={"error": self.SECRET})
+            return httpx.Response(200, content=(CRISPASR_FIXTURES / self.fixture).read_bytes())
+        return httpx.Response(404)
+
+
+class FakeVoiceServer:
+    """Faux serveur de voix (phonon) : `/health`, `/v1/audio/voices` et `/v1/audio/speech`.
+
+    `requests` garde chaque requête reçue : `method`, `path`, `headers` et, pour la synthèse, `json` (le corps). La
+    synthèse rend `pcm` ; une voix absente de `voices` donne 400 comme le vrai serveur. `speech_statuses` sont les
+    codes que les synthèses successives reçoivent (le dernier se répète) : 429 répond le code d'erreur `server_busy`,
+    tout autre code d'erreur un corps qui cite `SECRET`, pour vérifier que l'adaptateur ne le reprend pas.
+    `speech_delay` est le temps, en secondes, que la synthèse met à répondre ; `max_active` le plus grand nombre de
+    synthèses en cours en même temps. `unreachable` fait échouer toute requête par une erreur de connexion. `http` est
+    le client HTTP à donner à l'adaptateur.
+    """
+
+    SECRET = "texte-secret-du-serveur"
+
+    def __init__(self, *, pcm: bytes = b"", voices: Sequence[str] = ("Lucien", "Arnaud")) -> None:
+        self.pcm = pcm
+        self.voices = list(voices)
+        self.aliases = {"nova": "Lucien"}
+        self.speech_statuses = [200]
+        self.speech_delay = 0.0
+        self.unreachable = False
+        self.max_active = 0
+        self.requests: list[dict] = []
+        self._active = 0
+        self.http = httpx.AsyncClient(transport=httpx.MockTransport(self._serve))
+
+    @property
+    def speech_requests(self) -> list[dict]:
+        return [request for request in self.requests if request["path"] == "/v1/audio/speech"]
+
+    async def _serve(self, request: httpx.Request) -> httpx.Response:
+        if self.unreachable:
+            raise httpx.ConnectError("connection refused", request=request)
+        record = {"method": request.method, "path": request.url.path, "headers": dict(request.headers)}
+        self.requests.append(record)
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.url.path == "/v1/audio/voices":
+            return httpx.Response(200, json={"voices": self.voices, "aliases": self.aliases})
+        if request.url.path == "/v1/audio/speech":
+            record["json"] = json.loads(request.content)
+            self._active += 1
+            self.max_active = max(self.max_active, self._active)
+            try:
+                if self.speech_delay:
+                    await asyncio.sleep(self.speech_delay)
+            finally:
+                self._active -= 1
+            status = self.speech_statuses.pop(0) if len(self.speech_statuses) > 1 else self.speech_statuses[0]
+            if status == 429:
+                return httpx.Response(429, json={"error": {"code": "server_busy", "message": self.SECRET}})
+            if status != 200:
+                return httpx.Response(status, json={"error": {"message": self.SECRET}})
+            if record["json"]["voice"] not in self.voices:
+                return httpx.Response(400, json={"error": {"message": self.SECRET}})
+            return httpx.Response(200, content=self.pcm)
+        return httpx.Response(404)

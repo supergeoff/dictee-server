@@ -5,8 +5,8 @@ une reprise ne renvoie que ceux qui manquent. Une réunion passe par la session 
 se reprend pas à mi-chemin : une session perdue recommence au début du fichier.
 
 Un morceau ou une session que NeMo ne traite pas (indisponible ou saturé) est renvoyé, après le retour de NeMo, trois
-fois au plus. Rien n'est journalisé ici : le message d'une `NemoError` recopie celui de NeMo, qui peut citer la requête,
-donc le glossaire : le lanceur de tâches qui reçoit l'exception n'en journalise que le nom de la classe.
+fois au plus. Rien n'est journalisé ici : le message d'une `EngineError` recopie celui de NeMo, qui peut citer la
+requête, donc le glossaire : le lanceur de tâches qui reçoit l'exception n'en journalise que le nom de la classe.
 """
 
 import asyncio
@@ -21,9 +21,11 @@ import httpx
 from dictee.audio import read_wav_slice
 from dictee.cleanup import clean
 from dictee.cuts import MAX_CHUNK_S, chunk_bounds, detect_silences, plan_cuts
+from dictee.engines import Engines
+from dictee.engines.ports import EngineOverloaded, EngineUnavailable, FileTranscriber
+from dictee.glossary import correct_final
 from dictee.lifecycle import elapsed_ms
 from dictee.modes import Mode, to_iso_language
-from dictee.nemo import NemoClient, NemoOverloaded, NemoUnavailable
 from dictee.profile import Profile, glossary_terms
 from dictee.settings import Settings
 from dictee.speakers import build_segments, label_speakers
@@ -45,10 +47,10 @@ PROGRESS_EVERY_S = 5.0
 
 @dataclass(frozen=True)
 class Services:
-    """Ce que le traitement d'une tâche utilise : le registre, NeMo, les réglages et le client HTTP de `clean`."""
+    """Ce que le traitement d'une tâche utilise : registre, moteurs, réglages et client HTTP de `clean`."""
 
     store: TaskStore
-    nemo: NemoClient
+    engines: Engines
     settings: Settings
     http: httpx.AsyncClient
 
@@ -78,37 +80,37 @@ def task_audio(settings: Settings, task_id: str) -> Path:
     return task_dir(settings, task_id) / "audio.wav"
 
 
-async def wait_ready(nemo: NemoClient) -> None:
+async def wait_ready(stt: FileTranscriber) -> None:
     """Attend que NeMo réponde prêt, en l'interrogeant toutes les `READY_POLL_S` secondes.
 
     Chaque réponse négative est suivie d'une pause de `READY_POLL_S` secondes, qui rend la main à la boucle même
-    quand elle est nulle. Lève `NemoUnavailable` quand NeMo n'est toujours pas prêt `READY_WAIT_S` secondes après le
+    quand elle est nulle. Lève `EngineUnavailable` quand NeMo n'est toujours pas prêt `READY_WAIT_S` secondes après le
     premier appel.
     """
     deadline = time.monotonic() + READY_WAIT_S
-    while not await nemo.ready():
+    while not await stt.ready():
         if time.monotonic() >= deadline:
-            raise NemoUnavailable(f"NeMo did not become ready within {READY_WAIT_S:g} seconds")
+            raise EngineUnavailable(f"NeMo did not become ready within {READY_WAIT_S:g} seconds")
         await asyncio.sleep(READY_POLL_S)
 
 
-async def _with_retries[T](nemo: NemoClient, stats: RunStats, attempt: Callable[[], Awaitable[T]]) -> T:
+async def _with_retries[T](stt: FileTranscriber, stats: RunStats, attempt: Callable[[], Awaitable[T]]) -> T:
     """Rend le résultat de `attempt`, que NeMo indisponible ou saturé fait relancer après son retour.
 
     Chaque reprise attend `wait_ready`, puis la pause `RETRY_DELAYS_S` de son rang, et s'ajoute à `stats.retries`.
-    Une `NemoError` remonte tout de suite : renvoyer la même requête n'y changerait rien. Après `MAX_RETRIES`
-    reprises, la dernière panne remonte. Une `NemoUnavailable` de `wait_ready` remonte aussi tout de suite : NeMo
+    Une `EngineError` remonte tout de suite : renvoyer la même requête n'y changerait rien. Après `MAX_RETRIES`
+    reprises, la dernière panne remonte. Une `EngineUnavailable` de `wait_ready` remonte aussi tout de suite : NeMo
     est resté absent, et ce n'est pas une reprise de plus.
     """
     retry = 0
     while True:
         try:
             return await attempt()
-        except (NemoUnavailable, NemoOverloaded):
+        except (EngineUnavailable, EngineOverloaded):
             if retry == MAX_RETRIES:
                 raise
         # Hors du `except` : la panne de `wait_ready` ne repart pas dans une reprise.
-        await wait_ready(nemo)
+        await wait_ready(stt)
         await asyncio.sleep(RETRY_DELAYS_S[retry])
         retry += 1
         stats.retries += 1
@@ -134,13 +136,13 @@ async def _transcribe_chunk(
     async def attempt() -> Final:
         started = time.monotonic()
         try:
-            return await services.nemo.transcribe_chunk(
+            return await services.engines.stt.transcribe_chunk(
                 wav, language=params.language, phrases=glossary_terms(params.glossary), boost=params.boost
             )
         finally:
             stats.nemo_ms += elapsed_ms(started)
 
-    final = await _with_retries(services.nemo, stats, attempt)
+    final = correct_final(await _with_retries(services.engines.stt, stats, attempt), params.glossary)
     words = tuple(replace(word, start=word.start + start, end=word.end + start) for word in final.words)
     return ChunkRecord(index, start, end, final.text.strip(), words)
 
@@ -200,7 +202,7 @@ async def _transcribe_meeting(
         started = time.monotonic()
         try:
             async with contextlib.aclosing(
-                services.nemo.transcribe(
+                services.engines.stt.transcribe(
                     wav,
                     language=params.language,
                     phrases=glossary_terms(params.glossary),
@@ -211,6 +213,7 @@ async def _transcribe_meeting(
             ) as events:
                 async for event in events:
                     if isinstance(event, Final):
+                        event = correct_final(event, params.glossary)
                         words.extend(event.words)
                         if text := event.text.strip():
                             texts.append(text)
@@ -218,7 +221,7 @@ async def _transcribe_meeting(
             stats.nemo_ms += elapsed_ms(started)
         return texts, words
 
-    texts, words = await _with_retries(services.nemo, stats, attempt)
+    texts, words = await _with_retries(services.engines.stt, stats, attempt)
     labelled = tuple(label_speakers(words))
     return " ".join(texts), labelled, tuple(build_segments(labelled))
 
@@ -229,7 +232,7 @@ async def process(services: Services, task: TaskRecord, stats: RunStats) -> Task
     Une réunion (`Mode.DIARIZE`) passe par une session avec les personnes. Tout autre mode passe par les morceaux du
     fichier, et `Mode.CLEAN` fait ensuite reformuler le texte entier avec le glossaire et les consignes de la tâche :
     `cleaned` et `decision` viennent de `clean`, qui ne lève jamais d'exception à cause du LLM. Une exception de NeMo
-    qui remonte ici (`NemoUnavailable` ou `NemoOverloaded` après les reprises, `NemoError`) laisse en base les
+    qui remonte ici (`EngineUnavailable` ou `EngineOverloaded` après les reprises, `EngineError`) laisse en base les
     morceaux déjà faits.
     """
     params = task.params

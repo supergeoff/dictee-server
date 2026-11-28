@@ -5,6 +5,7 @@ from pathlib import Path
 import anyio
 import httpx
 from conftest import audio_task
+from fakes import engines_of
 from starlette.routing import WebSocketRoute
 from starlette.testclient import TestClient
 
@@ -120,7 +121,7 @@ def test_api_error_is_rendered_in_the_openai_envelope(settings):
 def test_app_keeps_settings_and_creates_its_own_http_client(settings):
     app = create_app(settings)
     assert app.state.settings is settings
-    assert app.state.nemo is None
+    assert app.state.engines is None
     with TestClient(app):
         http = app.state.http
         assert isinstance(http, httpx.AsyncClient)
@@ -135,20 +136,20 @@ def test_models_route_lists_the_models_of_the_modes_module(client, service_heade
 
 def test_app_builds_the_nemo_client_at_startup_over_its_own_http_client(settings, monkeypatch):
     built = []
-    monkeypatch.setattr("dictee.app.NemoClient", lambda *args: built.append(args) or "nemo client")
+    monkeypatch.setattr("dictee.app.build_engines", lambda *args: built.append(args) or "engines")
     app = create_app(settings)
-    assert app.state.nemo is None
+    assert app.state.engines is None
     with TestClient(app):
-        assert app.state.nemo == "nemo client"
-        assert built == [(settings.nemo_url, settings.nemo_api_key, app.state.http)]
+        assert app.state.engines == "engines"
+        assert built == [(settings, app.state.http)]
 
 
 def test_app_builds_the_nemo_client_over_an_injected_http_client(settings, monkeypatch):
     built = []
-    monkeypatch.setattr("dictee.app.NemoClient", lambda *args: built.append(args) or "nemo client")
+    monkeypatch.setattr("dictee.app.build_engines", lambda *args: built.append(args) or "engines")
     http = httpx.AsyncClient()
     with TestClient(create_app(settings, http=http)):
-        assert built == [(settings.nemo_url, settings.nemo_api_key, http)]
+        assert built == [(settings, http)]
     anyio.run(http.aclose)
 
 
@@ -168,7 +169,7 @@ def test_app_starts_its_task_runner_and_creates_the_task_folder(settings):
 
 def test_app_resumes_an_unfinished_task_at_startup_with_its_own_clients(settings, services, fake_nemo, fake_llm):
     task = audio_task(services, 3.0, mode=Mode.CLEAN)
-    app = create_app(settings, nemo=fake_nemo, http=fake_llm.http)
+    app = create_app(settings, engines=engines_of(fake_nemo), http=fake_llm.http)
     with TestClient(app):
         deadline = time.monotonic() + 5.0
         while app.state.store.get(task.id).status is not TaskStatus.COMPLETED and time.monotonic() < deadline:
@@ -183,7 +184,7 @@ def test_app_stops_its_task_runner_at_shutdown_and_leaves_the_task_to_resume(set
     task = audio_task(services, 3.0)
     held = anyio.Event()
     fake_nemo.release = held
-    app = create_app(settings, nemo=fake_nemo, http=fake_llm.http)
+    app = create_app(settings, engines=engines_of(fake_nemo), http=fake_llm.http)
     with TestClient(app):
         deadline = time.monotonic() + 5.0
         while not fake_nemo.chunk_calls and time.monotonic() < deadline:
@@ -224,11 +225,11 @@ def test_app_opens_the_database_at_the_configured_path(settings):
 
 
 def test_injected_clients_are_used_and_left_open(settings):
-    nemo = object()
+    engines = object()
     http = httpx.AsyncClient()
-    app = create_app(settings, nemo=nemo, http=http)
+    app = create_app(settings, engines=engines, http=http)
     with TestClient(app):
-        assert app.state.nemo is nemo
+        assert app.state.engines is engines
         assert app.state.http is http
     assert not http.is_closed
     anyio.run(http.aclose)

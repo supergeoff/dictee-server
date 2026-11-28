@@ -17,10 +17,8 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 
 from dictee.audio import SAMPLE_WIDTH, TRANSCRIPTION_RATE, pcm_frames
+from dictee.engines.ports import EngineError, EngineOverloaded, EngineUnavailable
 from dictee.types import Cleared, Committed, Final, Partial, Word
-
-# Fréquence native de la synthèse de NeMo (mesurée en tâche 1) : `speak` rend du PCM16 mono à cette fréquence.
-TTS_SAMPLE_RATE = 22050
 
 # Une trame binaire du temps réel pèse une seconde de PCM16 mono à 16 kHz.
 FRAME_BYTES = TRANSCRIPTION_RATE * SAMPLE_WIDTH
@@ -61,26 +59,14 @@ _WEBSOCKETS_LOGGER = logging.getLogger("dictee.nemo.websockets")
 _WEBSOCKETS_LOGGER.setLevel(logging.INFO)
 
 
-class NemoUnavailable(Exception):
-    """NeMo ne répond pas : connexion refusée ou coupée, délai dépassé."""
-
-
-class NemoOverloaded(Exception):
-    """La file de requêtes de NeMo est pleine (HTTP 429 ou événement `resource_exhausted`)."""
-
-
-class NemoError(Exception):
-    """NeMo a refusé la requête, signalé une erreur ou cessé d'émettre pendant une session."""
-
-
 def _event_error(event: dict) -> Exception:
     """Exception d'un événement `error` : `resource_exhausted` est une surcharge, tout autre code une erreur."""
     error = event.get("error") or {}
     code = error.get("code")
     message = error.get("message") or "no error message"
     if code == "resource_exhausted":
-        return NemoOverloaded(message)
-    return NemoError(f"{code}: {message}")
+        return EngineOverloaded(message)
+    return EngineError(f"{code}: {message}")
 
 
 async def _receive(ws: ClientConnection, sender: asyncio.Task) -> str | bytes:
@@ -141,7 +127,7 @@ async def _next_event(
                 activity.watch(limit, timeout)
             raw = await (ws.recv() if sender is None else _receive(ws, sender))
     except TimeoutError:
-        raise NemoError(f"no event from NeMo for {timeout:g} seconds") from None
+        raise EngineError(f"no event from NeMo for {timeout:g} seconds") from None
     finally:
         if activity is not None:
             activity.watch(None, 0.0)
@@ -159,7 +145,7 @@ def _decode(raw: str | bytes) -> dict:
 async def _expect(ws: ClientConnection, kind: str) -> None:
     event = await _next_event(ws)
     if event.get("type") != kind:
-        raise NemoError(f"expected the event {kind}, NeMo sent {event.get('type')}")
+        raise EngineError(f"expected the event {kind}, NeMo sent {event.get('type')}")
 
 
 async def _send_audio(ws: ClientConnection, wav: Path, on_progress: Callable[[float], None] | None) -> None:
@@ -194,7 +180,7 @@ def _final(event: dict) -> Final:
     return Final(text=event["transcript"], words=tuple(_word(word) for word in event.get("words") or ()))
 
 
-class LiveSession:
+class NemoLiveSession:
     """Session temps réel de NeMo ouverte par `NemoClient.live` pour la dictée en direct.
 
     `send_audio` envoie le PCM16 tel quel en une trame binaire, à la fréquence déclarée à l'ouverture ; `commit`
@@ -204,7 +190,7 @@ class LiveSession:
 
     L'attente des événements n'a pas de délai : pendant une dictée, NeMo se tait tant que le client n'envoie rien, et
     c'est la connexion du client qui borne la session. Lève les mêmes exceptions que `NemoClient.transcribe` :
-    `NemoUnavailable` quand NeMo coupe la connexion, `NemoOverloaded` et `NemoError` pour ses événements `error`.
+    `EngineUnavailable` quand NeMo coupe la connexion, `EngineOverloaded` et `EngineError` pour ses événements `error`.
     """
 
     def __init__(self, ws: ClientConnection) -> None:
@@ -214,7 +200,7 @@ class LiveSession:
         try:
             await self._ws.send(message)
         except ConnectionClosed as exc:
-            raise NemoUnavailable(f"NeMo closed the realtime connection: {exc}") from exc
+            raise EngineUnavailable(f"NeMo closed the realtime connection: {exc}") from exc
 
     async def send_audio(self, pcm: bytes) -> None:
         await self._send(pcm)
@@ -230,7 +216,7 @@ class LiveSession:
             try:
                 event = _decode(await self._ws.recv())
             except ConnectionClosed as exc:
-                raise NemoUnavailable(f"NeMo closed the realtime connection: {exc}") from exc
+                raise EngineUnavailable(f"NeMo closed the realtime connection: {exc}") from exc
             kind = event.get("type")
             if kind == _DELTA:
                 if text := event.get("delta"):
@@ -238,7 +224,7 @@ class LiveSession:
             elif kind == _COMPLETED:
                 transcript = event.get("transcript")
                 if not isinstance(transcript, str):
-                    raise NemoError("NeMo sent a final event without its transcript")
+                    raise EngineError("NeMo sent a final event without its transcript")
                 yield Final(transcript, ())
             elif kind == _COMMITTED:
                 yield Committed()
@@ -254,7 +240,18 @@ def _error_message(response: httpx.Response) -> str:
 
 
 class NemoClient:
-    """Les appels de dictee à NeMo ; `http` est le client HTTP partagé de l'app."""
+    """Les appels de dictee à NeMo ; `http` est le client HTTP partagé de l'app.
+
+    Il joue les trois rôles du moteur audio (`FileTranscriber`, `LiveTranscriber` et `Synthesizer`) et déclare ses
+    capacités : NeMo marque les personnes (`speakers`), sa dictée en direct n'a pas de détection de tour de parole
+    (`server_vad`) mais accepte plusieurs commits par session (`many_commits`), et sa synthèse rend du PCM16 mono à
+    `sample_rate` Hz (fréquence mesurée en tâche 1).
+    """
+
+    speakers = True
+    server_vad = False
+    many_commits = True
+    sample_rate = 22050
 
     def __init__(self, base_url: str, api_key: str, http: httpx.AsyncClient) -> None:
         self._base_url = base_url.rstrip("/")
@@ -281,10 +278,10 @@ class NemoClient:
         except InvalidStatus as exc:
             status = exc.response.status_code
             if status == 429:
-                raise NemoOverloaded("NeMo refused the realtime connection: its request queue is full") from exc
-            raise NemoError(f"NeMo refused the realtime connection with HTTP {status}") from exc
+                raise EngineOverloaded("NeMo refused the realtime connection: its request queue is full") from exc
+            raise EngineError(f"NeMo refused the realtime connection with HTTP {status}") from exc
         except (OSError, TimeoutError, InvalidHandshake) as exc:
-            raise NemoUnavailable(f"cannot open the realtime connection to NeMo: {exc!r}") from exc
+            raise EngineUnavailable(f"cannot open the realtime connection to NeMo: {exc!r}") from exc
 
     async def transcribe(
         self,
@@ -316,8 +313,8 @@ class NemoClient:
         événement est annulée. Un consommateur qui s'arrête avant la fin ferme le générateur
         (`contextlib.aclosing`) : c'est à ce moment que la session se ferme.
 
-        Lève `NemoUnavailable` si NeMo est injoignable ou coupe la connexion, `NemoOverloaded` si sa file est pleine
-        et `NemoError` pour toute autre erreur, y compris plus de `EVENT_TIMEOUT` secondes sans événement
+        Lève `EngineUnavailable` si NeMo est injoignable ou coupe la connexion, `EngineOverloaded` si sa file est pleine
+        et `EngineError` pour toute autre erreur, y compris plus de `EVENT_TIMEOUT` secondes sans événement
         ni trame d'audio acceptée (`SPEAKERS_EVENT_TIMEOUT` avec les personnes).
         """
         session: dict[str, object] = {"sample_rate": TRANSCRIPTION_RATE, "language": language, "word_timestamps": True}
@@ -352,7 +349,7 @@ class NemoClient:
                 elif kind == _COMMITTED:
                     return
         except ConnectionClosed as exc:
-            raise NemoUnavailable(f"NeMo closed the realtime connection: {exc}") from exc
+            raise EngineUnavailable(f"NeMo closed the realtime connection: {exc}") from exc
         finally:
             if sender is not None:
                 sender.cancel()
@@ -368,7 +365,7 @@ class NemoClient:
         phrases: Sequence[str],
         boost: float,
         endpointing_ms: int | None = None,
-    ) -> AsyncIterator[LiveSession]:
+    ) -> AsyncIterator[NemoLiveSession]:
         """Ouvre une session temps réel pour la dictée en direct et la ferme à la sortie du bloc `async with`.
 
         La session reçoit `sample_rate`, la fréquence de l'audio que le client envoie (NeMo accepte de 8000 à
@@ -376,7 +373,7 @@ class NemoClient:
         ferme alors seul une phrase après ce silence. Ni `word_timestamps` ni `prompt` ne partent. NeMo refuse un
         `session.update` une fois l'audio commencé : les réglages se fixent ici, une fois pour toutes.
 
-        L'ouverture lève les erreurs de `transcribe` ; la session, celles que décrit `LiveSession`.
+        L'ouverture lève les erreurs de `transcribe` ; la session, celles que décrit `NemoLiveSession`.
         """
         session: dict[str, object] = {"sample_rate": sample_rate, "language": language}
         if phrases:
@@ -388,14 +385,14 @@ class NemoClient:
             await _expect(ws, "session.created")
             await ws.send(json.dumps({"type": "session.update", "session": session}))
             await _expect(ws, "session.updated")
-            yield LiveSession(ws)
+            yield NemoLiveSession(ws)
         except ConnectionClosed as exc:
-            raise NemoUnavailable(f"NeMo closed the realtime connection: {exc}") from exc
+            raise EngineUnavailable(f"NeMo closed the realtime connection: {exc}") from exc
         finally:
             await ws.close()
 
     async def _request(self, method: str, path: str, *, timeout: float, **kwargs) -> httpx.Response:
-        """Appel d'une route HTTP de NeMo : 429 donne `NemoOverloaded`, un échec de transport `NemoUnavailable`."""
+        """Appel d'une route HTTP de NeMo : 429 donne `EngineOverloaded`, un échec de transport `EngineUnavailable`."""
         try:
             response = await self._http.request(
                 method,
@@ -405,15 +402,15 @@ class NemoClient:
                 **kwargs,
             )
         except httpx.TransportError as exc:
-            raise NemoUnavailable(f"NeMo is unreachable: {exc!r}") from exc
+            raise EngineUnavailable(f"NeMo is unreachable: {exc!r}") from exc
         if response.status_code == 429:
-            raise NemoOverloaded("NeMo's request queue is full")
+            raise EngineOverloaded("NeMo's request queue is full")
         if response.is_error:
-            raise NemoError(f"NeMo answered HTTP {response.status_code}: {_error_message(response)}")
+            raise EngineError(f"NeMo answered HTTP {response.status_code}: {_error_message(response)}")
         return response
 
     async def speak(self, text: str, *, voice: str, language: str) -> bytes:
-        """Synthèse vocale : du PCM16 mono à `TTS_SAMPLE_RATE`, sans en-tête."""
+        """Synthèse vocale : du PCM16 mono à `sample_rate`, sans en-tête."""
         response = await self._request(
             "POST",
             "/v1/audio/speech",
@@ -428,7 +425,7 @@ class NemoClient:
         for model in response.json()["data"]:
             if model.get("capability") == "speech":
                 return list(model["voices"])
-        raise NemoError("NeMo lists no speech model")
+        raise EngineError("NeMo lists no speech model")
 
     async def transcribe_chunk(self, wav: bytes, *, language: str, phrases: Sequence[str], boost: float) -> Final:
         """Transcrit un morceau de WAV par la route REST `POST /v1/audio/transcriptions` ; rend son `Final`.
@@ -438,8 +435,8 @@ class NemoClient:
         morceau muet donne un `Final` au texte vide. Comme pour la session temps réel, le champ `prompt` de NeMo n'est
         jamais transmis, et `speech_contexts` ne part que s'il y a des termes.
 
-        Lève les erreurs de `_request` (`NemoUnavailable`, `NemoOverloaded`, `NemoError`), et `NemoError` pour une
-        réponse 200 qui n'est pas une transcription lisible. L'attente de la réponse va jusqu'à `CHUNK_TIMEOUT`
+        Lève les erreurs de `_request` (`EngineUnavailable`, `EngineOverloaded`, `EngineError`), et `EngineError` pour
+        une réponse 200 qui n'est pas une transcription lisible. L'attente de la réponse va jusqu'à `CHUNK_TIMEOUT`
         secondes, file de NeMo comprise.
         """
         data = {"language": language, "response_format": "verbose_json", "timestamp_granularities[]": "word"}
@@ -459,7 +456,7 @@ class NemoClient:
                 words=tuple(_word(word) for word in body.get("words") or ()),
             )
         except (ValueError, KeyError, TypeError, AttributeError):
-            raise NemoError("NeMo answered with an unreadable transcription") from None
+            raise EngineError("NeMo answered with an unreadable transcription") from None
 
     async def ready(self) -> bool:
         """Vrai seulement si `GET /ready` répond 200 avec `ready` à `true` ; toute autre réponse ou panne rend faux.
@@ -469,6 +466,6 @@ class NemoClient:
         try:
             response = await self._request("GET", "/ready", timeout=READY_TIMEOUT)
             body = response.json()
-        except (NemoUnavailable, NemoOverloaded, NemoError, ValueError):
+        except (EngineUnavailable, EngineOverloaded, EngineError, ValueError):
             return False
         return response.status_code == 200 and isinstance(body, dict) and body.get("ready") is True

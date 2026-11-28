@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from dictee.nemo import SPEAKER_KEY
+from dictee.engines.nemo import SPEAKER_KEY
 from dictee.speakers import build_segments, label_speakers
 from dictee.types import Segment, Word
 

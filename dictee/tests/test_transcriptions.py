@@ -18,15 +18,17 @@ from pathlib import Path
 import anyio
 import httpx
 import pytest
-from conftest import make_audio, personal_headers, wait_until, write_wav
-from fakes import FINALS, FakeNemo
+from conftest import make_audio, personal_headers, wait_until, wav_with_silences, write_wav
+from fakes import CRISPASR_FIXTURES, FINALS, FakeCrispasr, FakeNemo, engines_of
 from starlette.testclient import TestClient
 
 from dictee import audio as audio_module
 from dictee import transcribe
 from dictee.app import create_app
+from dictee.engines import Engines
+from dictee.engines.crispasr import CrispasrTranscriber
+from dictee.engines.ports import EngineError, EngineOverloaded, EngineUnavailable
 from dictee.errors import ApiError
-from dictee.nemo import NemoError, NemoOverloaded, NemoUnavailable
 from dictee.taskstore import TERMINAL_STATUSES, TaskStatus
 from dictee.types import Final, Partial, Word
 
@@ -80,7 +82,7 @@ async def chunked(body: bytes):
 
 
 def app_with(settings, nemo, llm, **changes):
-    return create_app(dataclasses.replace(settings, **changes), nemo=nemo, http=llm.http)
+    return create_app(dataclasses.replace(settings, **changes), engines=engines_of(nemo), http=llm.http)
 
 
 def asgi_client(app) -> httpx.AsyncClient:
@@ -455,6 +457,21 @@ def deltas(events: list[dict]) -> list[str]:
     return [event["delta"] for event in events if event["type"] == "transcript.text.delta"]
 
 
+def test_stream_emits_one_delta_per_chunk_on_crispasr(settings, service_headers, fake_nemo, fake_llm, tmp_path):
+    # 40 s coupées aux silences de 12 s et de 26 s : trois morceaux de 15 s au plus, donc trois deltas.
+    wav = wav_with_silences(tmp_path, 40.0, [(11.8, 12.2), (25.8, 26.2)])
+    fake = FakeCrispasr()
+    crispasr = CrispasrTranscriber("http://crispasr.test", "k", fake.http)
+    app = create_app(settings, engines=Engines(stt=crispasr, live=fake_nemo, tts=fake_nemo), http=fake_llm.http)
+    text = json.loads((CRISPASR_FIXTURES / "chunk.json").read_text())["text"].strip()
+    with TestClient(app, base_url="https://testserver") as client:
+        response = post(client, service_headers, wav.read_bytes(), stream="true")
+    events = sse_events(response)
+    assert deltas(events) == [text, " " + text, " " + text]
+    assert events[-1] == {"type": "transcript.text.done", "text": " ".join([text] * 3)}
+    assert [r["path"] for r in fake.requests].count("/v1/audio/transcriptions") == 3
+
+
 def test_stream_sends_a_delta_per_partial_then_the_rest_of_the_final(ask, fake_nemo):
     fake_nemo.finals = PARTIAL_FINALS
     events = sse_events(ask(stream="true"))
@@ -547,7 +564,11 @@ def test_the_text_without_stream_ignores_the_partials(ask, fake_nemo):
 
 @pytest.mark.parametrize(
     "error,status",
-    [(NemoOverloaded("the queue is full"), 429), (NemoUnavailable("connection refused"), 502), (NemoError("x"), 502)],
+    [
+        (EngineOverloaded("the queue is full"), 429),
+        (EngineUnavailable("connection refused"), 502),
+        (EngineError("x"), 502),
+    ],
 )
 def test_nemo_failure_before_the_first_partial_is_a_429_or_502(ask, fake_nemo, error, status):
     # La lecture anticipée s'arrête au premier `Partial` : sans lui, rien n'est parti et le statut dit la panne.
@@ -561,7 +582,7 @@ def test_nemo_failure_before_the_first_partial_is_a_429_or_502(ask, fake_nemo, e
 def test_nemo_failure_after_the_first_partial_is_an_error_event(ask, fake_nemo):
     # Le premier `Partial` a ouvert la réponse, bien avant la première phrase finale : la panne se dit dans le flux.
     fake_nemo.finals = PARTIAL_FINALS
-    fake_nemo.error = NemoOverloaded("the queue is full")
+    fake_nemo.error = EngineOverloaded("the queue is full")
     fake_nemo.after = 1
     r = ask(stream="true")
     assert r.status_code == 200
@@ -598,9 +619,9 @@ async def test_stream_opens_with_the_first_partial_not_the_first_final(settings,
 @pytest.mark.parametrize(
     "error,status,error_type,code",
     [
-        (NemoOverloaded("the queue is full"), 429, "rate_limit_error", "overloaded"),
-        (NemoUnavailable("connection refused"), 502, "server_error", "upstream_error"),
-        (NemoError("session failed"), 502, "server_error", "upstream_error"),
+        (EngineOverloaded("the queue is full"), 429, "rate_limit_error", "overloaded"),
+        (EngineUnavailable("connection refused"), 502, "server_error", "upstream_error"),
+        (EngineError("session failed"), 502, "server_error", "upstream_error"),
     ],
 )
 def test_nemo_failure_when_a_stream_opens_is_a_429_or_502(ask, fake_nemo, caplog, error, status, error_type, code):
@@ -619,7 +640,7 @@ def test_nemo_failure_when_a_stream_opens_is_a_429_or_502(ask, fake_nemo, caplog
 
 def test_nemo_failure_after_the_first_delta_is_an_error_event(ask, fake_nemo, caplog):
     # Le statut 200 est parti avec le premier delta : la panne ne peut plus que se dire dans le flux.
-    fake_nemo.error = NemoOverloaded("the queue is full")
+    fake_nemo.error = EngineOverloaded("the queue is full")
     fake_nemo.after = 1
     caplog.set_level(logging.INFO, logger="dictee")
     r = ask(stream="true")
@@ -889,9 +910,9 @@ def test_oversized_text_field_is_400(ask):
 @pytest.mark.parametrize(
     "error,status,error_type,code",
     [
-        (NemoOverloaded("the queue is full"), 429, "rate_limit_error", "overloaded"),
-        (NemoUnavailable("connection refused"), 502, "server_error", "upstream_error"),
-        (NemoError("session failed"), 502, "server_error", "upstream_error"),
+        (EngineOverloaded("the queue is full"), 429, "rate_limit_error", "overloaded"),
+        (EngineUnavailable("connection refused"), 502, "server_error", "upstream_error"),
+        (EngineError("session failed"), 502, "server_error", "upstream_error"),
     ],
 )
 def test_nemo_overloaded_is_429_and_unavailable_is_502(ask, fake_nemo, error, status, error_type, code):
@@ -1002,7 +1023,7 @@ def test_log_line_has_no_mismatch_count_when_nothing_was_relayed(caplog, ask, fa
 
 def test_log_line_counts_a_mismatch_even_when_the_stream_ends_in_an_error(caplog, ask, fake_nemo):
     fake_nemo.finals = (Partial("Bonjour"), Final("Salut tout le monde.", ()), Partial("Sa"), FINALS[1])
-    fake_nemo.error = NemoUnavailable("connection refused")
+    fake_nemo.error = EngineUnavailable("connection refused")
     fake_nemo.after = 2
     caplog.set_level(logging.INFO, logger="dictee")
     ask(stream="true")
@@ -1310,8 +1331,8 @@ async def test_third_concurrent_long_request_is_429_while_decoding_and_decodes_n
 EXITS = {
     "done": ({}, {}, {}, 200),
     "stream": ({}, {"stream": "true"}, {}, 200),
-    "nemo-fails": ({"chunks": [NemoUnavailable("down")]}, {}, {}, 502),
-    "stream-nemo-fails": ({"error": NemoUnavailable("down")}, {"stream": "true"}, {}, 502),
+    "nemo-fails": ({"chunks": [EngineUnavailable("down")]}, {}, {}, 502),
+    "stream-nemo-fails": ({"error": EngineUnavailable("down")}, {"stream": "true"}, {}, 502),
     "too-long": ({}, {}, {"MAX_AUDIO_SECONDS": 2.9}, 400),
 }
 
@@ -1475,7 +1496,7 @@ def test_an_identical_upload_gets_the_finished_result_without_nemo(ask, fake_nem
 
 
 def test_an_identical_upload_after_a_failure_makes_a_new_task(ask, transcriptions_client, fake_nemo, no_retry_delays):
-    fake_nemo.chunks = [NemoError("bad")]
+    fake_nemo.chunks = [EngineError("bad")]
     assert ask().status_code == 502
     fake_nemo.chunks = [Final("Bonjour.", ())]
     assert ask().json() == {"text": "Bonjour."}
@@ -1545,9 +1566,9 @@ async def test_a_client_hanging_up_leaves_the_task_running_to_its_end(
 @pytest.mark.parametrize(
     ("error", "status", "code"),
     [
-        (NemoOverloaded("full"), 429, "overloaded"),
-        (NemoUnavailable("down"), 502, "upstream_error"),
-        (NemoError("bad"), 502, "upstream_error"),
+        (EngineOverloaded("full"), 429, "overloaded"),
+        (EngineUnavailable("down"), 502, "upstream_error"),
+        (EngineError("bad"), 502, "upstream_error"),
     ],
 )
 def test_a_failed_task_gives_the_error_of_a_synchronous_request(ask, fake_nemo, no_retry_delays, error, status, code):
@@ -1624,3 +1645,41 @@ def test_an_audio_decoded_to_zero_seconds_is_refused_like_an_unreadable_one(ask,
     tasks_dir = transcriptions_client.app.state.settings.tasks_dir
     assert tasks_of(transcriptions_client) == [] and not any(tasks_dir.iterdir())
     take_every_place(transcriptions_client.app)
+
+
+def stream_with_glossary(openai_client, db, tone_mp3) -> tuple[list[str], str]:
+    """Les deltas et le texte de `done` d'un flux d'Ana, dont le glossaire corrige « tarvél » en « Tarvel »."""
+    user = db.upsert_user("sub-1", "Ana@Example.org", "Ana")
+    db.save_settings(user, glossary="Tarvel (souvent entendu : tarvél)")
+    stream = openai_client.audio.transcriptions.create(
+        model="whisper-1",
+        file=("a.mp3", tone_mp3),
+        stream=True,
+        extra_headers={"X-OpenWebUI-User-Email": "ana@example.org"},
+    )
+    events = list(stream)
+    return [e.delta for e in events if e.type == "transcript.text.delta"], events[-1].text
+
+
+def test_stream_is_corrected_with_the_glossary_of_the_user(openai_client, fake_nemo, db, tone_mp3):
+    fake_nemo.finals = (Partial("Le projet"), Final("Le projet tarvél.", (Word("tarvél.", 0.0, 1.0, "0"),)))
+    _, done = stream_with_glossary(openai_client, db, tone_mp3)
+    assert done == "Le projet Tarvel."
+
+
+def test_stream_sends_the_end_of_a_sentence_whose_variant_already_left_in_a_delta(
+    openai_client, fake_nemo, db, tone_mp3
+):
+    # La fin de la phrase se calcule sur le texte du moteur : le flux de deltas reste complet, `done` est corrigé.
+    fake_nemo.finals = (Partial("Le projet tarv"), Final("Le projet tarvél.", ()), Partial("Salut"), FINALS[1])
+    sent, done = stream_with_glossary(openai_client, db, tone_mp3)
+    assert sent == ["Le projet tarv", "él.", " Salut", "."]
+    assert done == "Le projet Tarvel. Salut."
+
+
+def test_stream_deltas_add_up_to_the_corrected_text_without_partials(openai_client, fake_nemo, db, tone_mp3):
+    # Sans texte partiel (comme avec `crispasr`), rien n'est parti avant la phrase finale : son delta est corrigé.
+    fake_nemo.finals = (Final("Le projet tarvél.", ()), Final("Salut tarvél.", ()))
+    sent, done = stream_with_glossary(openai_client, db, tone_mp3)
+    assert sent == ["Le projet Tarvel.", " Salut Tarvel."]
+    assert "".join(sent) == done

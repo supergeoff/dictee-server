@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import struct
+import sys
 import time
 from pathlib import Path
 
@@ -22,25 +22,10 @@ import httpx
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
-ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from common import ROOT, env_value, parse_wav, wav_file  # noqa: E402,F401  (ré-exportés pour les scripts NeMo)
+
 BASE_URL = os.environ.get("NEMO_URL", "http://127.0.0.1:18001")
-
-
-def env_value(name: str) -> str:
-    """La variable `name` de l'environnement si elle existe, sinon sa valeur dans le `.env` du dépôt.
-
-    C'est la seule lecture du `.env` des scripts d'intégration. La valeur n'est jamais affichée : le message d'erreur
-    ne cite que son nom. Un conteneur jetable, qui n'a pas de `.env`, passe la valeur par l'environnement.
-    """
-    if os.environ.get(name):
-        return os.environ[name]
-    env_file = ROOT / ".env"
-    if env_file.exists():
-        for line in env_file.read_text().splitlines():
-            key, _, value = line.partition("=")
-            if key.strip() == name:
-                return value.strip()
-    raise RuntimeError(f"{name} absente de l'environnement et de .env (lancer `NEMO_VERSION=<version> make nemo-up` ou `make integration`)")
 
 
 def api_key() -> str:
@@ -50,26 +35,6 @@ def api_key() -> str:
 
 def auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {api_key()}"}
-
-
-def parse_wav(data: bytes) -> tuple[int, bytes]:
-    """Rend (fréquence, PCM16 mono) d'un WAV PCM16, en lisant l'en-tête RIFF."""
-    if data[:4] != b"RIFF" or data[8:12] != b"WAVE":
-        raise ValueError("réponse qui n'est pas un WAV")
-    rate = channels = bits = 0
-    pos = 12
-    while pos + 8 <= len(data):
-        chunk_id = data[pos : pos + 4]
-        size = struct.unpack("<I", data[pos + 4 : pos + 8])[0]
-        body = pos + 8
-        if chunk_id == b"fmt ":
-            _fmt, channels, rate, _byte_rate, _align, bits = struct.unpack("<HHIIHH", data[body : body + 16])
-        elif chunk_id == b"data":
-            if (channels, bits) != (1, 16):
-                raise ValueError(f"WAV attendu en mono PCM16, reçu {channels} canaux, {bits} bits")
-            return rate, data[body : body + min(size, len(data) - body)]
-        pos = body + size + (size & 1)
-    raise ValueError("WAV sans bloc data")
 
 
 def wav_rate(data: bytes) -> int:
@@ -92,13 +57,6 @@ def synth(text: str, voice: str, rate: int) -> bytes:
     if got_rate != rate:
         raise RuntimeError(f"fréquence demandée {rate} Hz, reçue {got_rate} Hz")
     return pcm
-
-
-def wav_file(pcm: bytes, rate: int) -> bytes:
-    """Enveloppe du PCM16 mono dans un en-tête WAV."""
-    header = b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVEfmt "
-    header += struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
-    return header + b"data" + struct.pack("<I", len(pcm)) + pcm
 
 
 async def realtime_async(

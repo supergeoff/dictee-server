@@ -3,18 +3,25 @@
 import base64
 import json
 import logging
+import struct
 import time
+from pathlib import Path
 
 import pytest
 from conftest import personal_headers
 from openai import OpenAI
+from starlette.testclient import TestClient
 
 from dictee import live
-from dictee.nemo import NemoError, NemoOverloaded
+from dictee.app import create_app
+from dictee.engines import Engines
+from dictee.engines.crispasr_stream import CrispasrLive
+from dictee.engines.ports import EngineError, EngineOverloaded
 from dictee.types import Final, Partial
 
 DELTA = "conversation.item.input_audio_transcription.delta"
 COMPLETED = "conversation.item.input_audio_transcription.completed"
+FAKE_CRISPASR_STREAM = str(Path(__file__).parent / "fixtures" / "fake_crispasr_stream.py")
 
 
 def wait_for(condition, timeout: float = 2.0) -> None:
@@ -234,8 +241,8 @@ def test_clear_is_passed_on_and_acknowledged(live_client, service_headers, fake_
 
 
 @pytest.mark.parametrize("server_vad", [True, False])
-def test_semantic_vad_is_always_refused(live_client, service_headers, monkeypatch, server_vad):
-    monkeypatch.setattr(live, "SERVER_VAD", server_vad)
+def test_semantic_vad_is_always_refused(live_client, service_headers, fake_nemo, server_vad):
+    fake_nemo.server_vad = server_vad
     with open_live(live_client, service_headers) as ws:
         until(ws, "session.created")
         update(ws, turn_detection={"type": "semantic_vad"})
@@ -248,8 +255,8 @@ def test_semantic_vad_is_always_refused(live_client, service_headers, monkeypatc
 
 
 @pytest.mark.parametrize("server_vad", [True, False])
-def test_server_vad_follows_what_nemo_can_do(live_client, service_headers, fake_nemo, monkeypatch, server_vad):
-    monkeypatch.setattr(live, "SERVER_VAD", server_vad)
+def test_server_vad_follows_what_nemo_can_do(live_client, service_headers, fake_nemo, server_vad):
+    fake_nemo.server_vad = server_vad
     with open_live(live_client, service_headers) as ws:
         until(ws, "session.created")
         update(ws, turn_detection={"type": "server_vad", "silence_duration_ms": 700})
@@ -270,8 +277,8 @@ def test_server_vad_follows_what_nemo_can_do(live_client, service_headers, fake_
         assert answer["error"]["param"] == "session.audio.input.turn_detection"
 
 
-def test_server_vad_without_a_silence_takes_the_default_one(live_client, service_headers, fake_nemo, monkeypatch):
-    monkeypatch.setattr(live, "SERVER_VAD", True)
+def test_server_vad_without_a_silence_takes_the_default_one(live_client, service_headers, fake_nemo):
+    fake_nemo.server_vad = True
     with open_live(live_client, service_headers) as ws:
         until(ws, "session.created")
         update(ws, turn_detection={"type": "server_vad"})
@@ -282,10 +289,8 @@ def test_server_vad_without_a_silence_takes_the_default_one(live_client, service
 
 
 @pytest.mark.parametrize("many_commits", [True, False])
-def test_nemo_sessions_follow_the_turns_as_nemo_requires(
-    live_client, service_headers, fake_nemo, monkeypatch, many_commits
-):
-    monkeypatch.setattr(live, "NEMO_MANY_COMMITS", many_commits)
+def test_nemo_sessions_follow_the_turns_as_nemo_requires(live_client, service_headers, fake_nemo, many_commits):
+    fake_nemo.many_commits = many_commits
     transcripts = []
     with open_live(live_client, service_headers) as ws:
         until(ws, "session.created")
@@ -305,7 +310,7 @@ def test_nemo_sessions_follow_the_turns_as_nemo_requires(
 
 
 def test_a_nemo_error_becomes_an_error_event_and_closes(live_client, service_headers, fake_nemo):
-    fake_nemo.live_error = NemoOverloaded("queue full")
+    fake_nemo.live_error = EngineOverloaded("queue full")
     with open_live(live_client, service_headers) as ws:
         until(ws, "session.created")
         ws.send_json({"type": "input_audio_buffer.append", "audio": pcm_b64(0.5, 24000)})
@@ -390,7 +395,7 @@ def test_the_session_line_says_how_the_session_ended(
     caplog.set_level(logging.INFO)
     for name, value in limits.items():
         monkeypatch.setattr(live, name, value)
-    fake_nemo.live_error = NemoOverloaded("queue full")
+    fake_nemo.live_error = EngineOverloaded("queue full")
     with open_live(live_client, service_headers) as ws:
         until(ws, "session.created")
         if status != "idle":
@@ -403,7 +408,7 @@ def test_the_session_line_says_how_the_session_ended(
 @pytest.mark.parametrize(
     ("error", "status"),
     [
-        (NemoError("invalid_argument: unknown term Nemotron"), "upstream_error"),
+        (EngineError("invalid_argument: unknown term Nemotron"), "upstream_error"),
         (RuntimeError("Nemotron"), "server_error"),
     ],
 )
@@ -493,3 +498,80 @@ def test_the_openai_sdk_runs_a_transcription_session(live_server, settings, fake
         while not events or events[-1].type != "conversation.item.input_audio_transcription.completed":
             events.append(connection.recv())
     assert events[-1].transcript == "Bonjour à tous."
+
+
+def test_final_texts_are_corrected_with_the_account_and_prompt_glossaries(live_client, fake_nemo, db):
+    headers, owner = personal_headers(db, "alice@example.test")
+    db.save_settings(owner, glossary="Tarvel (souvent entendu : tarvél)")
+    fake_nemo.live_turns = [[Final("le projet tarvél et nemo tron", ())]]
+    with open_live(live_client, headers) as ws:
+        until(ws, "session.created")
+        update(ws, transcription={"prompt": "Nemotron (souvent entendu : nemo tron)"})
+        until(ws, "session.updated")
+        ws.send_json({"type": "input_audio_buffer.append", "audio": pcm_b64(0.5, 24000)})
+        ws.send_json({"type": "input_audio_buffer.commit"})
+        completed = until(ws, COMPLETED)[-1]
+    assert completed["transcript"] == "le projet Tarvel et Nemotron"
+
+
+@pytest.fixture
+def crispasr_live(settings, fake_nemo, fake_llm, monkeypatch, tmp_path):
+    """`crispasr_live(max_sessions)` rend le client d'une app dont la dictée en direct passe par `CrispasrLive`, joué
+    par le faux binaire de `fixtures/fake_crispasr_stream.py` ; les autres rôles restent sur le faux NeMo."""
+    scenario = {"utterances": [{"partials": ["Bonjour", "Bonjour à", "Bonjour à tous"], "final": "Bonjour à tous."}]}
+    monkeypatch.setenv("FAKE_CRISPASR_SCENARIO", json.dumps(scenario))
+    clients = []
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "asr.gguf").touch()
+    (models / "vad.bin").touch()
+
+    def make(max_sessions: int = 2) -> TestClient:
+        live_engine = CrispasrLive(
+            FAKE_CRISPASR_STREAM,
+            str(models / "asr.gguf"),
+            vad_model_path=str(models / "vad.bin"),
+            max_sessions=max_sessions,
+            threads=1,
+        )
+        app = create_app(settings, engines=Engines(stt=fake_nemo, live=live_engine, tts=fake_nemo), http=fake_llm.http)
+        clients.append(TestClient(app, base_url="https://testserver"))
+        return clients[-1].__enter__()
+
+    yield make
+    for test_client in clients:
+        test_client.__exit__(None, None, None)
+
+
+def speech_b64(seconds: float, rate: int) -> str:
+    """`seconds` secondes d'un signal constant PCM16 mono à `rate` Hz, que le faux CrispASR prend pour de la parole."""
+    return base64.b64encode(struct.pack("<h", 8000) * round(seconds * rate)).decode()
+
+
+def test_live_dictation_on_crispasr_stream(crispasr_live, service_headers):
+    with open_live(crispasr_live(), service_headers) as ws:
+        until(ws, "session.created")
+        ws.send_json({"type": "input_audio_buffer.append", "audio": speech_b64(3, 24000)})
+        ws.send_json({"type": "input_audio_buffer.commit"})
+        events = until(ws, COMPLETED)
+    deltas = [event["delta"] for event in events if event["type"] == DELTA]
+    kinds = [event["type"] for event in events if event["type"] != DELTA]
+    assert deltas == ["Bonjour", " à"]
+    assert kinds == ["input_audio_buffer.committed", COMPLETED]
+    assert (events[-1]["item_id"], events[-1]["transcript"]) == ("item_1", "Bonjour à tous.")
+    assert events[-1]["usage"] == {"type": "duration", "seconds": 3.0}
+
+
+def test_live_overloaded_closes_with_engine_busy(crispasr_live, service_headers):
+    client = crispasr_live(max_sessions=1)
+    with open_live(client, service_headers) as first:
+        until(first, "session.created")
+        # ffmpeg retient la fin d'un envoi jusqu'au suivant : 3 s font deux pas complets, donc un premier delta.
+        first.send_json({"type": "input_audio_buffer.append", "audio": speech_b64(3, 24000)})
+        until(first, DELTA)  # la session du premier client tient la seule place
+        with open_live(client, service_headers) as second:
+            until(second, "session.created")
+            second.send_json({"type": "input_audio_buffer.append", "audio": speech_b64(0.5, 24000)})
+            error = until(second, "error")[-1]["error"]
+            assert (error["type"], error["code"]) == ("rate_limit_error", "overloaded")
+            assert second.receive()["code"] == 1011

@@ -1,12 +1,12 @@
 """Route `POST /v1/audio/speech`, compatible avec celle d'OpenAI.
 
-La route découpe le texte en phrases, fait synthétiser la première par NeMo avant d'ouvrir la réponse, puis rend le
-son au fil de l'eau : un seul ffmpeg encode le son de toutes les phrases, synthétisées l'une après l'autre. Rien n'est
-journalisé ici qui vienne du contenu : ni le texte à dire, ni l'audio. La ligne de chaque requête dit qui, quoi et
-comment elle s'est terminée.
+La route découpe le texte en phrases, fait synthétiser la première par le moteur de voix avant d'ouvrir la réponse,
+puis rend le son au fil de l'eau : un seul ffmpeg encode le son de toutes les phrases, synthétisées l'une après
+l'autre. Rien n'est journalisé ici qui vienne du contenu : ni le texte à dire, ni l'audio. La ligne de chaque requête
+dit qui, quoi et comment elle s'est terminée.
 
 Les pièces que la route de transcription partage sont dans `lifecycle` (tâches détachées, client qui raccroche) et
-`errors` (erreurs de NeMo et erreur imprévue).
+`errors` (erreurs du moteur et erreur imprévue).
 """
 
 import asyncio
@@ -26,7 +26,8 @@ from starlette.responses import Response, StreamingResponse
 
 from dictee.audio import MAX_SPEED, MIN_SPEED, OUTPUT_FORMATS, encode_stream
 from dictee.auth import require_caller
-from dictee.errors import NEMO_ERRORS, ApiError, nemo_failure, unexpected_error
+from dictee.engines.ports import ENGINE_ERRORS, Synthesizer
+from dictee.errors import ApiError, engine_failure, unexpected_error
 from dictee.lifecycle import (
     CLIENT_CLOSED,
     RequestTrace,
@@ -37,7 +38,6 @@ from dictee.lifecycle import (
     run_unless_disconnected,
     spawn,
 )
-from dictee.nemo import TTS_SAMPLE_RATE
 from dictee.profile import load_profile
 from dictee.upload import bounded_request
 
@@ -133,8 +133,8 @@ def split_sentences(text: str, max_chars: int = MAX_SENTENCE_CHARS) -> list[str]
     return _attach_silent(sentences)
 
 
-def _nemo_name(voice: str | None, available: Sequence[str]) -> str | None:
-    """Nom de `voice` tel que NeMo l'écrit, sans tenir compte de la casse ; `None` si NeMo ne la propose pas."""
+def _engine_name(voice: str | None, available: Sequence[str]) -> str | None:
+    """Nom de `voice` tel que le moteur l'écrit, sans tenir compte de la casse ; `None` s'il ne la propose pas."""
     if voice:
         wanted = voice.casefold()
         for name in available:
@@ -143,23 +143,30 @@ def _nemo_name(voice: str | None, available: Sequence[str]) -> str | None:
     return None
 
 
-def resolve_voice(requested: str | None, profile_voice: str, available: Sequence[str]) -> str:
-    """Voix de la synthèse : celle demandée si NeMo la propose, sinon celle du profil, sans tenir compte de la casse.
+def resolve_voice(requested: str | None, profile_voice: str, available: Sequence[str], default_voice: str) -> str:
+    """Voix de la synthèse : la demandée si le moteur la propose, sinon celle du profil, sinon `default_voice`.
 
-    Le nom rendu est écrit comme NeMo l'écrit (`leo` donne `Leo`), pour la voix du profil comme pour celle de la requête
-    (la voix par défaut du service, que `DEFAULT_VOICE` fixe, passe par là). Les voix d'OpenAI (`alloy`, `nova`), que
-    les clients envoient par défaut, ne sont pas des voix de NeMo : elles donnent la voix du profil. Une voix du profil
-    que NeMo ne propose pas part telle quelle, NeMo restant seul juge, et laisse un avertissement au journal : elle
-    vient d'un réglage et non de la requête, donc le même nom reviendra à chaque appel. Sans voix de repli (chaîne
-    vide), la fonction rend une chaîne vide pour un nom inconnu, sans rien dire.
+    La comparaison ignore la casse, et le nom rendu est écrit comme le moteur l'écrit (`lucien` donne `Lucien`). Les
+    voix d'OpenAI (`alloy`, `nova`), que les clients envoient par défaut, ne sont pas des voix du moteur : elles
+    donnent la voix du profil. Une voix de profil que le moteur ne propose pas (une voix d'un ancien moteur) donne
+    `default_voice` et laisse un avertissement au journal : elle vient d'un réglage et non de la requête, donc le même
+    nom reviendra à chaque appel. Si `default_voice` n'est pas non plus dans la liste, elle part telle quelle, le
+    moteur restant seul juge, avec un avertissement lui aussi ; aucun ne cite de texte à dire. Une liste vide (le
+    moteur injoignable) ne laisse aucun avertissement : aucune voix n'est inconnue, la liste manque. Sans voix de repli
+    (`default_voice` vide), la fonction rend une chaîne vide pour un nom inconnu, sans rien dire.
     """
     for voice in (requested, profile_voice):
-        name = _nemo_name(voice, available)
+        name = _engine_name(voice, available)
         if name is not None:
             return name
-    if profile_voice:
-        logger.warning("voice unknown to nemo name=%s", loggable(profile_voice))
-    return profile_voice
+    if profile_voice and available:
+        logger.warning("voice unknown to engine name=%s", loggable(profile_voice))
+    name = _engine_name(default_voice, available)
+    if name is not None:
+        return name
+    if default_voice and default_voice != profile_voice and available:
+        logger.warning("default voice unknown to engine name=%s", loggable(default_voice))
+    return default_voice
 
 
 @dataclass(kw_only=True)
@@ -192,10 +199,10 @@ class _Trace(RequestTrace):
         finally:
             self.nemo_ms = (self.nemo_ms or 0) + elapsed_ms(called)
 
-    async def speak(self, nemo: Any, sentence: str, voice: str) -> bytes:
+    async def speak(self, tts: Synthesizer, sentence: str, voice: str) -> bytes:
         """Fait synthétiser `sentence` par NeMo ; le premier PCM reçu fixe `first_ms`."""
         with self.nemo_call():
-            pcm = await nemo.speak(sentence, voice=voice, language=LANGUAGE)
+            pcm = await tts.speak(sentence, voice=voice, language=LANGUAGE)
         if self.first_ms is None:
             self.first_ms = elapsed_ms(self.started)
         return pcm
@@ -296,7 +303,7 @@ async def list_voices(state: State) -> tuple[str, ...]:
     La page de configuration s'en sert aussi, pour la liste des voix et pour valider celle qu'on choisit.
     """
     if state.voices is None:
-        state.voices = tuple(await state.nemo.voices())
+        state.voices = tuple(await state.engines.tts.voices())
     return state.voices
 
 
@@ -304,9 +311,9 @@ async def _open(state: State, params: _Params, profile_voice: str, sentence: str
     """Choisit la voix et fait synthétiser la première phrase ; rend la voix et le PCM de cette phrase."""
     with trace.nemo_call():
         available = await list_voices(state)
-    voice = resolve_voice(params.voice, profile_voice, available)
+    voice = resolve_voice(params.voice, profile_voice, available, state.settings.default_voice)
     trace.voice = loggable(voice)
-    return voice, await trace.speak(state.nemo, sentence, voice)
+    return voice, await trace.speak(state.engines.tts, sentence, voice)
 
 
 class _End:
@@ -320,7 +327,7 @@ _END = _End()
 class _Synthesis:
     """La synthèse en cours : la voix, le format, le PCM de la première phrase et les phrases qui restent."""
 
-    nemo: Any
+    tts: Synthesizer
     voice: str
     fmt: str
     speed: float
@@ -332,7 +339,7 @@ class _Synthesis:
         """Le PCM de chaque phrase : la première est déjà synthétisée, les autres le sont l'une après l'autre."""
         yield self.first
         for sentence in self.rest:
-            yield await self.trace.speak(self.nemo, sentence, self.voice)
+            yield await self.trace.speak(self.tts, sentence, self.voice)
 
     async def _encode(self, chunks: asyncio.Queue[bytes | _End]) -> None:
         """Encode le PCM des phrases et pose les blocs dans `chunks`.
@@ -346,7 +353,7 @@ class _Synthesis:
         async with (
             contextlib.aclosing(self._pcm()) as pcm,
             contextlib.aclosing(
-                encode_stream(pcm, fmt=self.fmt, speed=self.speed, input_rate=TTS_SAMPLE_RATE)
+                encode_stream(pcm, fmt=self.fmt, speed=self.speed, input_rate=self.tts.sample_rate)
             ) as encoded,
         ):
             async for chunk in encoded:
@@ -379,7 +386,7 @@ class _Synthesis:
             self.trace.status = CLIENT_CLOSED
             raise
         except Exception as error:
-            self.trace.status = nemo_failure(error).status if isinstance(error, NEMO_ERRORS) else 500
+            self.trace.status = engine_failure(error).status if isinstance(error, ENGINE_ERRORS) else 500
             logger.warning("speech stream cut class=%s", type(error).__name__)
         finally:
             cancel_once(encoding)
@@ -398,12 +405,12 @@ async def _handle(request: Request, trace: _Trace) -> Response:
     # celle d'une réponse ordinaire (429 ou 502), le statut partant après, quand on sait déjà si NeMo répond.
     try:
         opened = await run_unless_disconnected(request, _open(state, params, profile.voice, sentences[0], trace))
-    except NEMO_ERRORS as error:
-        raise nemo_failure(error) from None
+    except ENGINE_ERRORS as error:
+        raise engine_failure(error) from None
     if opened is None:
         return Response(status_code=CLIENT_CLOSED)
     voice, first = opened
-    synthesis = _Synthesis(state.nemo, voice, params.response_format, params.speed, first, sentences[1:], trace)
+    synthesis = _Synthesis(state.engines.tts, voice, params.response_format, params.speed, first, sentences[1:], trace)
     return synthesis.respond()
 
 

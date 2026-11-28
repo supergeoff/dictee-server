@@ -93,7 +93,75 @@ def test_invalid_number_is_reported_by_variable_name():
         Settings.from_env({**REQUIRED_ENV, "MAX_UPLOAD_MB": "beaucoup"})
 
 
+def test_adapter_settings_have_their_defaults():
+    s = Settings.from_env(REQUIRED_ENV)
+    assert s.crispasr_url == "http://crispasr:8080"
+    assert s.crispasr_api_key == ""
+    assert s.live_command == "crispasr"
+    assert s.live_model_path == "/models/current/asr.gguf"
+    assert s.live_max_sessions == 2
+    assert s.live_threads == 4
+    assert s.live_stream_args == ""
+    assert s.tts_url == "http://phonon:8880"
+    assert s.tts_sample_rate == 24000
+    assert s.tts_max_concurrent == 1
+
+
+def test_live_vad_model_path_defaults_next_to_the_live_model_and_can_change():
+    assert Settings.from_env(REQUIRED_ENV).live_vad_model_path == "/models/current/vad.bin"
+    assert Settings.from_env({**REQUIRED_ENV, "LIVE_VAD_MODEL_PATH": "/m/v.bin"}).live_vad_model_path == "/m/v.bin"
+
+
+def test_nemo_key_not_required_without_nemo_engine():
+    env = {k: v for k, v in REQUIRED_ENV.items() if k != "NEMO_API_KEY"}
+    env.update(STT_ENGINE="crispasr", LIVE_ENGINE="crispasr-stream", TTS_ENGINE="openai", CRISPASR_API_KEY="k")
+    assert Settings.from_env(env).nemo_api_key == ""
+
+
+def test_nemo_key_required_when_one_role_uses_nemo():
+    env = {k: v for k, v in REQUIRED_ENV.items() if k != "NEMO_API_KEY"}
+    env.update(STT_ENGINE="crispasr", CRISPASR_API_KEY="k")
+    with pytest.raises(ValueError, match="NEMO_API_KEY"):
+        Settings.from_env(env)
+
+
+def test_crispasr_key_required_with_crispasr_engine():
+    with pytest.raises(ValueError, match="CRISPASR_API_KEY"):
+        Settings.from_env({**REQUIRED_ENV, "STT_ENGINE": "crispasr"})
+
+
+def test_live_max_sessions_must_be_an_integer():
+    with pytest.raises(ValueError, match="LIVE_MAX_SESSIONS"):
+        Settings.from_env({**REQUIRED_ENV, "LIVE_MAX_SESSIONS": "deux"})
+
+
 def test_settings_are_frozen():
     s = Settings.from_env(REQUIRED_ENV)
     with pytest.raises(AttributeError):
         s.nemo_url = "http://elsewhere"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("name", ["TTS_MAX_CONCURRENT", "LIVE_MAX_SESSIONS"])
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_queue_bound_below_one_is_refused_by_variable_name(name, value):
+    with pytest.raises(ValueError, match=f"{name} must be at least 1"):
+        Settings.from_env({**REQUIRED_ENV, name: value})
+
+
+@pytest.mark.parametrize("name", ["TTS_MAX_CONCURRENT", "LIVE_MAX_SESSIONS"])
+def test_queue_bound_of_one_is_accepted(name):
+    Settings.from_env({**REQUIRED_ENV, name: "1"})
+
+
+def test_diar_method_defaults_to_sortformer_and_can_change():
+    assert Settings.from_env(REQUIRED_ENV).diar_method == "sortformer"
+    assert Settings.from_env({**REQUIRED_ENV, "DIAR_METHOD": "pyannote"}).diar_method == "pyannote"
+
+
+@pytest.mark.parametrize(
+    ("variable", "accepted"),
+    [("STT_ENGINE", "nemo, crispasr"), ("LIVE_ENGINE", "nemo, crispasr-stream"), ("TTS_ENGINE", "nemo, openai")],
+)
+def test_unknown_engine_name_is_refused_by_variable_name(variable, accepted):
+    with pytest.raises(ValueError, match=f"{variable} must be one of {accepted}, got 'foo'"):
+        Settings.from_env({**REQUIRED_ENV, variable: "foo"})

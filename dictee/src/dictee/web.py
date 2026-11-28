@@ -35,8 +35,8 @@ from starlette.templating import Jinja2Templates
 
 from dictee.audio import OUTPUT_FORMATS, encode_stream
 from dictee.auth import Caller
-from dictee.errors import NEMO_ERRORS, nemo_failure
-from dictee.nemo import TTS_SAMPLE_RATE
+from dictee.engines.ports import ENGINE_ERRORS
+from dictee.errors import engine_failure
 from dictee.profile import (
     DEFAULT_INSTRUCTIONS,
     MAX_GLOSSARY_CHARS,
@@ -66,8 +66,8 @@ PAGE_HEADERS = {
     ),
     "Cache-Control": "no-store",
 }
-# L'icône et sa version tactile (180 px sur fond plein, car iOS remplit en noir ce qui est transparent), tirée d'icon.svg.
-# Elles ne changent qu'avec une nouvelle image du serveur : le navigateur peut les garder un jour.
+# L'icône et sa version tactile (180 px sur fond plein, car iOS remplit en noir ce qui est transparent), tirée
+# d'icon.svg. Elles ne changent qu'avec une nouvelle image du serveur : le navigateur peut les garder un jour.
 ICON = files("dictee").joinpath("static/icon.svg").read_bytes()
 TOUCH_ICON = files("dictee").joinpath("static/apple-touch-icon.png").read_bytes()
 ICON_HEADERS = {"Cache-Control": "public, max-age=86400"}
@@ -217,12 +217,12 @@ def _public_url(settings: Settings) -> str:
 
 
 async def _known_voice(state: State, requested: str) -> str:
-    """Voix de NeMo que `requested` désigne, sans tenir compte de la casse, écrite comme NeMo l'écrit.
+    """Voix du moteur de voix que `requested` désigne, sans tenir compte de la casse, écrite comme lui l'écrit.
 
-    Lève `WebError` 400 si NeMo ne la propose pas ; un échec de NeMo à la lecture des voix remonte tel quel.
+    Lève `WebError` 400 si le moteur de voix ne la propose pas ; son échec à la lecture des voix remonte tel quel.
     """
-    # Sans voix de repli, `resolve_voice` rend une chaîne vide pour un nom que NeMo ne propose pas.
-    voice = resolve_voice(requested.strip(), "", await list_voices(state))
+    # Sans voix de repli, `resolve_voice` rend une chaîne vide pour un nom que le moteur ne propose pas.
+    voice = resolve_voice(requested.strip(), "", await list_voices(state), "")
     if not voice:
         raise WebError(400, "Cette voix n'existe pas.")
     return voice
@@ -249,7 +249,7 @@ async def _render_index(request: Request, user_id: int, *, new_key: str | None =
     profile = load_profile(state.db, state.settings, Caller(user_id))
     try:
         voices = await list_voices(state)
-    except NEMO_ERRORS as error:
+    except ENGINE_ERRORS as error:
         # La page reste utile sans la liste des voix : clés, glossaire et consignes ne dépendent pas de NeMo.
         logger.warning("voices unavailable class=%s", type(error).__name__)
         voices = ()
@@ -261,7 +261,7 @@ async def _render_index(request: Request, user_id: int, *, new_key: str | None =
         "glossary": state.db.get_settings(user_id).glossary,
         "instructions": profile.instructions,
         "voices": voices,
-        "current_voice": resolve_voice(profile.voice, "", voices),
+        "current_voice": resolve_voice(profile.voice, "", voices, state.settings.default_voice),
         "saved": request.query_params.get("saved") == "1",
     }
     return _page(request, "index.html", context)
@@ -387,7 +387,7 @@ async def update_settings(request: Request) -> Response:
     if "voice" in fields:
         try:
             changes["voice"] = await _known_voice(request.app.state, fields["voice"])
-        except NEMO_ERRORS as error:
+        except ENGINE_ERRORS as error:
             logger.warning("voices unavailable class=%s", type(error).__name__)
             message = "Le moteur vocal ne répond pas, la liste des voix est indisponible. Rien n'a été enregistré."
             raise WebError(502, message) from None
@@ -403,13 +403,11 @@ async def reset_instructions(request: Request) -> Response:
     return RedirectResponse("/?saved=1", status_code=303)
 
 
-async def _mp3(pcm: bytes) -> bytes:
+async def _mp3(pcm: bytes, sample_rate: int) -> bytes:
     async def chunks() -> AsyncIterator[bytes]:
         yield pcm
 
-    async with contextlib.aclosing(
-        encode_stream(chunks(), fmt="mp3", speed=1.0, input_rate=TTS_SAMPLE_RATE)
-    ) as encoded:
+    async with contextlib.aclosing(encode_stream(chunks(), fmt="mp3", speed=1.0, input_rate=sample_rate)) as encoded:
         return b"".join([chunk async for chunk in encoded])
 
 
@@ -449,12 +447,12 @@ async def voice_preview(request: Request) -> Response:
     state = request.app.state
 
     async def synthesize(voice: str) -> bytes:
-        pcm = await state.nemo.speak(PREVIEW_TEXT, voice=voice, language=LANGUAGE)
-        return await _mp3(pcm)
+        pcm = await state.engines.tts.speak(PREVIEW_TEXT, voice=voice, language=LANGUAGE)
+        return await _mp3(pcm, state.engines.tts.sample_rate)
 
     try:
         voice = await _known_voice(state, request.query_params.get("voice", ""))
         mp3 = await state.previews.get(voice, synthesize)
-    except NEMO_ERRORS as error:
-        raise nemo_failure(error) from None
+    except ENGINE_ERRORS as error:
+        raise engine_failure(error) from None
     return _mp3_response(mp3, request.headers.get("range"))

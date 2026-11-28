@@ -23,13 +23,14 @@ import httpx
 import itsdangerous
 import pytest
 from authlib.integrations.starlette_client import OAuthError
+from fakes import TTS_SAMPLE_RATE
 from starlette.requests import Request
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from dictee.app import create_app
 from dictee.db import StoredSettings
-from dictee.nemo import TTS_SAMPLE_RATE, NemoOverloaded, NemoUnavailable
+from dictee.engines.ports import EngineOverloaded, EngineUnavailable
 from dictee.profile import DEFAULT_INSTRUCTIONS
 from dictee.web import MAX_FORM_BYTES, PREVIEW_TEXT, PreviewCache, _mp3_response, build_oauth
 
@@ -465,7 +466,7 @@ def test_page_tells_when_a_change_was_saved(logged_in):
 
 def test_page_still_renders_when_nemo_is_down(logged_in, fake_nemo):
     logged_in.client.app.state.voices = None
-    fake_nemo.error = NemoUnavailable("down")
+    fake_nemo.error = EngineUnavailable("down")
     r = logged_in.client.get("/")
     assert r.status_code == 200
     assert "indisponible" in r.text and "<audio" not in r.text
@@ -734,7 +735,7 @@ def test_notices_use_their_variants(logged_in, fake_nemo):
     assert re.search(r'class="notice notice-warning" role="alert"', created)
     assert "notice-success" not in re.sub(r"<style>.*?</style>", "", created, flags=re.S)
     logged_in.client.app.state.voices = None
-    fake_nemo.error = NemoUnavailable("down")
+    fake_nemo.error = EngineUnavailable("down")
     down = logged_in.client.get("/").text
     assert re.search(r'class="notice notice-warning"[^>]*>\s*(?:<[^>]+>\s*)*La liste des voix', down)
 
@@ -765,7 +766,7 @@ def test_no_class_from_before_stack_ui_is_left(logged_in, fake_nemo):
     key_id = re.search(r"/keys/(\d+)/revoke", key_page).group(1)
     revoked = logged_in.post(f"/keys/{key_id}/revoke").text
     logged_in.client.app.state.voices = None
-    fake_nemo.error = NemoUnavailable("down")
+    fake_nemo.error = EngineUnavailable("down")
     pages = [
         logged_in.client.get("/").text,
         revoked,
@@ -971,7 +972,7 @@ def test_unknown_voice_is_refused(logged_in, db):
 
 def test_settings_when_nemo_is_down_save_nothing_that_needs_it(logged_in, db, fake_nemo):
     logged_in.client.app.state.voices = None
-    fake_nemo.error = NemoUnavailable("down")
+    fake_nemo.error = EngineUnavailable("down")
     r = logged_in.post("/settings", {"glossary": "Nemotron", "voice": "Leo"})
     assert r.status_code == 502 and "voix" in r.text
     assert db.get_settings(logged_in.user_id) == StoredSettings("", "", "")
@@ -1019,11 +1020,11 @@ def test_voice_preview_is_synthesized_once_per_voice(logged_in, fake_nemo):
 
 def test_voice_preview_does_not_keep_a_failure(logged_in, fake_nemo):
     fake_nemo.pcm = bytes(2 * TTS_SAMPLE_RATE)
-    fake_nemo.error = NemoUnavailable("down")
+    fake_nemo.error = EngineUnavailable("down")
     assert logged_in.client.get("/voice/preview", params={"voice": "Leo"}).status_code == 502
     fake_nemo.error = None
     assert logged_in.client.get("/voice/preview", params={"voice": "Leo"}).status_code == 200
-    fake_nemo.error = NemoUnavailable("down")  # l'aperçu réussi est gardé : NeMo n'est plus sollicité
+    fake_nemo.error = EngineUnavailable("down")  # l'aperçu réussi est gardé : NeMo n'est plus sollicité
     assert logged_in.client.get("/voice/preview", params={"voice": "Leo"}).status_code == 200
     assert len(fake_nemo.speak_calls) == 2
 
@@ -1127,7 +1128,7 @@ def test_voice_preview_refuses_an_unknown_voice_without_calling_nemo(logged_in, 
     assert fake_nemo.speak_calls == []
 
 
-@pytest.mark.parametrize(("error", "status"), [(NemoOverloaded("busy"), 429), (NemoUnavailable("down"), 502)])
+@pytest.mark.parametrize(("error", "status"), [(EngineOverloaded("busy"), 429), (EngineUnavailable("down"), 502)])
 def test_voice_preview_reports_a_nemo_failure(logged_in, fake_nemo, error, status):
     fake_nemo.error = error
     assert logged_in.client.get("/voice/preview", params={"voice": "Leo"}).status_code == status
