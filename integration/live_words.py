@@ -11,9 +11,11 @@ au même chemin dans le conteneur : le script passe à CrispASR les mêmes chemi
 Usage :
     python3 integration/live_words.py --audio extrait.wav --model parakeet.gguf [--stream-length MS] [--stream-step MS]
         [--command "docker run --rm -i -v modeles:/models -v /chemin/audio:/chemin/audio image crispasr"]
-        [--threads 4] [--language fr]
+        [--threads 4] [--language fr] [--verbose]
 
-Passe en direct : `ffmpeg -re` envoie l'audio au rythme réel à `--stream --stream-json --vad`. Passe hors direct :
+Passe en direct : le script convertit l'audio en PCM16 mono 16 kHz, lance CrispASR avec `--stream --stream-json --vad`
+puis lui envoie lui-même le PCM par morceaux de 100 ms cadencés sur l'horloge. Du silence au rythme réel précède l'audio
+jusqu'au premier événement de CrispASR (le modèle est alors chargé), et 2 s de silence le suivent. Passe hors direct :
 `--backend parakeet -otxt`. La sortie est faite de lignes `clé=valeur` et ne contient aucun texte transcrit. Le code de
 sortie vaut 0 quand `ratio` atteint 0,95, 1 sinon, et 2 quand une commande échoue.
 """
@@ -26,11 +28,16 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
 
 SEUIL = 0.95
+CHUNK_S = 0.1
+CHUNK_BYTES = int(16000 * CHUNK_S) * 2
+LOAD_TIMEOUT_S = 120.0
+TAIL_S = 2.0
 
 
 def count_words(text: str) -> int:
@@ -49,12 +56,25 @@ def parse_event(line: str) -> dict | None:
     return event
 
 
-def event_delay(arrival_s: float, event: dict) -> float | None:
-    """Délai d'un événement : instant d'arrivée moins l'instant d'audio `t1` qu'il couvre."""
+def event_delay(arrival_s: float, event: dict, lead_in_s: float = 0.0) -> float | None:
+    """Délai d'un événement : arrivée (comptée depuis le début de l'audio) moins l'instant d'audio `t1` qu'il couvre.
+
+    Les `t1` de CrispASR comptent le silence d'amorce de durée `lead_in_s` : on le retranche. Renvoie None quand
+    l'événement n'a pas de `t1` ou que son `t1` tombe dans le silence d'amorce.
+    """
     t1 = event.get("t1")
-    if not isinstance(t1, (int, float)):
+    if not isinstance(t1, (int, float)) or float(t1) <= lead_in_s:
         return None
-    return arrival_s - float(t1)
+    return arrival_s - (float(t1) - lead_in_s)
+
+
+def last_final_words(finals: list[dict]) -> dict:
+    """Mots des textes finals par `utterance_id` : seul le dernier final d'un même identifiant compte."""
+    words: dict = {}
+    for position, event in enumerate(finals):
+        key = event.get("utterance_id", f"sans-id-{position}")
+        words[key] = count_words(str(event.get("text", "")))
+    return words
 
 
 def percentile(values: list[float], fraction: float) -> float:
@@ -77,7 +97,18 @@ def ratio(final_words: int, offline_words: int) -> float:
 
 
 def stream_pass(args: argparse.Namespace) -> dict:
-    """Joue l'audio en direct et rassemble les événements : mots des finals, délais, durée."""
+    """Joue l'audio en direct à CrispASR, au rythme réel, et rassemble les événements.
+
+    Le silence d'amorce dure jusqu'au premier événement de CrispASR, preuve que le modèle est chargé (au plus 120 s).
+    Le délai d'un événement compte depuis le début de l'envoi de l'audio, pas depuis le lancement.
+    """
+    conversion = subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-i", args.audio, "-f", "s16le", "-ar", "16000", "-ac", "1", "-"],
+        capture_output=True,
+    )
+    if conversion.returncode != 0:
+        raise RuntimeError(f"la conversion de l'audio a échoué (ffmpeg : {conversion.returncode})")
+    pcm = conversion.stdout
     command = shlex.split(args.command) + [
         "--stream", "--stream-json", "--vad",
         "-m", args.model, "-l", args.language, "-t", str(args.threads),
@@ -86,48 +117,93 @@ def stream_pass(args: argparse.Namespace) -> dict:
         command += ["--stream-length", str(args.stream_length)]
     if args.stream_step is not None:
         command += ["--stream-step", str(args.stream_step)]
-    ffmpeg = subprocess.Popen(
-        ["ffmpeg", "-loglevel", "error", "-re", "-i", args.audio, "-f", "s16le", "-ar", "16000", "-ac", "1", "-"],
-        stdout=subprocess.PIPE,
+    crispasr = subprocess.Popen(
+        command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None if args.verbose else subprocess.DEVNULL
     )
-    start = time.monotonic()
-    crispasr = subprocess.Popen(command, stdin=ffmpeg.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-    ffmpeg.stdout.close()
-    final_words = partial_events = final_events = 0
+    events: list[tuple[float, dict]] = []
+    first_event = threading.Event()
+
+    def read_events() -> None:
+        for raw in crispasr.stdout:
+            arrival = time.monotonic()
+            event = parse_event(raw.decode("utf-8", errors="replace"))
+            if event is not None:
+                events.append((arrival, event))
+                first_event.set()
+
+    def send(data: bytes) -> None:
+        try:
+            crispasr.stdin.write(data)
+            crispasr.stdin.flush()
+        except (BrokenPipeError, ValueError):
+            raise RuntimeError("CrispASR a fermé son entrée avant la fin de l'envoi") from None
+
+    def wait_until(instant: float) -> None:
+        delay = instant - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+
+    silence = bytes(CHUNK_BYTES)
+    try:
+        reader = threading.Thread(target=read_events, daemon=True)
+        reader.start()
+        lead_origin = time.monotonic()
+        sent = 0
+        while not first_event.is_set():
+            if crispasr.poll() is not None:
+                raise RuntimeError(f"CrispASR s'est arrêté avant son premier événement ({crispasr.returncode})")
+            if time.monotonic() - lead_origin > LOAD_TIMEOUT_S:
+                raise RuntimeError(f"aucun événement de CrispASR en {LOAD_TIMEOUT_S:.0f} s : le modèle ne se charge pas")
+            wait_until(lead_origin + sent * CHUNK_S)
+            send(silence)
+            sent += 1
+        lead_in = sent * CHUNK_S
+        audio_start = time.monotonic()
+        chunks = [pcm[i:i + CHUNK_BYTES] for i in range(0, len(pcm), CHUNK_BYTES)]
+        chunks += [silence] * int(TAIL_S / CHUNK_S)
+        for index, chunk in enumerate(chunks):
+            wait_until(audio_start + index * CHUNK_S)
+            send(chunk)
+        crispasr.stdin.close()
+        reader.join()
+        code = crispasr.wait()
+        wall = time.monotonic() - audio_start
+    finally:
+        if crispasr.poll() is None:
+            crispasr.kill()
+            crispasr.wait()
+    if code != 0:
+        raise RuntimeError(f"la passe en direct a échoué (CrispASR : {code})")
     partial_delays: list[float] = []
     final_delays: list[float] = []
-    for line in crispasr.stdout:
-        arrival = time.monotonic() - start
-        event = parse_event(line)
-        if event is None:
-            continue
-        delay = event_delay(arrival, event)
+    finals: list[dict] = []
+    partial_events = final_events = 0
+    for arrival, event in events:
+        delay = event_delay(arrival - audio_start, event, lead_in)
         if event["type"] == "partial":
-            partial_events += 1
             if delay is not None:
+                partial_events += 1
                 partial_delays.append(delay)
         elif event["type"] == "final":
-            final_events += 1
-            final_words += count_words(str(event.get("text", "")))
             if delay is not None:
+                final_events += 1
                 final_delays.append(delay)
-    code = crispasr.wait()
-    wall = time.monotonic() - start
-    ffmpeg_code = ffmpeg.wait()
-    if code != 0 or ffmpeg_code != 0:
-        raise RuntimeError(f"la passe en direct a échoué (CrispASR : {code}, ffmpeg : {ffmpeg_code})")
+                finals.append(event)
+    per_utterance = last_final_words(finals)
     return {
-        "final_words": final_words,
+        "final_words": sum(per_utterance.values()),
+        "final_utterances": len(per_utterance),
         "partial_events": partial_events,
         "final_events": final_events,
         "partial_delays": partial_delays,
         "final_delays": final_delays,
         "wall": wall,
+        "lead_in": lead_in,
     }
 
 
 def offline_pass(args: argparse.Namespace) -> int:
-    """Transcrit l'audio hors direct et renvoie le nombre de mots ; le fichier texte est effacé."""
+    """Transcrit l'audio hors direct et renvoie le nombre de mots ; le fichier texte est effacé s'il le peut."""
     audio = Path(args.audio).resolve()
     prefix = audio.parent / f".live_words_{uuid.uuid4().hex}"
     out = Path(f"{prefix}.txt")
@@ -136,14 +212,19 @@ def offline_pass(args: argparse.Namespace) -> int:
         "-t", str(args.threads), "-otxt", "-of", str(prefix),
     ]
     try:
-        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        result = subprocess.run(
+            command, stdout=subprocess.DEVNULL, stderr=None if args.verbose else subprocess.DEVNULL
+        )
         if result.returncode != 0:
             raise RuntimeError(f"la passe hors direct a échoué (CrispASR : {result.returncode})")
         if not out.exists():
             raise RuntimeError("la passe hors direct n'a produit aucun fichier texte")
         return count_words(out.read_text(encoding="utf-8"))
     finally:
-        out.unlink(missing_ok=True)
+        try:
+            out.unlink(missing_ok=True)
+        except OSError as exc:
+            print(f"avertissement : le fichier texte temporaire n'a pas pu être effacé ({exc.strerror})", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -155,6 +236,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--language", default="fr")
     parser.add_argument("--stream-length", type=int, default=None, metavar="MS")
     parser.add_argument("--stream-step", type=int, default=None, metavar="MS")
+    parser.add_argument("--verbose", action="store_true", help="laisse passer la sortie d'erreur de CrispASR")
     args = parser.parse_args(argv)
     args.audio = os.path.abspath(args.audio)
     try:
@@ -170,11 +252,13 @@ def main(argv: list[str] | None = None) -> int:
         ("ratio", f"{value:.3f}"),
         ("partial_events", live["partial_events"]),
         ("final_events", live["final_events"]),
+        ("final_utterances", live["final_utterances"]),
         ("partial_delay_median_s", f"{median(live['partial_delays']):.2f}"),
         ("partial_delay_p90_s", f"{percentile(live['partial_delays'], 0.9):.2f}"),
         ("final_delay_median_s", f"{median(live['final_delays']):.2f}"),
         ("final_delay_p90_s", f"{percentile(live['final_delays'], 0.9):.2f}"),
         ("stream_wall_s", f"{live['wall']:.1f}"),
+        ("lead_in_s", f"{live['lead_in']:.1f}"),
     ):
         print(f"{key}={val}")
     return 0 if value >= SEUIL else 1
