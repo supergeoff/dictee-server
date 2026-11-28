@@ -433,20 +433,20 @@ async def test_a_failure_of_nemo_leaves_no_trace_in_the_logs(services, fake_nemo
 
 def with_glossary(task):
     """La même tâche, avec un glossaire d'une entrée qui a une variante."""
-    return replace(task, params=replace(task.params, glossary=(GlossaryEntry("Septeo", ("septéo",)),)))
+    return replace(task, params=replace(task.params, glossary=(GlossaryEntry("Tarvel", ("tarvél",)),)))
 
 
 async def test_a_chunk_is_corrected_with_the_glossary_of_the_task(services, fake_nemo):
-    words = (Word("Le", 0.0, 0.2), Word("projet", 0.3, 0.6), Word("septéo.", 0.7, 1.0))
-    fake_nemo.chunks = [Final("Le projet septéo.", words)]
+    words = (Word("Le", 0.0, 0.2), Word("projet", 0.3, 0.6), Word("tarvél.", 0.7, 1.0))
+    fake_nemo.chunks = [Final("Le projet tarvél.", words)]
     result = await process(services, with_glossary(audio_task(services, 3.0)), RunStats())
-    assert result.text == "Le projet Septeo."
-    assert [word.text for word in result.words] == ["Le", "projet", "Septeo."]
+    assert result.text == "Le projet Tarvel."
+    assert [word.text for word in result.words] == ["Le", "projet", "Tarvel."]
 
 
 async def test_a_meeting_is_corrected_with_the_glossary_of_the_task(services, fake_nemo):
-    fake_nemo.finals = (Final("Le projet septéo.", (Word("Le", 0.0, 0.2, "0"), Word("septéo.", 0.7, 1.0, "0"))),)
+    fake_nemo.finals = (Final("Le projet tarvél.", (Word("Le", 0.0, 0.2, "0"), Word("tarvél.", 0.7, 1.0, "0"))),)
     task = with_glossary(audio_task(services, 3.0, mode=Mode.DIARIZE))
     result = await process(services, task, RunStats())
-    assert result.text == "Le projet Septeo."
-    assert [word.text for word in result.words] == ["Le", "Septeo."]
+    assert result.text == "Le projet Tarvel."
+    assert [word.text for word in result.words] == ["Le", "Tarvel."]

@@ -1647,10 +1647,10 @@ def test_an_audio_decoded_to_zero_seconds_is_refused_like_an_unreadable_one(ask,
     take_every_place(transcriptions_client.app)
 
 
-def test_stream_is_corrected_with_the_glossary_of_the_user(openai_client, fake_nemo, db, tone_mp3):
+def stream_with_glossary(openai_client, db, tone_mp3) -> tuple[list[str], str]:
+    """Les deltas et le texte de `done` d'un flux d'Ana, dont le glossaire corrige « tarvél » en « Tarvel »."""
     user = db.upsert_user("sub-1", "Ana@Example.org", "Ana")
-    db.save_settings(user, glossary="Septeo (souvent entendu : septéo)")
-    fake_nemo.finals = (Partial("Le projet"), Final("Le projet septéo.", (Word("septéo.", 0.0, 1.0, "0"),)))
+    db.save_settings(user, glossary="Tarvel (souvent entendu : tarvél)")
     stream = openai_client.audio.transcriptions.create(
         model="whisper-1",
         file=("a.mp3", tone_mp3),
@@ -1658,4 +1658,28 @@ def test_stream_is_corrected_with_the_glossary_of_the_user(openai_client, fake_n
         extra_headers={"X-OpenWebUI-User-Email": "ana@example.org"},
     )
     events = list(stream)
-    assert events[-1].text == "Le projet Septeo."
+    return [e.delta for e in events if e.type == "transcript.text.delta"], events[-1].text
+
+
+def test_stream_is_corrected_with_the_glossary_of_the_user(openai_client, fake_nemo, db, tone_mp3):
+    fake_nemo.finals = (Partial("Le projet"), Final("Le projet tarvél.", (Word("tarvél.", 0.0, 1.0, "0"),)))
+    _, done = stream_with_glossary(openai_client, db, tone_mp3)
+    assert done == "Le projet Tarvel."
+
+
+def test_stream_sends_the_end_of_a_sentence_whose_variant_already_left_in_a_delta(
+    openai_client, fake_nemo, db, tone_mp3
+):
+    # La fin de la phrase se calcule sur le texte du moteur : le flux de deltas reste complet, `done` est corrigé.
+    fake_nemo.finals = (Partial("Le projet tarv"), Final("Le projet tarvél.", ()), Partial("Salut"), FINALS[1])
+    sent, done = stream_with_glossary(openai_client, db, tone_mp3)
+    assert sent == ["Le projet tarv", "él.", " Salut", "."]
+    assert done == "Le projet Tarvel. Salut."
+
+
+def test_stream_deltas_add_up_to_the_corrected_text_without_partials(openai_client, fake_nemo, db, tone_mp3):
+    # Sans texte partiel (comme avec `crispasr`), rien n'est parti avant la phrase finale : son delta est corrigé.
+    fake_nemo.finals = (Final("Le projet tarvél.", ()), Final("Salut tarvél.", ()))
+    sent, done = stream_with_glossary(openai_client, db, tone_mp3)
+    assert sent == ["Le projet Tarvel.", " Salut Tarvel."]
+    assert "".join(sent) == done

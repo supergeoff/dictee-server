@@ -502,8 +502,8 @@ def test_the_openai_sdk_runs_a_transcription_session(live_server, settings, fake
 
 def test_final_texts_are_corrected_with_the_account_and_prompt_glossaries(live_client, fake_nemo, db):
     headers, owner = personal_headers(db, "alice@example.test")
-    db.save_settings(owner, glossary="Septeo (souvent entendu : septéo)")
-    fake_nemo.live_turns = [[Final("le projet septéo et nemo tron", ())]]
+    db.save_settings(owner, glossary="Tarvel (souvent entendu : tarvél)")
+    fake_nemo.live_turns = [[Final("le projet tarvél et nemo tron", ())]]
     with open_live(live_client, headers) as ws:
         until(ws, "session.created")
         update(ws, transcription={"prompt": "Nemotron (souvent entendu : nemo tron)"})
@@ -511,7 +511,7 @@ def test_final_texts_are_corrected_with_the_account_and_prompt_glossaries(live_c
         ws.send_json({"type": "input_audio_buffer.append", "audio": pcm_b64(0.5, 24000)})
         ws.send_json({"type": "input_audio_buffer.commit"})
         completed = until(ws, COMPLETED)[-1]
-    assert completed["transcript"] == "le projet Septeo et Nemotron"
+    assert completed["transcript"] == "le projet Tarvel et Nemotron"
 
 
 @pytest.fixture

@@ -151,19 +151,20 @@ def resolve_voice(requested: str | None, profile_voice: str, available: Sequence
     donnent la voix du profil. Une voix de profil que le moteur ne propose pas (une voix d'un ancien moteur) donne
     `default_voice` et laisse un avertissement au journal : elle vient d'un réglage et non de la requête, donc le même
     nom reviendra à chaque appel. Si `default_voice` n'est pas non plus dans la liste, elle part telle quelle, le
-    moteur restant seul juge, avec un avertissement lui aussi ; aucun ne cite de texte à dire. Sans voix de repli
+    moteur restant seul juge, avec un avertissement lui aussi ; aucun ne cite de texte à dire. Une liste vide (le
+    moteur injoignable) ne laisse aucun avertissement : aucune voix n'est inconnue, la liste manque. Sans voix de repli
     (`default_voice` vide), la fonction rend une chaîne vide pour un nom inconnu, sans rien dire.
     """
     for voice in (requested, profile_voice):
         name = _engine_name(voice, available)
         if name is not None:
             return name
-    if profile_voice:
+    if profile_voice and available:
         logger.warning("voice unknown to engine name=%s", loggable(profile_voice))
     name = _engine_name(default_voice, available)
     if name is not None:
         return name
-    if default_voice and default_voice != profile_voice:
+    if default_voice and default_voice != profile_voice and available:
         logger.warning("default voice unknown to engine name=%s", loggable(default_voice))
     return default_voice
 

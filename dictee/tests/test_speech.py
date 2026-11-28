@@ -220,6 +220,14 @@ def test_resolve_voice_gives_the_default_voice_even_if_the_engine_does_not_list_
     assert log_lines(caplog) == ["voice unknown to engine name=Zorg", "default voice unknown to engine name=Lucien"]
 
 
+def test_resolve_voice_says_nothing_without_a_list_of_voices(caplog):
+    # Le moteur injoignable ne rend aucune liste : la voix n'est pas inconnue, il n'y a rien à quoi la comparer.
+    caplog.set_level(logging.DEBUG)
+    assert resolve_voice(None, "Zorg", (), "Lucien") == "Lucien"
+    assert resolve_voice("Leo", "", (), "Lucien") == "Lucien"
+    assert log_lines(caplog) == []
+
+
 def test_the_warning_about_an_unknown_profile_voice_cannot_forge_a_log_line(caplog):
     caplog.set_level(logging.DEBUG)
     resolve_voice(None, "Zorg\nuser=1 status=200 " + "y" * 200, ["John"], "John")

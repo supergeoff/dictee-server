@@ -184,9 +184,13 @@ class _DeltaFeed:
     """Découpe en deltas le texte que NeMo rend : un par `Partial`, puis le reste de la phrase finale de l'item.
 
     Le texte de `done` joint les phrases finales par une espace : le premier delta de chaque item, sauf du premier
-    item non vide, la porte, quelles que soient les espaces que NeMo met en tête de ses morceaux. Quand la phrase
-    finale ne commence pas par ce qui est déjà parti pour son item, rien de plus ne part : le texte de `done` fait
-    foi, la suite reprend avec l'item suivant, et `mismatches` compte ces items.
+    item non vide, la porte, quelles que soient les espaces que NeMo met en tête de ses morceaux. La phrase finale
+    arrive sous deux formes, celle du moteur et celle que le glossaire corrige. Quand des deltas sont déjà partis pour
+    l'item, ils portent le texte du moteur : la fin de la phrase se calcule sur la forme du moteur, et seul le texte de
+    `done` porte la correction. Quand rien n'est encore parti (un moteur sans texte partiel), le delta de la phrase
+    porte la forme corrigée, et les deltas mis bout à bout égalent `done`. Quand la phrase finale ne commence pas par
+    ce qui est déjà parti pour son item, rien de plus ne part : le texte de `done` fait foi, la suite reprend avec
+    l'item suivant, et `mismatches` compte ces items.
     """
 
     def __init__(self, emit: Callable[[str], None]) -> None:
@@ -199,8 +203,9 @@ class _DeltaFeed:
         # Le premier morceau d'un item perd ses espaces de tête : seule celle qui sépare les items est posée.
         self._send(text if self._item else text.lstrip())
 
-    def final(self, text: str) -> None:
-        """Termine l'item avec le texte de sa phrase finale, sans espaces autour, vide ou non."""
+    def final(self, raw: str, corrected: str) -> None:
+        """Termine l'item avec sa phrase finale, telle que le moteur la rend et corrigée, sans espaces autour."""
+        text = raw if self._item else corrected
         if text.startswith(self._item):
             self._send(text[len(self._item) :])
         else:
@@ -266,13 +271,13 @@ class _Job:
                             if feed is not None:
                                 feed.partial(event.text)
                             continue
-                        event = correct_final(event, self.profile.glossary)
-                        words.extend(event.words)
-                        text = event.text.strip()
+                        corrected = correct_final(event, self.profile.glossary)
+                        words.extend(corrected.words)
+                        text = corrected.text.strip()
                         if text:
                             texts.append(text)
                         if feed is not None:
-                            feed.final(text)
+                            feed.final(event.text.strip(), text)
             finally:
                 self.trace.nemo_ms = elapsed_ms(started)
                 if feed is not None:

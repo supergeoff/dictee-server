@@ -1,8 +1,10 @@
 """Correction du glossaire : dictee remplace lui-même, après la transcription, chaque variante entendue par son terme.
 
 Les moteurs n'appliquent pas le glossaire de l'appelant. La correction est déterministe : une variante se reconnaît
-par mot entier, sans tenir compte de la casse, et les variantes les plus longues passent d'abord. Elle ne journalise
-rien.
+sans tenir compte de la casse quand elle est bornée par autre chose qu'un caractère de mot (début ou fin du texte,
+espace, apostrophe, trait d'union, ponctuation), et les variantes les plus longues passent d'abord. La même règle vaut
+pour le texte et pour les mots, que le moteur rend avec l'élision et la ponctuation collées (`d'tarvél,`). Elle ne
+journalise rien.
 """
 
 import re
@@ -10,9 +12,6 @@ from collections.abc import Iterable, Sequence
 
 from dictee.profile import GlossaryEntry
 from dictee.types import Final, Word
-
-_LEADING = "«\"'(¿¡"
-_TRAILING = ".,;:!?…»\"')"
 
 
 def _key(variant: str) -> str:
@@ -40,16 +39,20 @@ def correct_text(text: str, entries: Iterable[GlossaryEntry]) -> str:
 
 
 def _word_pattern(token: str, *, first: bool, last: bool) -> re.Pattern[str]:
-    lead = f"(?P<lead>[{re.escape(_LEADING)}]*)" if first else ""
-    trail = f"(?P<trail>[{re.escape(_TRAILING)}]*)" if last else ""
-    return re.compile(f"{lead}{re.escape(token)}{trail}", re.IGNORECASE)
+    """Motif d'un mot qui porte `token` ; le premier mot garde ce qui précède la variante, le dernier ce qui la suit.
+
+    Comme dans `correct_text`, la variante doit être bornée dans le mot par autre chose qu'un caractère de mot.
+    """
+    lead = r"(?P<lead>.*?)(?<!\w)" if first else ""
+    trail = r"(?!\w)(?P<trail>.*)" if last else ""
+    return re.compile(f"{lead}{re.escape(token)}{trail}", re.IGNORECASE | re.DOTALL)
 
 
 def correct_words(words: Sequence[Word], entries: Iterable[GlossaryEntry]) -> tuple[Word, ...]:
     """Les mots dont chaque suite égale à une variante devient un seul mot du terme.
 
-    Le nouveau mot commence où commence le premier, finit où finit le dernier et garde la personne du premier. La
-    ponctuation collée à ses extrémités est gardée.
+    Le nouveau mot commence où commence le premier, finit où finit le dernier et garde la personne du premier. Ce qui
+    entoure la variante dans le premier et le dernier mot (élision, préfixe et trait d'union, ponctuation) est gardé.
     """
     terms = _terms_by_variant(entries)
     patterns = [

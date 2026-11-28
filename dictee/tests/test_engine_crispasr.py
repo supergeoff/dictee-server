@@ -70,7 +70,7 @@ async def test_chunk_posts_the_expected_request(crispasr, fake_crispasr):
 
 
 async def test_chunk_never_sends_hotwords(crispasr, fake_crispasr):
-    await chunk(crispasr, phrases=["Septeo"])
+    await chunk(crispasr, phrases=["Tarvel"])
     form = fake_crispasr.requests[0]["form"]
     assert "hotwords" not in form and "hotwords_boost" not in form
 
