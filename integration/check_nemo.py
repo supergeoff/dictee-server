@@ -497,7 +497,7 @@ def check_turns() -> None:
         f"endpointing_ms=500 : {len(before)} completed avant le commit (à {', '.join(f'{t:.1f} s' for t in before)}), "
         f"commit à {commit_at:.1f} s, fin {info_vad['ended_by']}, erreurs {errors_vad}"
     )
-    report("j", "Prises de parole", not errors and not errors_vad, f"NEMO_MANY_COMMITS={many}, SERVER_VAD={vad}")
+    report("j", "Prises de parole", not errors and not errors_vad, f"many_commits={many}, server_vad={vad}")
 
 
 def plain_words(text: str) -> list[str]:

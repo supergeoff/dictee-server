@@ -83,7 +83,12 @@ def test_unknown_route_uses_the_openai_envelope(client):
 
 def test_envelope_always_carries_the_four_openai_fields(client):
     error = client.get("/v1/nope").json()["error"]
-    assert error == {"message": "Not Found", "type": "invalid_request_error", "param": None, "code": None}
+    assert error == {
+        "message": "Not Found",
+        "type": "invalid_request_error",
+        "param": None,
+        "code": None,
+    }
 
 
 def test_method_not_allowed_keeps_its_allow_header(client):

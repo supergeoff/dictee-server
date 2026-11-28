@@ -64,8 +64,8 @@ def create_app(
     (`lane`, que les flux longs partagent avec elles) et les voix de la synthèse (`voices`, `None` jusqu'à la première
     lecture) sont rangés dans `app.state`. La base s'ouvre à `settings.db_path`, dossier parent créé au besoin. Sans
     `http`, l'app crée son client à son démarrage et le ferme à son arrêt ; un client fourni reste à la charge de
-    l'appelant. Sans `engines`, elle crée aussi à son démarrage les moteurs audio que les réglages nomment (`build_engines`), sur ce
-    client HTTP ; `app.state.engines` reste `None` jusque-là.
+    l'appelant. Sans `engines`, elle crée aussi à son démarrage les moteurs audio que les réglages nomment
+    (`build_engines`), sur ce client HTTP ; `app.state.engines` reste `None` jusque-là.
 
     Le démarrage crée `settings.tasks_dir`, range dans `app.state.runner` le `TaskRunner` qui travaille sur ces deux
     clients, et le démarre : il reprend les tâches restées en file ou en cours. L'arrêt de l'app arrête le runner, avant

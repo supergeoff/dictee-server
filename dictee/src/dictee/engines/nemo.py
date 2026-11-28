@@ -411,7 +411,7 @@ class NemoClient:
         return response
 
     async def speak(self, text: str, *, voice: str, language: str) -> bytes:
-        """Synthèse vocale : du PCM16 mono à `TTS_SAMPLE_RATE`, sans en-tête."""
+        """Synthèse vocale : du PCM16 mono à `sample_rate`, sans en-tête."""
         response = await self._request(
             "POST",
             "/v1/audio/speech",
@@ -452,7 +452,10 @@ class NemoClient:
         )
         try:
             body = response.json()
-            return Final(text=body["text"].strip(), words=tuple(_word(word) for word in body.get("words") or ()))
+            return Final(
+                text=body["text"].strip(),
+                words=tuple(_word(word) for word in body.get("words") or ()),
+            )
         except (ValueError, KeyError, TypeError, AttributeError):
             raise EngineError("NeMo answered with an unreadable transcription") from None
 

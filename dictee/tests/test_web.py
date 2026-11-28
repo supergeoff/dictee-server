@@ -508,7 +508,7 @@ OLD_CLASSES = {"status-badge", "status-retired", "status-saved", "discret", "voi
 
 
 def stylesheet(page: str) -> str:
-    return re.search(r"<style>(.*?)</style>", page, re.DOTALL).group(1)
+    return re.search(r"<style>(.*?)</style>", page, re.S).group(1)
 
 
 def declarations(block: str) -> dict[str, str]:
@@ -518,10 +518,8 @@ def declarations(block: str) -> dict[str, str]:
 def palettes(page: str) -> dict[str, dict[str, str]]:
     """Jetons déclarés pour le thème clair, puis pour le thème sombre que choisit le réglage du système."""
     css = stylesheet(page)
-    light = re.search(r':root, \[data-theme="light"\] \{(.*?)\n\}', css, re.DOTALL)
-    dark = re.search(
-        r"@media \(prefers-color-scheme: dark\) \{\s*:root:not\(\[data-theme\]\) \{(.*?)\n  \}", css, re.DOTALL
-    )
+    light = re.search(r':root, \[data-theme="light"\] \{(.*?)\n\}', css, re.S)
+    dark = re.search(r"@media \(prefers-color-scheme: dark\) \{\s*:root:not\(\[data-theme\]\) \{(.*?)\n  \}", css, re.S)
     assert light is not None and dark is not None
     # Les primitives (échelle de gris, teintes) ne sont déclarées qu'une fois, avec le thème clair, et valent pour les deux.
     primitives = declarations(light.group(1))
@@ -660,7 +658,7 @@ def test_pages_declare_the_icon_and_show_it_before_the_title(logged_in):
 def test_the_icon_has_an_outline_in_dark_mode(logged_in):
     # Son carré (#0a0a0a) se confond avec le fond sombre de la page : sans liseré, il ne reste qu'un D blanc isolé.
     # Stack UI fournit ce liseré (pour le réglage du système comme pour `data-theme`) : la page ne le redéfinit pas.
-    css = re.sub(r"/\*.*?\*/", "", stylesheet(logged_in.client.get("/").text), flags=re.DOTALL)
+    css = re.sub(r"/\*.*?\*/", "", stylesheet(logged_in.client.get("/").text), flags=re.S)
     outlines = re.findall(r"([^{}]*\.brand-wordmark img)\s*\{[^}]*drop-shadow\(", css)
     assert [selector.strip() for selector in outlines] == [
         '[data-theme="dark"] .brand-wordmark img',
@@ -678,7 +676,7 @@ def test_local_additions_are_only_what_stack_ui_does_not_cover(logged_in):
     local = stylesheet(page).split("/* Compléments propres à dictee")[1]
     assert "audio { max-width: 100%; }" in local
     for covered in ("drop-shadow", ".stack", ".page-header", "align-items"):
-        assert covered not in re.sub(r"/\*.*?\*/", "", local, flags=re.DOTALL), covered
+        assert covered not in re.sub(r"/\*.*?\*/", "", local, flags=re.S), covered
 
 
 BUTTON_CLASSES = {
@@ -732,12 +730,10 @@ def test_code_is_marked_with_the_stack_ui_class(logged_in):
 
 def test_notices_use_their_variants(logged_in, fake_nemo):
     saved = logged_in.client.get("/?saved=1").text
-    assert re.search(
-        r'class="notice notice-success" role="status"[^>]*>\s*(?:<[^>]+>\s*)*Modifications enregistrées', saved
-    )
+    assert re.search(r'class="notice notice-success" role="status"[^>]*>\s*(?:<[^>]+>\s*)*Modifications enregistrées', saved)
     created = logged_in.post("/keys", {"label": "Android"}).text
     assert re.search(r'class="notice notice-warning" role="alert"', created)
-    assert "notice-success" not in re.sub(r"<style>.*?</style>", "", created, flags=re.DOTALL)
+    assert "notice-success" not in re.sub(r"<style>.*?</style>", "", created, flags=re.S)
     logged_in.client.app.state.voices = None
     fake_nemo.error = EngineUnavailable("down")
     down = logged_in.client.get("/").text
@@ -755,7 +751,7 @@ def test_key_table_scrolls_on_its_own_and_marks_revoked_keys(logged_in):
 
 def test_voices_are_list_rows_that_keep_their_player(logged_in):
     page = logged_in.client.get("/").text
-    rows = re.findall(r'<div class="list-row">(.*?)</div>', page, re.DOTALL)
+    rows = re.findall(r'<div class="list-row">(.*?)</div>', page, re.S)
     assert len(rows) >= 2
     for row in rows:
         assert '<input type="radio" name="voice"' in row and "<audio controls" in row

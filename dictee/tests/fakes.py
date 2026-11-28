@@ -19,13 +19,19 @@ TTS_SAMPLE_RATE = 22050
 # Deux phrases finales de deux personnes, que la session temps réel de NeMo numérote « 0 » puis « 1 » : le texte
 # attendu est « Bonjour à tous. Salut. ».
 FINALS = (
-    Final("Bonjour à tous.", (Word("Bonjour", 0.0, 0.4, "0"), Word("à", 0.5, 0.6, "0"), Word("tous.", 0.6, 1.2, "0"))),
+    Final(
+        "Bonjour à tous.",
+        (Word("Bonjour", 0.0, 0.4, "0"), Word("à", 0.5, 0.6, "0"), Word("tous.", 0.6, 1.2, "0")),
+    ),
     Final("Salut.", (Word("Salut.", 2.0, 2.5, "1"),)),
 )
 
 # Le morceau que `transcribe_chunk` rend par défaut : le texte et les quatre mots de `FINALS`, que la route REST de
 # NeMo rend sans personne.
-CHUNK = Final("Bonjour à tous. Salut.", tuple(replace(word, speaker=None) for final in FINALS for word in final.words))
+CHUNK = Final(
+    "Bonjour à tous. Salut.",
+    tuple(replace(word, speaker=None) for final in FINALS for word in final.words),
+)
 
 # Voix de Magpie, comme la route `/v1/models` de NeMo les liste.
 VOICES = ["John", "Sofia", "Aria", "Jason", "Leo"]

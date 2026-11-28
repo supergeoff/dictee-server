@@ -132,7 +132,8 @@ def test_a_live_session_detects_the_language_by_default(live_client, service_hea
 
 
 @pytest.mark.parametrize(
-    "transcription", [{"languages": ["auto"]}, {"language": "auto"}, {"language": None}, {"language": "und"}]
+    "transcription",
+    [{"languages": ["auto"]}, {"language": "auto"}, {"language": None}, {"language": "und"}],
 )
 def test_a_live_session_asked_for_auto_detects_the_language(live_client, service_headers, fake_nemo, transcription):
     with open_live(live_client, service_headers) as ws:
@@ -378,7 +379,8 @@ def test_the_session_line_never_carries_any_text(live_client, fake_nemo, db, cap
 
 
 @pytest.mark.parametrize(
-    ("limits", "status"), [({"IDLE_TIMEOUT_S": 0.05}, "idle"), ({"MAX_AUDIO_S": 0.1}, "limit"), ({}, "overloaded")]
+    ("limits", "status"),
+    [({"IDLE_TIMEOUT_S": 0.05}, "idle"), ({"MAX_AUDIO_S": 0.1}, "limit"), ({}, "overloaded")],
 )
 def test_the_session_line_says_how_the_session_ended(
     live_client, service_headers, fake_nemo, monkeypatch, caplog, limits, status

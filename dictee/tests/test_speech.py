@@ -79,7 +79,7 @@ def test_split_does_not_cut_inside_a_number_or_a_domain_name():
 
 def test_split_keeps_a_closing_quote_with_its_sentence():
     text = 'Elle dit « Salut. » Puis elle part. Il répond "Non." Fin'
-    assert split_sentences(text) == ["Elle dit « Salut. »", "Puis elle part.", 'Il répond "Non."', "Fin"]
+    assert split_sentences(text) == ['Elle dit « Salut. »', "Puis elle part.", 'Il répond "Non."', "Fin"]
     assert split_sentences("Elle dit «\u00a0Salut.\u00a0» Puis") == ["Elle dit «\u00a0Salut.\u00a0»", "Puis"]
 
 
