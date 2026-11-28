@@ -361,12 +361,20 @@ class FakeCrispasr:
         self.fixture = fixture
         self.health_statuses = [200]
         self.transcription_statuses = [200]
+        self.transcription_delay = 0.0  # secondes que la transcription met à répondre
+        self.progress_body: dict | None = None  # corps de `/progress` ; sans lui, celui de `progress.json`
         self.requests: list[dict] = []
-        self.http = httpx.AsyncClient(transport=httpx.MockTransport(self._handle))
+        self.http = httpx.AsyncClient(transport=httpx.MockTransport(self._serve))
 
     @staticmethod
     def _next(statuses: list[int]) -> int:
         return statuses.pop(0) if len(statuses) > 1 else statuses[0]
+
+    async def _serve(self, request: httpx.Request) -> httpx.Response:
+        response = self._handle(request)
+        if request.url.path == "/v1/audio/transcriptions" and self.transcription_delay:
+            await asyncio.sleep(self.transcription_delay)
+        return response
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
         record = {"method": request.method, "path": request.url.path, "headers": dict(request.headers)}
@@ -378,6 +386,8 @@ class FakeCrispasr:
             return httpx.Response(status, json={"status": "ok", "backend": "parakeet"} if status == 200 else {"status": "loading"},
             )
         if request.url.path == "/progress":
+            if self.progress_body is not None:
+                return httpx.Response(200, json=self.progress_body)
             return httpx.Response(200, content=(CRISPASR_FIXTURES / "progress.json").read_bytes())
         if request.url.path == "/v1/audio/transcriptions":
             status = self._next(self.transcription_statuses)

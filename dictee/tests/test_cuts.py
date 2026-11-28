@@ -90,6 +90,21 @@ def test_a_tie_goes_to_the_earlier_silence():
     assert plan_cuts(65.0, [Silence(27.9, 28.1), Silence(31.9, 32.1)]) == pytest.approx([28.0])
 
 
+def test_plan_cuts_respects_max_chunk():
+    rng = random.Random(11)
+    for _ in range(200):
+        duration = rng.uniform(1.0, 600.0)
+        silences = random_silences(rng, duration)
+        bounds = chunk_bounds(duration, plan_cuts(duration, silences, max_chunk_s=15.0))
+        assert all(end - start <= 15.0 for start, end in bounds)
+        assert all(end - start >= 7.5 for start, end in bounds[:-1])
+
+
+def test_a_smaller_maximum_aims_for_three_quarters_of_it():
+    assert plan_cuts(25.0, [Silence(10.9, 11.3), Silence(19.0, 19.2)], max_chunk_s=15.0) == pytest.approx([11.1])
+    assert plan_cuts(20.0, [], max_chunk_s=15.0) == pytest.approx([11.25])
+
+
 def test_each_chunk_looks_from_its_own_start():
     assert plan_cuts(95.0, [Silence(31.0, 31.2), Silence(58.0, 59.0)]) == pytest.approx([31.1, 58.5])
 

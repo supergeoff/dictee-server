@@ -100,40 +100,44 @@ async def detect_silences(wav: Path, duration: float, *, timeout_s: float = 600.
     return silences
 
 
-def _next_cut(middles: Sequence[float], start: float) -> float:
+def _next_cut(middles: Sequence[float], start: float, max_chunk_s: float = MAX_CHUNK_S) -> float:
     """La coupe du morceau qui commence à `start`, parmi les milieux de silence `middles`, triés.
 
     C'est le milieu le plus proche de 30 s après `start` parmi ceux qui tombent entre 20 et 40 s après `start`, le
-    plus tôt à égalité ; sans milieu dans cette fenêtre, c'est `start` plus 30 s.
+    plus tôt à égalité ; sans milieu dans cette fenêtre, c'est `start` plus 30 s. Ces durées valent pour un morceau de
+    40 s au plus : avec un autre `max_chunk_s`, elles gardent leurs proportions (la moitié, les trois quarts, le tout).
     """
+    min_s = max_chunk_s * MIN_CHUNK_S / MAX_CHUNK_S
+    target_s = max_chunk_s * TARGET_CHUNK_S / MAX_CHUNK_S
 
     # La fenêtre se mesure par la soustraction que l'appelant fera pour la durée du morceau (`fin - début`) : une
-    # coupe retenue donne exactement un morceau de 20 à 40 s, sans l'arrondi qu'ajouterait un calcul de `start + 40`.
+    # coupe retenue donne exactement un morceau de la fenêtre, sans l'arrondi qu'ajouterait un calcul de `start + max`.
     def since_start(middle: float) -> float:
         return middle - start
 
-    first = bisect.bisect_left(middles, MIN_CHUNK_S, key=since_start)
-    last = bisect.bisect_right(middles, MAX_CHUNK_S, key=since_start)
+    first = bisect.bisect_left(middles, min_s, key=since_start)
+    last = bisect.bisect_right(middles, max_chunk_s, key=since_start)
     # `min` garde le premier des ex aequo, donc le plus tôt, puisque les milieux sont triés.
     return min(
         middles[first:last],
-        key=lambda middle: abs(since_start(middle) - TARGET_CHUNK_S),
-        default=start + TARGET_CHUNK_S,
+        key=lambda middle: abs(since_start(middle) - target_s),
+        default=start + target_s,
     )
 
 
-def plan_cuts(duration: float, silences: Sequence[Silence]) -> list[float]:
-    """Les points de coupe, en secondes, d'un audio de `duration` secondes : aucun morceau ne dépasse 40 s.
+def plan_cuts(duration: float, silences: Sequence[Silence], max_chunk_s: float = MAX_CHUNK_S) -> list[float]:
+    """Les points de coupe, en secondes, d'un audio de `duration` secondes : aucun morceau ne dépasse `max_chunk_s`.
 
-    Tant que le reste de l'audio dépasse 40 s, le morceau en cours se coupe dans le silence dont le milieu est le plus
-    proche de 30 s après son début, ou à 30 s sans silence entre 20 et 40 s. Un audio de 40 s ou moins n'a aucune coupe.
-    Chaque morceau fait de 20 à 40 s, sauf le dernier, qui prend ce qui reste et peut être plus court.
+    Tant que le reste de l'audio dépasse `max_chunk_s` (40 s par défaut), le morceau en cours se coupe dans le silence
+    dont le milieu est le plus proche de 30 s après son début, ou à 30 s sans silence entre 20 et 40 s. Un audio de
+    `max_chunk_s` ou moins n'a aucune coupe. Chaque morceau fait de la moitié du maximum au maximum, sauf le dernier,
+    qui prend ce qui reste et peut être plus court.
     """
     middles = sorted(silence.middle for silence in silences)
     cuts: list[float] = []
     start = 0.0
-    while duration - start > MAX_CHUNK_S:
-        start = _next_cut(middles, start)
+    while duration - start > max_chunk_s:
+        start = _next_cut(middles, start, max_chunk_s)
         cuts.append(start)
     return cuts
 

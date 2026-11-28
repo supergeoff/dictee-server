@@ -1,21 +1,28 @@
 """L'adaptateur CrispASR : morceaux de fichier, disponibilité, erreurs, et une tâche jouée de bout en bout."""
 
+import asyncio
+import contextlib
 import json
 
 import httpx
 import pytest
-from conftest import audio_task
+from conftest import audio_task, write_wav
 from fakes import CRISPASR_FIXTURES, FakeCrispasr, FakeNemo
 
 from dictee.engines import Engines
-from dictee.engines.crispasr import CrispasrTranscriber
+from dictee import cuts
+from dictee.cuts import Silence, chunk_bounds
+from dictee.engines import crispasr as crispasr_module
+from dictee.engines.crispasr import STREAM_CHUNK_S, CrispasrTranscriber
 from dictee.engines.ports import EngineError, EngineOverloaded, EngineUnavailable
 from dictee.processing import RunStats, Services, process
-from dictee.types import Word
+from dictee.speakers import label_speakers
+from dictee.types import Final, Word
 
 pytestmark = pytest.mark.anyio
 
 CHUNK = json.loads((CRISPASR_FIXTURES / "chunk.json").read_text())
+DIARIZED = json.loads((CRISPASR_FIXTURES / "diarized.json").read_text())
 
 
 @pytest.fixture
@@ -153,3 +160,170 @@ async def test_task_waits_while_engine_loads(crispasr_services, fake_crispasr):
     assert result.text == CHUNK["text"].strip()
     assert stats.retries == 1
     assert [r["path"] for r in fake_crispasr.requests].count("/health") == 2
+
+
+# Un fichier entier : avec les personnes en une requête, sans elles par morceaux coupés aux silences.
+
+
+async def run(adapter, wav, **kwargs) -> list:
+    """Les événements de `transcribe` sur `wav`, en français et sans glossaire."""
+    kwargs = {"language": "fr-FR", "phrases": (), "boost": 1.0, **kwargs}
+    async with contextlib.aclosing(adapter.transcribe(wav, **kwargs)) as events:
+        return [event async for event in events]
+
+
+@pytest.fixture
+def wav_40s(tmp_path):
+    path = tmp_path / "audio.wav"
+    write_wav(path, 40.0)
+    return path
+
+
+@pytest.fixture
+def fast_progress(monkeypatch):
+    monkeypatch.setattr(crispasr_module, "PROGRESS_EVERY_S", 0.01)
+
+
+async def test_speakers_request_asks_for_sortformer(tmp_path, fake_crispasr, crispasr):
+    fake_crispasr.fixture = "diarized.json"
+    wav = tmp_path / "audio.wav"
+    write_wav(wav, 3.0)
+    (final,) = await run(crispasr, wav, speakers=True)
+    (request,) = [r for r in fake_crispasr.requests if r["path"] == "/v1/audio/transcriptions"]
+    assert request["form"] == {
+        "response_format": "verbose_json",
+        "timestamp_granularities[]": "word",
+        "language": "fr",
+        "diarize": "true",
+        "diarize_method": "sortformer",
+    }
+    expected = [
+        Word(w["word"], w["start"], w["end"], segment["speaker"])
+        for segment in DIARIZED["segments"]
+        for w in segment["words"]
+    ]
+    assert final.words == tuple(expected)
+    assert {word.speaker for word in final.words} == {"A", "B"}
+    # Les lettres du serveur passent telles quelles par `label_speakers`, qui les garde dans l'ordre d'apparition.
+    assert [w.speaker for w in label_speakers(final.words)] == [w.speaker for w in final.words]
+
+
+async def test_speakers_send_the_whole_file_in_one_request(tmp_path, fake_crispasr, crispasr):
+    wav = tmp_path / "audio.wav"
+    write_wav(wav, 50.0)
+    await run(crispasr, wav, speakers=True)
+    assert [r["path"] for r in fake_crispasr.requests].count("/v1/audio/transcriptions") == 1
+
+
+@pytest.mark.usefixtures("fast_progress")
+async def test_progress_is_reported_as_fraction(tmp_path, fake_crispasr, crispasr):
+    fake_crispasr.progress_body = {"busy": True, "progress": 42}
+    fake_crispasr.transcription_delay = 0.1
+    wav = tmp_path / "audio.wav"
+    write_wav(wav, 3.0)
+    seen: list[float] = []
+    await run(crispasr, wav, speakers=True, on_progress=seen.append)
+    assert seen and set(seen) == {0.42}
+
+
+@pytest.mark.usefixtures("fast_progress")
+async def test_a_negative_progress_is_not_reported(tmp_path, fake_crispasr, crispasr):
+    fake_crispasr.progress_body = {"busy": False, "progress": -1}
+    fake_crispasr.transcription_delay = 0.1
+    wav = tmp_path / "audio.wav"
+    write_wav(wav, 3.0)
+    seen: list[float] = []
+    await run(crispasr, wav, speakers=True, on_progress=seen.append)
+    assert seen == []
+    assert any(r["path"] == "/progress" for r in fake_crispasr.requests)
+
+
+@pytest.mark.usefixtures("fast_progress")
+@pytest.mark.parametrize("body", [{"oops": 1}, {"progress": "x"}])
+async def test_an_unreadable_progress_does_not_fail_the_transcription(tmp_path, fake_crispasr, crispasr, body):
+    fake_crispasr.progress_body = body
+    fake_crispasr.transcription_delay = 0.1
+    wav = tmp_path / "audio.wav"
+    write_wav(wav, 3.0)
+    (final,) = await run(crispasr, wav, speakers=True, on_progress=lambda fraction: None)
+    assert final.text == CHUNK["text"].strip()
+
+
+@pytest.mark.usefixtures("fast_progress")
+async def test_a_failing_progress_route_does_not_fail_the_transcription(tmp_path, monkeypatch):
+    fake = FakeCrispasr()
+    fake.transcription_delay = 0.1
+    inner = fake.http._transport
+
+    async def handler(request):
+        if request.url.path == "/progress":
+            raise httpx.ConnectError("down")
+        return await inner.handle_async_request(request)
+
+    adapter = CrispasrTranscriber(
+        "http://crispasr.test", "k", httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    wav = tmp_path / "audio.wav"
+    write_wav(wav, 3.0)
+    (final,) = await run(adapter, wav, speakers=True, on_progress=lambda fraction: None)
+    assert final.text == CHUNK["text"].strip()
+
+
+@pytest.mark.usefixtures("fast_progress")
+async def test_closing_the_stream_stops_the_request_and_the_progress_reading(tmp_path, fake_crispasr, crispasr):
+    fake_crispasr.transcription_delay = 30.0
+    wav = tmp_path / "audio.wav"
+    write_wav(wav, 3.0)
+    before = set(asyncio.all_tasks())
+    task = asyncio.create_task(run(crispasr, wav, speakers=True, on_progress=lambda fraction: None))
+    await asyncio.sleep(0.1)
+    assert any(r["path"] == "/progress" for r in fake_crispasr.requests)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    seen = len(fake_crispasr.requests)
+    await asyncio.sleep(0.1)
+    assert len(fake_crispasr.requests) == seen
+    assert set(asyncio.all_tasks()) <= before | {asyncio.current_task()}
+
+
+async def test_speakers_error_is_translated(tmp_path, fake_crispasr, crispasr):
+    fake_crispasr.transcription_statuses = [429]
+    wav = tmp_path / "audio.wav"
+    write_wav(wav, 3.0)
+    with pytest.raises(EngineOverloaded):
+        await run(crispasr, wav, speakers=True)
+
+
+async def test_stream_yields_one_final_per_chunk(wav_40s, fake_crispasr, crispasr, monkeypatch):
+    async def silences(wav, duration):
+        return [Silence(11.8, 12.2), Silence(25.8, 26.2)]
+
+    monkeypatch.setattr(crispasr_module, "detect_silences", silences)
+    progress: list[float] = []
+    events = await run(crispasr, wav_40s, partials=True, on_progress=progress.append)
+    assert all(isinstance(event, Final) for event in events)
+    assert len(events) == 3
+    assert [event.words[0].start for event in events] == pytest.approx([0.0, 12.0, 26.0])
+    assert events[1].words[-1].end == pytest.approx(12.0 + CHUNK["segments"][-1]["words"][-1]["end"])
+    assert all(word.speaker is None for event in events for word in event.words)
+    assert progress == pytest.approx([12 / 40, 26 / 40, 1.0])
+    assert [r["path"] for r in fake_crispasr.requests] == ["/v1/audio/transcriptions"] * 3
+    assert all("diarize" not in r["form"] for r in fake_crispasr.requests)
+
+
+async def test_a_short_file_is_one_chunk(tmp_path, fake_crispasr, crispasr):
+    wav = tmp_path / "audio.wav"
+    write_wav(wav, STREAM_CHUNK_S)
+    events = await run(crispasr, wav)
+    assert len(events) == 1 and events[0].words[0] == Word("Bonjour,", 0.0, 0.64)
+
+
+async def test_stream_chunks_stay_under_the_limit(wav_40s, crispasr, monkeypatch):
+    async def silences(wav, duration):
+        return []
+
+    monkeypatch.setattr(crispasr_module, "detect_silences", silences)
+    events = await run(crispasr, wav_40s)
+    assert len(events) == len(chunk_bounds(40.0, cuts.plan_cuts(40.0, [], STREAM_CHUNK_S)))
+    assert len(events) >= 3

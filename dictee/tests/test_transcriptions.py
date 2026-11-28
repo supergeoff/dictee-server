@@ -19,12 +19,15 @@ import anyio
 import httpx
 import pytest
 from conftest import make_audio, personal_headers, wait_until, write_wav
-from fakes import FINALS, FakeNemo, engines_of
+from fakes import CRISPASR_FIXTURES, FINALS, FakeCrispasr, FakeNemo, engines_of
 from starlette.testclient import TestClient
+from test_cuts import wav_with_silences
 
 from dictee import audio as audio_module
 from dictee import transcribe
 from dictee.app import create_app
+from dictee.engines import Engines
+from dictee.engines.crispasr import CrispasrTranscriber
 from dictee.engines.ports import EngineError, EngineOverloaded, EngineUnavailable
 from dictee.errors import ApiError
 from dictee.taskstore import TERMINAL_STATUSES, TaskStatus
@@ -453,6 +456,21 @@ def sent_events(sent: list) -> list[dict]:
 
 def deltas(events: list[dict]) -> list[str]:
     return [event["delta"] for event in events if event["type"] == "transcript.text.delta"]
+
+
+def test_stream_emits_one_delta_per_chunk_on_crispasr(settings, service_headers, fake_nemo, fake_llm, tmp_path):
+    # 40 s coupées aux silences de 12 s et de 26 s : trois morceaux de 15 s au plus, donc trois deltas.
+    wav = wav_with_silences(tmp_path, 40.0, [(11.8, 12.2), (25.8, 26.2)])
+    fake = FakeCrispasr()
+    crispasr = CrispasrTranscriber("http://crispasr.test", "k", fake.http)
+    app = create_app(settings, engines=Engines(stt=crispasr, live=fake_nemo, tts=fake_nemo), http=fake_llm.http)
+    text = json.loads((CRISPASR_FIXTURES / "chunk.json").read_text())["text"].strip()
+    with TestClient(app, base_url="https://testserver") as client:
+        response = post(client, service_headers, wav.read_bytes(), stream="true")
+    events = sse_events(response)
+    assert deltas(events) == [text, " " + text, " " + text]
+    assert events[-1] == {"type": "transcript.text.done", "text": " ".join([text] * 3)}
+    assert [r["path"] for r in fake.requests].count("/v1/audio/transcriptions") == 3
 
 
 def test_stream_sends_a_delta_per_partial_then_the_rest_of_the_final(ask, fake_nemo):

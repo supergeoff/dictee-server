@@ -1,14 +1,18 @@
-"""Client du serveur CrispASR : transcription d'un morceau d'audio par HTTP et disponibilité du serveur.
+"""Client du serveur CrispASR : transcription d'un fichier ou d'un morceau d'audio par HTTP et disponibilité du serveur.
 
 Rien n'est journalisé ici : ni le texte transcrit, ni l'audio. Les messages des exceptions ne reprennent jamais le
 corps d'une réponse, qui peut citer le texte transcrit.
 """
 
+import asyncio
 from collections.abc import AsyncIterator, Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
 
+from dictee.audio import SAMPLE_WIDTH, TRANSCRIPTION_RATE, WAV_HEADER_SIZE, read_wav_slice
+from dictee.cuts import chunk_bounds, detect_silences, plan_cuts
 from dictee.engines.ports import EngineError, EngineOverloaded, EngineUnavailable
 from dictee.modes import is_auto_language, to_iso_language
 from dictee.types import Final, Partial, Word
@@ -20,19 +24,48 @@ OPEN_TIMEOUT = 10.0  # ouverture d'une connexion HTTP
 # avant sa réponse serait renvoyée alors que le serveur la traite encore.
 CHUNK_TIMEOUT = 600.0
 READY_TIMEOUT = 5.0
+PROGRESS_TIMEOUT = 5.0  # lecture de `/progress`
+PROGRESS_EVERY_S = 5.0  # intervalle des lectures de `/progress` pendant un fichier avec locuteurs
+# Un morceau d'un fichier sans locuteurs dure 15 s au plus : la route émet un `transcript.text.delta` par morceau fini.
+STREAM_CHUNK_S = 15.0
 
 
-def _word(word: dict) -> Word:
-    """Un mot de la réponse `verbose_json` : son texte et ses instants, sans personne."""
-    return Word(text=word["word"], start=float(word["start"]), end=float(word["end"]))
+def _word(word: dict, speaker: object = None) -> Word:
+    """Un mot de la réponse `verbose_json` : son texte, ses instants et la personne de son segment (`None` sans elle)."""
+    return Word(
+        text=word["word"],
+        start=float(word["start"]),
+        end=float(word["end"]),
+        speaker=None if speaker is None else str(speaker),
+    )
+
+
+def _final(response: httpx.Response, *, with_speakers: bool = False) -> Final:
+    """Le `Final` d'une réponse `verbose_json` ; `with_speakers` donne à chaque mot la personne de son segment.
+
+    Le texte est celui de la réponse sans espaces autour, et les mots sont ceux de tous les segments, dans l'ordre.
+    Lève `EngineError` pour une réponse 200 qui n'est pas une transcription lisible.
+    """
+    try:
+        body = response.json()
+        return Final(
+            text=body["text"].strip(),
+            words=tuple(
+                _word(word, segment.get("speaker") if with_speakers else None)
+                for segment in body["segments"]
+                for word in segment.get("words") or ()
+            ),
+        )
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise EngineError("CrispASR answered with an unreadable transcription") from None
 
 
 class CrispasrTranscriber:
     """Les appels de dictee au serveur CrispASR ; `http` est le client HTTP partagé de l'app.
 
     Il joue le rôle `FileTranscriber`. Il déclare qu'il marque les personnes (`speakers`) et suit la progression d'un
-    fichier (`progress`) : le serveur le fait par `diarize=true` et `GET /progress`, ce que la transcription d'un
-    fichier entier mettra en œuvre. Pour l'instant, seuls `transcribe_chunk` et `ready` sont écrits.
+    fichier (`progress`) : le serveur le fait par `diarize=true` et `GET /progress`, ce que `transcribe` met en œuvre
+    pour un fichier entier.
     """
 
     speakers = True
@@ -70,7 +103,7 @@ class CrispasrTranscriber:
             raise EngineError(f"CrispASR answered HTTP {response.status_code}")
         return response
 
-    def transcribe(
+    async def transcribe(
         self,
         wav: Path,
         *,
@@ -81,38 +114,100 @@ class CrispasrTranscriber:
         partials: bool = False,
         on_progress: Callable[[float], None] | None = None,
     ) -> AsyncIterator[Final | Partial]:
-        """Pas encore écrite : la transcription d'un fichier entier est l'objet d'une tâche suivante."""
-        raise NotImplementedError("CrispASR file transcription is not written yet")
+        """Transcrit un fichier WAV entier ; aucun `Partial` ne sort, même avec `partials` : CrispASR n'en rend pas.
 
-    async def transcribe_chunk(self, wav: bytes, *, language: str, phrases: Sequence[str], boost: float) -> Final:
-        """Transcrit un morceau de WAV par `POST /v1/audio/transcriptions` ; rend son `Final`.
+        Avec `speakers`, le fichier part en une requête (`diarize=true`, `diarize_method=sortformer`) et sort en un
+        seul `Final`, dont chaque mot porte la personne de son segment, telle que le serveur la nomme. Pendant la
+        requête, `GET /progress` est lu toutes les `PROGRESS_EVERY_S` secondes et appelle `on_progress` avec une
+        fraction de 0 à 1. Sans `speakers`, le fichier est coupé aux silences en morceaux de `STREAM_CHUNK_S` au plus :
+        chaque morceau fini sort en un `Final` aux instants du fichier, puis `on_progress` reçoit la part de l'audio
+        faite. Fermer le générateur avant la fin arrête la requête en cours et la lecture de `/progress`.
+        """
+        if speakers:
+            yield await self._transcribe_whole(wav, language, on_progress)
+        else:
+            async for final in self._transcribe_chunks(wav, language, phrases, boost, on_progress):
+                yield final
+
+    async def _transcribe_whole(self, wav: Path, language: str, on_progress: Callable[[float], None] | None) -> Final:
+        """Le fichier entier en une requête avec les personnes, avec la lecture de `/progress` pendant l'attente."""
+        audio = await asyncio.to_thread(wav.read_bytes)
+        request = asyncio.create_task(
+            self._post_audio(audio, language, {"diarize": "true", "diarize_method": "sortformer"})
+        )
+        tasks = [request]
+        if on_progress is not None:
+            tasks.append(asyncio.create_task(self._read_progress(on_progress)))
+        try:
+            response = await request
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        return _final(response, with_speakers=True)
+
+    async def _read_progress(self, on_progress: Callable[[float], None]) -> None:
+        """Lit `GET /progress` toutes les `PROGRESS_EVERY_S` secondes ; une erreur sur la route est ignorée."""
+        while True:
+            try:
+                response = await self._request("GET", "/progress", timeout=PROGRESS_TIMEOUT)
+                percent = float(response.json()["progress"])
+                if 0 <= percent <= 100:
+                    on_progress(percent / 100)
+            except (EngineUnavailable, EngineOverloaded, EngineError, ValueError, KeyError, TypeError):
+                pass
+            await asyncio.sleep(PROGRESS_EVERY_S)
+
+    async def _transcribe_chunks(
+        self,
+        wav: Path,
+        language: str,
+        phrases: Sequence[str],
+        boost: float,
+        on_progress: Callable[[float], None] | None,
+    ) -> AsyncIterator[Final]:
+        """Les morceaux du fichier, coupés aux silences, un `Final` par morceau fini."""
+        duration = (wav.stat().st_size - WAV_HEADER_SIZE) / SAMPLE_WIDTH / TRANSCRIPTION_RATE
+        cuts: list[float] = []
+        if duration > STREAM_CHUNK_S:
+            cuts = plan_cuts(duration, await detect_silences(wav, duration), STREAM_CHUNK_S)
+        for start, end in chunk_bounds(duration, cuts):
+            final = await self.transcribe_chunk(
+                read_wav_slice(wav, start, end), language=language, phrases=phrases, boost=boost
+            )
+            shifted = tuple(replace(word, start=word.start + start, end=word.end + start) for word in final.words)
+            yield replace(final, words=shifted)
+            if on_progress is not None:
+                on_progress(end / duration)
+
+    async def _post_audio(self, wav: bytes, language: str, extra: dict[str, str] | None = None) -> httpx.Response:
+        """`POST /v1/audio/transcriptions` d'un WAV, avec les champs de formulaire de `extra` en plus.
 
         La langue part en ISO-639-1 (`fr-FR` donne `fr`) ; `auto` part tel quel et laisse CrispASR détecter la langue.
-        `phrases` et `boost` sont ignorés : l'adaptateur n'envoie jamais de hotwords. Le texte du `Final` est celui de
-        la réponse sans espaces autour, et ses mots sont ceux de tous les segments, dans l'ordre, sans personne.
-
-        Lève les erreurs de `_request`, et `EngineError` pour une réponse 200 qui n'est pas une transcription lisible.
         """
         data = {
             "response_format": "verbose_json",
             "timestamp_granularities[]": "word",
             "language": "auto" if is_auto_language(language) else to_iso_language(language),
+            **(extra or {}),
         }
-        response = await self._request(
+        return await self._request(
             "POST",
             "/v1/audio/transcriptions",
             timeout=CHUNK_TIMEOUT,
             files={"file": ("audio.wav", wav, "audio/wav")},
             data=data,
         )
-        try:
-            body = response.json()
-            return Final(
-                text=body["text"].strip(),
-                words=tuple(_word(word) for segment in body["segments"] for word in segment.get("words") or ()),
-            )
-        except (ValueError, KeyError, TypeError, AttributeError):
-            raise EngineError("CrispASR answered with an unreadable transcription") from None
+
+    async def transcribe_chunk(self, wav: bytes, *, language: str, phrases: Sequence[str], boost: float) -> Final:
+        """Transcrit un morceau de WAV par `POST /v1/audio/transcriptions` ; rend son `Final`.
+
+        `phrases` et `boost` sont ignorés : l'adaptateur n'envoie jamais de hotwords. Le texte du `Final` est celui de
+        la réponse sans espaces autour, et ses mots sont ceux de tous les segments, dans l'ordre, sans personne.
+
+        Lève les erreurs de `_request`, et `EngineError` pour une réponse 200 qui n'est pas une transcription lisible.
+        """
+        return _final(await self._post_audio(wav, language))
 
     async def ready(self) -> bool:
         """Vrai seulement si `GET /health` répond 200 avec `status` à `ok` ; 503 (chargement) ou une panne rend faux."""
