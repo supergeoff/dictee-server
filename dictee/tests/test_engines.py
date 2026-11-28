@@ -7,8 +7,8 @@ from conftest import REQUIRED_ENV
 from fakes import FakeNemo
 
 from dictee.engines import Engines
-from dictee.engines.factory import _check, build_engines
 from dictee.engines.crispasr import CrispasrTranscriber
+from dictee.engines.factory import _check, build_engines
 from dictee.engines.nemo import NemoClient
 from dictee.engines.openai_tts import OpenAISpeech
 from dictee.settings import Settings

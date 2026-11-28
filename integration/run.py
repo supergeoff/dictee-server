@@ -22,7 +22,7 @@ contrôle annule à sa sortie les tâches qu'il a lancées et qui ne sont pas fi
 disparu de `/data/tasks`.
 
 Le script ne lit du `.env` que la clé de service et les réglages de la file des tâches longues, par
-`nemo_rt.env_value`, et n'affiche aucune valeur de ce fichier. Les audios produits vont dans `.integration/`, ignoré
+`common.env_value`, et n'affiche aucune valeur de ce fichier. Les audios produits vont dans `.integration/`, ignoré
 par git.
 """
 
@@ -52,9 +52,9 @@ import openai
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_nemo  # noqa: E402
-import nemo_rt  # noqa: E402
+import common  # noqa: E402
 
-ROOT = nemo_rt.ROOT
+ROOT = common.ROOT
 WORK = ROOT / ".integration"
 HOST, PORT = "127.0.0.1", 18000
 BASE_URL = f"http://{HOST}:{PORT}"
@@ -62,6 +62,10 @@ TRANSCRIPTIONS = "/v1/audio/transcriptions"
 
 # Fréquence de tous les formats de sortie de la synthèse de dictee (`dictee.audio`).
 SPEECH_RATE = 24000
+# Durée minimale de l'audio du contrôle `stream` : assez long, avec des silences, pour plusieurs morceaux.
+STREAM_SECONDS = 30.0
+# Les deux voix du dialogue d'essai : une voix d'homme et une voix de femme, que Sortformer distingue.
+DIALOGUE_VOICES = ("Lucien", "Hélène")
 MIN_WORDS_FOUND = 0.6
 SPEED_TOLERANCE = 0.10
 # Une transcription est longue au-delà de LONG_AUDIO_SECONDS (600 s par défaut) : 11 minutes la dépassent.
@@ -96,6 +100,12 @@ IDLE_CPU = 10.0
 # Limites de mémoire de nemo et de dictee : celles du compose de Dokploy, reprises par compose.integration.yaml.
 NEMO_MEMORY_LIMIT = 3 * 1024**3
 DICTEE_MEMORY_LIMIT = 512 * 1024**2
+MEMORY_LIMITS = {
+    "crispasr": 3 * 1024**3,
+    "phonon": 768 * 1024**2,
+    "nemo": NEMO_MEMORY_LIMIT,
+    "dictee": DICTEE_MEMORY_LIMIT,
+}
 # Début de chaque format de synthèse (dictee/tests/test_audio.py, tâche 5). Le `pcm` n'a pas de signature.
 SIGNATURES = {
     "mp3": (b"ID3", b"\xff\xfb", b"\xff\xf3"),
@@ -173,12 +183,12 @@ def duration(pcm: bytes, rate: int = SPEECH_RATE) -> float:
 
 
 def setting(name: str, default: float) -> float:
-    """Un réglage de dictee lu par `nemo_rt.env_value`, ou sa valeur par défaut quand le `.env` ne le fixe pas.
+    """Un réglage de dictee lu par `common.env_value`, ou sa valeur par défaut quand le `.env` ne le fixe pas.
 
     La valeur n'est jamais affichée.
     """
     try:
-        return float(nemo_rt.env_value(name))
+        return float(common.env_value(name))
     except RuntimeError:
         return default
 
@@ -338,6 +348,7 @@ class State:
     dictee: str
     nemo_sampler: Sampler | None = None
     dictee_sampler: Sampler | None = None
+    service_samplers: dict[str, Sampler] = field(default_factory=dict)
     phrases: list[bytes] = field(default_factory=list)
     dialogue_pcm: bytes = b""
     dialogue: bytes = b""
@@ -354,11 +365,11 @@ class State:
 
     def fresh_dialogue(self) -> bytes:
         """Le dialogue avec une marque neuve : son envoi crée une tâche à lui."""
-        return nemo_rt.wav_file(mark(self.dialogue_pcm), SPEECH_RATE)
+        return common.wav_file(mark(self.dialogue_pcm), SPEECH_RATE)
 
     def medium_wav(self) -> bytes:
         """Le dialogue répété sur MEDIUM_SECONDS, sous le seuil des audios longs, avec une marque neuve."""
-        return nemo_rt.wav_file(mark(repeat_pcm(self.dialogue_pcm, SPEECH_RATE, MEDIUM_SECONDS)), SPEECH_RATE)
+        return common.wav_file(mark(repeat_pcm(self.dialogue_pcm, SPEECH_RATE, MEDIUM_SECONDS)), SPEECH_RATE)
 
     @property
     def medium_words(self) -> list[str]:
@@ -371,7 +382,7 @@ class State:
         """
         if not self._long:
             self._long = repeat_pcm(self.dialogue_pcm, SPEECH_RATE, LONG_SECONDS)
-        return nemo_rt.wav_file(mark(self._long), SPEECH_RATE)
+        return common.wav_file(mark(self._long), SPEECH_RATE)
 
     def speak(self, text: str, voice: str, fmt: str, speed: float | None = None) -> Speech:
         body: dict[str, object] = {"input": text, "voice": voice, "response_format": fmt}
@@ -520,10 +531,10 @@ def check_voice(state: State) -> str:
     La voix est celle du réglage `DEFAULT_VOICE` du `.env` de test, que le serveur de voix doit proposer.
     """
     text, _ = check_nemo.PHRASE_1
-    voice = nemo_rt.env_value("DEFAULT_VOICE")
+    voice = common.env_value("DEFAULT_VOICE")
     speech = state.speak(text, voice, "wav")
     try:
-        rate, pcm = nemo_rt.parse_wav(speech.data)
+        rate, pcm = common.parse_wav(speech.data)
     except ValueError as error:
         raise Failure(f"WAV illisible, {error}") from None
     expect(rate == SPEECH_RATE, f"{rate} Hz au lieu de {SPEECH_RATE} Hz")
@@ -537,11 +548,12 @@ def check_synthesis(state: State) -> str:
     Le dialogue porte la marque de ce lancement : ses transcriptions ne rejoignent pas celles d'un lancement précédent.
     """
     parts: list[str] = []
-    for index, (text, voice) in enumerate((check_nemo.PHRASE_1, check_nemo.PHRASE_2), start=1):
+    phrases = (check_nemo.PHRASE_1, check_nemo.PHRASE_2)
+    for index, ((text, _), voice) in enumerate(zip(phrases, DIALOGUE_VOICES), start=1):
         speech = state.speak(text, voice, "wav")
         expect(speech.data[:4] == b"RIFF", f"phrase {index} ({voice}) : la réponse ne commence pas par RIFF")
         try:
-            rate, pcm = nemo_rt.parse_wav(speech.data)
+            rate, pcm = common.parse_wav(speech.data)
         except ValueError as error:
             raise Failure(f"phrase {index} ({voice}) : WAV illisible, {error}") from None
         expect(rate == SPEECH_RATE, f"phrase {index} ({voice}) : {rate} Hz au lieu de {SPEECH_RATE} Hz")
@@ -573,34 +585,31 @@ def check_transcription(state: State) -> str:
 
 
 def check_language(state: State) -> str:
-    """Un audio anglais, envoyé sans langue puis avec `language=en`, rend les mêmes mots-clés.
+    """Le dialogue français, transcrit sans langue (détection automatique) puis avec `language=fr`, porte `fr`.
 
-    La synthèse de dictee ne parle que français : la phrase anglaise passe par celle de NeMo, sur son port d'essai.
+    Le cas anglais n'est plus couvert par l'intégration : la pile n'a plus de voix anglaise (phonon-40m-fr ne parle
+    que français) pour fabriquer l'audio d'essai.
     """
-    pcm = check_nemo.synth_pcm(check_nemo.EN_PHRASE_1, "en-US")
-    keywords = ["morning", "language"]
     parts: list[str] = []
-    for label, fields in (("sans langue", {}), ("language=en", {"language": "en"})):
-        wav = nemo_rt.wav_file(mark(pcm), check_nemo.RATE)
+    for label, fields in (("sans langue", {}), ("language=fr", {"language": "fr"})):
         response = state.http.post(
             TRANSCRIPTIONS,
-            data={"model": "dictee", "response_format": "json", **fields},
-            files={"file": ("audio.wav", wav, "audio/wav")},
+            data={"model": "dictee", "response_format": "verbose_json", **fields},
+            files={"file": ("audio.wav", state.fresh_dialogue(), "audio/wav")},
         )
         expect(response.status_code == 200, f"{label} : HTTP {response.status_code} {response.text[:200]}")
-        heard = words(response.json().get("text", ""))
-        found = [keyword for keyword in keywords if keyword in heard]
-        expect(found == keywords, f"{label} : mots-clés retrouvés {found} sur {keywords}, {len(heard)} mots")
-        parts.append(f"{label} : {len(found)} mots-clés sur {len(keywords)}, {len(heard)} mots")
+        language = response.json().get("language")
+        expect(language == "fr", f"{label} : langue {language!r} au lieu de 'fr'")
+        parts.append(f"{label} : fr")
     return ", ".join(parts)
 
 
 def check_diarize(state: State) -> str:
-    """Les personnes d'un dialogue, données par la session temps réel de NeMo, dans trois formats.
+    """Les personnes d'un dialogue à deux voix, dans trois formats.
 
     Les trois requêtes envoient le même audio en mode réunion : la première crée la tâche, les deux autres la
     rejoignent et reçoivent son résultat dans leur format. Le journal le confirme : une seule ligne de fin de tâche, en
-    mode `diarize` et sans morceaux (`chunks=-`), car une réunion passe en une seule session de NeMo, qui marque les
+    mode `diarize` et sans morceaux (`chunks=-`), car une réunion passe en une seule requête au moteur, qui marque les
     personnes pendant qu'elle transcrit.
     """
     wav = state.fresh_dialogue()
@@ -626,11 +635,11 @@ def check_diarize(state: State) -> str:
     expect(
         field_of(line, "mode") == "diarize" and field_of(line, "chunks") == "-",
         f"la tâche porte mode={field_of(line, 'mode')} chunks={field_of(line, 'chunks')} au lieu de "
-        "mode=diarize chunks=- (une seule session de NeMo)",
+        "mode=diarize chunks=- (une seule requête au moteur)",
     )
     return (
         f"{len(segments)} segments, locuteurs A et B, VTT avec <v A> et <v B>, SRT qui commence par 1 ; une seule "
-        "tâche pour les trois formats, en une session de NeMo (chunks=-)"
+        "tâche pour les trois formats, en une requête au moteur (chunks=-)"
     )
 
 
@@ -666,20 +675,23 @@ def stream_events(state: State, upload: tuple[str, bytes, str]) -> Streamed:
 
 
 def check_stream(state: State) -> str:
-    streamed = stream_events(state, state.upload())
+    """Un fichier de plus de 30 s avec des silences rend plusieurs deltas, un par morceau fini (spec : coupes aux
+    silences, morceaux de 15 s au plus), et leur concaténation redonne le texte de `transcript.text.done`."""
+    pcm = repeat_pcm(state.dialogue_pcm, SPEECH_RATE, STREAM_SECONDS)
+    expect(duration(pcm) > 30.0, f"audio de {duration(pcm):.1f} s seulement")
+    upload = ("stream.wav", common.wav_file(mark(pcm), SPEECH_RATE), "audio/wav")
+    streamed = stream_events(state, upload)
     expect(streamed.done is not None, "aucun événement transcript.text.done")
     expect(streamed.first_delta is not None, "aucun événement transcript.text.delta")
-    note(f"deltas : {streamed.deltas}")
-    # NeMo émet un delta tous les 1,12 s d'audio : le dialogue en donne plusieurs si dictee les relaie.
-    expect(len(streamed.deltas) > 1, f"{len(streamed.deltas)} delta seulement : dictee ne relaie pas ceux de NeMo")
+    expect(len(streamed.deltas) >= 2, f"{len(streamed.deltas)} delta seulement pour {duration(pcm):.0f} s d'audio")
     expect(
-        streamed.joined == streamed.done,
+        "".join(streamed.joined.split()) == "".join(streamed.done.split()),
         f"les deltas mis bout à bout {streamed.joined!r} diffèrent du texte final {streamed.done!r}",
     )
     return (
-        f"{len(streamed.deltas)} deltas dont la concaténation égale le texte de transcript.text.done ; premier delta "
-        f"après {streamed.first_delta:.1f} s, fin après {streamed.seconds:.1f} s "
-        f"({state.rest_seconds:.1f} s sans flux)"
+        f"{len(streamed.deltas)} deltas pour {duration(pcm):.0f} s d'audio, dont la concaténation égale le texte de "
+        f"transcript.text.done aux espaces près ; premier delta après {streamed.first_delta:.1f} s, fin après "
+        f"{streamed.seconds:.1f} s"
     )
 
 
@@ -1132,7 +1144,7 @@ def check_restart(state: State) -> str:
             expect(time.monotonic() < deadline, f"la tâche n'atteint pas deux morceaux en {TASK_TIMEOUT:.0f} s")
             time.sleep(POLL_INTERVAL)
         chunks = round(1 / step)
-        restart = check_nemo.compose("restart", "dictee")
+        restart = common.compose("restart", "dictee")
         expect(restart.returncode == 0, f"`compose restart dictee` a échoué : {restart.stderr.strip()[:300]}")
         healthy_s = wait_healthy(state)
         resumed = state.task(task_id)
@@ -1162,7 +1174,7 @@ CHECKS: list[tuple[str, str, Callable[[State], str], tuple[str, ...], bool]] = [
     ("voice", "Voix : WAV à 24000 Hz de plus d'une seconde", check_voice, ("health",), False),
     ("synthesis", "Synthèse des deux phrases en wav", check_synthesis, ("health",), False),
     ("transcription", "Transcription dictee du dialogue", check_transcription, ("synthesis",), False),
-    ("language", "Langue détectée sur un audio anglais", check_language, ("health",), False),
+    ("language", "Langue du dialogue français, détectée puis donnée", check_language, ("synthesis",), False),
     ("diarize", "dictee-diarize en diarized_json, vtt et srt", check_diarize, ("synthesis",), False),
     ("stream", "stream=true", check_stream, ("synthesis",), False),
     ("clean", "dictee-clean avec LiteLLM injoignable", check_clean, ("transcription",), False),
@@ -1202,14 +1214,19 @@ def run_check(state: State, title: str, func: Callable[[State], str], measure: b
 
 
 def peaks(state: State) -> str:
-    nemo = state.nemo_sampler.peak() if state.nemo_sampler else None
-    dictee = state.dictee_sampler.peak() if state.dictee_sampler else None
-    nemo_text = "inconnu" if nemo is None else f"{nemo / 1024**3:.2f} Gio"
-    dictee_text = "inconnu" if dictee is None else f"{dictee / 1024**2:.0f} Mio"
-    return (
-        f"pic de mémoire sur tout le script : nemo {nemo_text} (limite {NEMO_MEMORY_LIMIT / 1024**3:.0f} Gio), "
-        f"dictee {dictee_text} (limite {DICTEE_MEMORY_LIMIT / 1024**2:.0f} Mio)"
-    )
+    """Le pic de mémoire de chaque service de la pile démarrée : crispasr, phonon, dictee, et nemo s'il tourne."""
+    samplers = dict(state.service_samplers)
+    if state.nemo_sampler:
+        samplers["nemo"] = state.nemo_sampler
+    if state.dictee_sampler:
+        samplers["dictee"] = state.dictee_sampler
+    parts = []
+    for service, sampler in samplers.items():
+        peak = sampler.peak()
+        limit = MEMORY_LIMITS[service]
+        text = "inconnu" if peak is None else f"{peak / 1024**2:.0f} Mio"
+        parts.append(f"{service} {text} (limite {limit / 1024**2:.0f} Mio)")
+    return "pic de mémoire sur tout le script : " + ", ".join(parts)
 
 
 def main() -> int:
@@ -1228,7 +1245,7 @@ def main() -> int:
         parser.error(f"contrôle inconnu : {', '.join(sorted(unknown))}")
     selected = select(only) if only else CHECKS
 
-    key = nemo_rt.env_value("OPENWEBUI_SERVICE_KEY")
+    key = common.env_value("OPENWEBUI_SERVICE_KEY")
     WORK.mkdir(exist_ok=True)
     headers = {"Authorization": f"Bearer {key}"}
     with httpx.Client(base_url=BASE_URL, headers=headers, timeout=httpx.Timeout(900.0, connect=10.0)) as http:
@@ -1238,12 +1255,16 @@ def main() -> int:
             http,
             ai,
             nemo=check_nemo.nemo_container(),
-            dictee=check_nemo.compose("ps", "-q", "dictee").stdout.strip(),
+            dictee=common.compose("ps", "-q", "dictee").stdout.strip(),
         )
         if state.nemo:
             state.nemo_sampler = Sampler(state.nemo)
         if state.dictee:
             state.dictee_sampler = Sampler(state.dictee)
+        for service in ("crispasr", "phonon"):
+            container = common.compose("ps", "-q", service).stdout.strip()
+            if container:
+                state.service_samplers[service] = Sampler(container)
         passed = ran = 0
         failed = False
         try:
@@ -1257,7 +1278,7 @@ def main() -> int:
                     break
         finally:
             info(peaks(state))
-            for sampler in (state.nemo_sampler, state.dictee_sampler):
+            for sampler in (state.nemo_sampler, state.dictee_sampler, *state.service_samplers.values()):
                 if sampler:
                     sampler.stop()
     print(f"{passed} contrôle(s) OK sur {ran}" + (", arrêt au premier échec" if failed else ""), flush=True)

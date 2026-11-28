@@ -10,13 +10,11 @@ import sys
 import pytest
 
 import dictee
-import dictee.engines
 
 
 def _modules() -> list[str]:
-    names = [info.name for info in pkgutil.iter_modules(dictee.__path__, "dictee.")]
-    names += [info.name for info in pkgutil.iter_modules(dictee.engines.__path__, "dictee.engines.")]
-    return sorted(names)
+    """Tous les modules du paquet, sous-paquets compris."""
+    return sorted(info.name for info in pkgutil.walk_packages(dictee.__path__, "dictee."))
 
 
 @pytest.mark.parametrize("module", _modules())

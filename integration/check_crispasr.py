@@ -26,7 +26,7 @@ from pathlib import Path
 import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import nemo_rt  # noqa: E402
+import common  # noqa: E402
 
 BASE_URL = "http://127.0.0.1:18002"
 VOICE_URL = "http://127.0.0.1:18003"
@@ -77,14 +77,14 @@ def speak(text: str, voice: str) -> bytes:
 
 def dialogue() -> bytes:
     """Les deux phrases séparées d'une seconde de silence, en WAV 16 kHz."""
-    voice = nemo_rt.env_value("DEFAULT_VOICE")
+    voice = common.env_value("DEFAULT_VOICE")
     gap = bytes(RATE * 2)
     pcm = gap.join(resample(speak(text, voice), VOICE_RATE, RATE) for text in PHRASES)
-    return nemo_rt.wav_file(pcm, RATE)
+    return common.wav_file(pcm, RATE)
 
 
 def headers() -> dict[str, str]:
-    key = nemo_rt.env_value("CRISPASR_API_KEYS").split(",")[0].strip()
+    key = common.env_value("CRISPASR_API_KEYS").split(",")[0].strip()
     return {"Authorization": f"Bearer {key}"}
 
 
@@ -131,7 +131,7 @@ def check_words(audio: Callable[[], bytes]) -> str:
 
 
 def check_speakers(audio: Callable[[], bytes]) -> str:
-    segments = segments_of(transcribe(audio(),{"diarize": "true", "diarize_method": "sortformer"}))
+    segments = segments_of(transcribe(audio(), {"diarize": "true", "diarize_method": "sortformer"}))
     speakers = {segment.get("speaker") for segment in segments}
     expect(None not in speakers, "un segment sans locuteur")
     return f"{len(segments)} segments, locuteurs {sorted(speakers)}"

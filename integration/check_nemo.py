@@ -30,6 +30,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import nemo_rt  # noqa: E402
+from common import compose, compose_base  # noqa: E402,F401
 
 ROOT = nemo_rt.ROOT
 WORK = ROOT / ".integration"
@@ -81,21 +82,6 @@ def report(letter: str, title: str, ok: bool, detail: str) -> None:
 
 def note(text: str) -> None:
     print(f"   {text}", flush=True)
-
-
-def compose_base() -> list[str]:
-    """Le binaire compose : `COMPOSE` s'il est fixé, sinon le plugin `docker compose`, sinon `docker-compose`."""
-    if os.environ.get("COMPOSE"):
-        return os.environ["COMPOSE"].split()
-    if subprocess.run(["docker", "compose", "version"], capture_output=True).returncode == 0:
-        return ["docker", "compose"]
-    return ["docker-compose"]
-
-
-def compose(*args: str) -> subprocess.CompletedProcess[str]:
-    """Lance docker compose (plugin) ou docker-compose (binaire seul) sur le compose d'intégration."""
-    cmd = [*compose_base(), "-f", "compose.integration.yaml", *args]
-    return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
 
 
 def nemo_logs() -> str:
