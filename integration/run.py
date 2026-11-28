@@ -94,11 +94,13 @@ CLEARED_AUDIO_SECONDS = 1.0
 LIVE_FRAME_SECONDS = 0.5
 # Débit minimal, en octets par seconde, de l'envoi d'une requête à dictee : au-dessous, l'envoi échoue.
 SEND_MIN_RATE = 1024**2
-# CPU du moteur de transcription (en pourcents d'un cœur) au-dessus duquel il travaille, et au-dessous duquel il est au repos.
+# CPU du moteur de transcription (en pourcents d'un cœur) au-dessus duquel il travaille, et au-dessous duquel
+# il est au repos.
 BUSY_CPU = 50.0
 IDLE_CPU = 10.0
 # Limites de mémoire de chaque service : celles du compose de Dokploy, reprises par compose.integration.yaml.
 DICTEE_MEMORY_LIMIT = 512 * 1024**2
+TRANSCRIPTION_ENGINES = ("crispasr", "nemo")  # les services qui peuvent jouer le moteur de transcription
 MEMORY_LIMITS = {
     "crispasr": 3 * 1024**3,
     "phonon": 768 * 1024**2,
@@ -244,7 +246,7 @@ def cpu_percent(container: str) -> float:
     return float(out.stdout.strip().rstrip("%"))
 
 
-def wait_idle(state: "State", timeout: float = 90.0) -> float:
+def wait_idle(state: State, timeout: float = 90.0) -> float:
     """Attend que le CPU du moteur de transcription retombe sous IDLE_CPU deux relevés de suite ; rend les secondes.
 
     Échoue si le CPU ne retombe pas en `timeout` secondes : un contrôle qui part sur un moteur encore occupé
@@ -258,7 +260,10 @@ def wait_idle(state: "State", timeout: float = 90.0) -> float:
         calm = calm + 1 if last < IDLE_CPU else 0
         if calm == 2:
             return time.monotonic() - started
-    raise Failure(f"{state.engine} ne retombe pas sous {IDLE_CPU:.0f} % de CPU en {timeout:.0f} s (dernier relevé {last:.0f} %)")
+    raise Failure(
+        f"{state.engine} ne retombe pas sous {IDLE_CPU:.0f} % de CPU en {timeout:.0f} s "
+        f"(dernier relevé {last:.0f} %)"
+    )
 
 
 def multipart(fields: dict[str, str], filename: str, content: bytes) -> tuple[bytes, str]:
@@ -1018,12 +1023,16 @@ def check_stream_hangup(state: State) -> str:
         cpu.append(cpu_percent(state.engine_container))
     # `docker stats` donne le CPU de la seconde qui précède chaque relevé : le premier couvre l'instant du raccroché.
     info(
-        f"CPU de {state.engine} après le raccroché, pendant {HANGUP_WINDOW:.0f} s : {[round(value) for value in cpu]} % "
+        f"CPU de {state.engine} après le raccroché, pendant {HANGUP_WINDOW:.0f} s : "
+        f"{[round(value) for value in cpu]} % "
         "(le premier couvre l'instant du raccroché)"
     )
     # La courte reste sous la limite ci-dessous même quand le moteur traite encore une longue : seul le CPU prouve
     # que le fichier abandonné n'est plus traité.
-    expect(cpu[-1] < BUSY_CPU, f"{state.engine} encore à {cpu[-1]:.0f} % de CPU {HANGUP_WINDOW:.0f} s après le raccroché")
+    expect(
+        cpu[-1] < BUSY_CPU,
+        f"{state.engine} encore à {cpu[-1]:.0f} % de CPU {HANGUP_WINDOW:.0f} s après le raccroché",
+    )
     short = state.transcribe_result(state.fresh_dialogue())
     expect(short.status == 200 and short.text, f"la courte après le raccroché : HTTP {short.status} {short.body}")
     limit = 2 * state.rest_seconds + 5
@@ -1046,14 +1055,17 @@ def check_long_stream(state: State) -> str:
     streamed = stream_events(state, ("long.wav", state.long_wav(), "audio/wav"))
     expect(streamed.done is not None, "aucun événement transcript.text.done")
     expect(streamed.first_delta is not None, "aucun événement transcript.text.delta")
-    expect(len(streamed.deltas) > 1, f"{len(streamed.deltas)} delta seulement : un fichier long rend un delta par morceau fini")
+    expect(
+        len(streamed.deltas) > 1,
+        f"{len(streamed.deltas)} delta seulement : un fichier long rend un delta par morceau fini",
+    )
     joined, done = streamed.joined, streamed.done
     if joined != done:
-        common = next((i for i, (a, b) in enumerate(zip(joined, done)) if a != b), min(len(joined), len(done)))
+        shared = next((i for i, (a, b) in enumerate(zip(joined, done)) if a != b), min(len(joined), len(done)))
         raise Failure(
-            f"les deltas mis bout à bout diffèrent du texte de done à partir du caractère {common} "
-            f"(deltas {len(joined)} caractères, done {len(done)}) : deltas {joined[common : common + 40]!r}, "
-            f"done {done[common : common + 40]!r}"
+            f"les deltas mis bout à bout diffèrent du texte de done à partir du caractère {shared} "
+            f"(deltas {len(joined)} caractères, done {len(done)}) : deltas {joined[shared : shared + 40]!r}, "
+            f"done {done[shared : shared + 40]!r}"
         )
     deadline = time.monotonic() + LOG_TIMEOUT
     while not request_lines(state.dictee_lines()[before:]):
@@ -1222,9 +1234,12 @@ def run_check(state: State, title: str, func: Callable[[State], str], measure: b
 def stt_service() -> str:
     """Le service compose du moteur de transcription de la pile : `STT_ENGINE` du `.env` de test, `nemo` sans elle."""
     try:
-        return common.env_value("STT_ENGINE") or "nemo"
+        engine = common.env_value("STT_ENGINE") or "nemo"
     except RuntimeError:
-        return "nemo"
+        engine = "nemo"
+    if engine not in TRANSCRIPTION_ENGINES:
+        raise SystemExit(f"STT_ENGINE doit être l'un de {', '.join(TRANSCRIPTION_ENGINES)}, reçu {engine!r}")
+    return engine
 
 
 def peaks(state: State) -> str:
