@@ -1,10 +1,10 @@
 # `docker compose` (plugin) ou `docker-compose` (binaire seul) selon ce que la machine fournit.
 COMPOSE ?= $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
 COMPOSE_FILES = -f compose.integration.yaml
-# Tant que LIVE_ENGINE vaut `nemo` dans le .env de test (integration/make-env.sh), la dictée en direct passe par NeMo :
-# les services `models` et `nemo`, derrière le profil compose `nemo`, doivent démarrer. COMPOSE_PROFILES est exportée, donc
-# lue aussi par les scripts d'integration/ qui appellent compose. La tâche 8 (LIVE_ENGINE=crispasr-stream) vide cette ligne.
-export COMPOSE_PROFILES = nemo
+# Aucun rôle du .env de test ne passe par NeMo (integration/make-env.sh, LIVE_ENGINE=crispasr-stream) : le profil compose
+# `nemo`, qui porte les services `models` et `nemo`, reste éteint. COMPOSE_PROFILES est exportée, donc lue aussi par les
+# scripts d'integration/ qui appellent compose. `make nemo-up` démarre encore ces deux services en les nommant.
+export COMPOSE_PROFILES =
 
 .PHONY: check-crispasr-version check-nemo-version check-s2s-version down integration nemo-up s2s-check test
 
@@ -16,7 +16,7 @@ nemo-up: check-nemo-version .env
 	$(COMPOSE) $(COMPOSE_FILES) up -d --build models nemo
 
 # La version de NeMo-Speech.cpp n'est écrite nulle part dans ce dépôt : elle vient du compose de Dokploy, seule source.
-# On la donne à chaque lancement qui construit l'image : NEMO_VERSION=<version> make integration.
+# On la donne à chaque lancement qui construit l'image : NEMO_VERSION=<version> make nemo-up.
 # Le contrôle teste la variable d'environnement, celle que compose reçoit.
 check-nemo-version:
 	@test -n "$$NEMO_VERSION" || { echo "NEMO_VERSION est requise : la valeur de NEMO_VERSION dans les args du compose dictee de Dokploy (NEMO_VERSION=<version> make integration)" >&2; exit 1; }
@@ -49,12 +49,12 @@ test:
 	docker build --target test -t dictee-test dictee
 	docker run --rm dictee-test uv run --frozen pytest -q $(ARGS)
 
-# Demande CRISPASR_VERSION, NEMO_VERSION, PTTS_MODEL (hf://gradium/phonon-40m-fr@<commit>) et HF_TOKEN : les deux dernières
+# Demande CRISPASR_VERSION, PTTS_MODEL (hf://gradium/phonon-40m-fr@<commit>) et HF_TOKEN : les deux dernières
 # sont lues par integration/make-env.sh, qui fabrique le .env, et l'échec de cette cible .env arrête tout avant le démarrage.
 # Lance la stack complète avec les vrais modèles, attend /health (300 s au plus), puis joue integration/run.py.
 # La stack reste démarrée à la fin : `make down` l'arrête. Le script reçoit le binaire compose du Makefile.
 # Pour rejouer un seul contrôle sur la stack démarrée : uv run --script integration/run.py --only hangup (--help).
-integration: check-nemo-version check-crispasr-version .env
+integration: check-crispasr-version .env
 	$(COMPOSE) $(COMPOSE_FILES) up -d --build
 	@echo "Attente de dictee sur /health (300 s au plus)..."
 	@waited=0; \

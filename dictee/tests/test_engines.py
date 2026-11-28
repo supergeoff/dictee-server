@@ -8,6 +8,7 @@ from fakes import FakeNemo
 
 from dictee.engines import Engines
 from dictee.engines.crispasr import CrispasrTranscriber
+from dictee.engines.crispasr_stream import CrispasrLive
 from dictee.engines.factory import _check, build_engines
 from dictee.engines.nemo import NemoClient
 from dictee.engines.openai_tts import OpenAISpeech
@@ -89,3 +90,37 @@ def test_openai_replaces_only_the_synthesizer(http):
     assert engines.tts.sample_rate == 24000
     assert isinstance(engines.stt, NemoClient)
     assert engines.live is engines.stt
+
+
+def test_crispasr_stream_replaces_only_the_live_transcriber(http):
+    engines = build_engines(_settings(LIVE_ENGINE="crispasr-stream"), http)
+
+    assert isinstance(engines.live, CrispasrLive)
+    assert isinstance(engines.stt, NemoClient)
+    assert engines.tts is engines.stt
+
+
+def test_crispasr_stream_receives_its_settings_with_split_stream_args(http, monkeypatch):
+    created = []
+    monkeypatch.setattr(
+        "dictee.engines.factory.CrispasrLive", lambda *args, **kwargs: created.append((args, kwargs)) or FakeNemo()
+    )
+
+    build_engines(
+        _settings(
+            LIVE_ENGINE="crispasr-stream",
+            LIVE_COMMAND="/opt/crispasr/crispasr",
+            LIVE_MODEL_PATH="/models/live.gguf",
+            LIVE_MAX_SESSIONS="3",
+            LIVE_THREADS="2",
+            LIVE_STREAM_ARGS="--stream-length 8000 --keep 'a b'",
+        ),
+        http,
+    )
+
+    assert created == [
+        (
+            ("/opt/crispasr/crispasr", "/models/live.gguf"),
+            {"max_sessions": 3, "threads": 2, "stream_args": ["--stream-length", "8000", "--keep", "a b"]},
+        )
+    ]

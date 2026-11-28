@@ -3,18 +3,25 @@
 import base64
 import json
 import logging
+import struct
 import time
+from pathlib import Path
 
 import pytest
 from conftest import personal_headers
 from openai import OpenAI
+from starlette.testclient import TestClient
 
 from dictee import live
+from dictee.app import create_app
+from dictee.engines import Engines
+from dictee.engines.crispasr_stream import CrispasrLive
 from dictee.engines.ports import EngineError, EngineOverloaded
 from dictee.types import Final, Partial
 
 DELTA = "conversation.item.input_audio_transcription.delta"
 COMPLETED = "conversation.item.input_audio_transcription.completed"
+FAKE_CRISPASR_STREAM = str(Path(__file__).parent / "fixtures" / "fake_crispasr_stream.py")
 
 
 def wait_for(condition, timeout: float = 2.0) -> None:
@@ -505,3 +512,56 @@ def test_final_texts_are_corrected_with_the_account_and_prompt_glossaries(live_c
         ws.send_json({"type": "input_audio_buffer.commit"})
         completed = until(ws, COMPLETED)[-1]
     assert completed["transcript"] == "le projet Septeo et Nemotron"
+
+
+@pytest.fixture
+def crispasr_live(settings, fake_nemo, fake_llm, monkeypatch):
+    """`crispasr_live(max_sessions)` rend le client d'une app dont la dictée en direct passe par `CrispasrLive`, joué
+    par le faux binaire de `fixtures/fake_crispasr_stream.py` ; les autres rôles restent sur le faux NeMo."""
+    scenario = {"utterances": [{"partials": ["Bonjour", "Bonjour à", "Bonjour à tous"], "final": "Bonjour à tous."}]}
+    monkeypatch.setenv("FAKE_CRISPASR_SCENARIO", json.dumps(scenario))
+    clients = []
+
+    def make(max_sessions: int = 2) -> TestClient:
+        live_engine = CrispasrLive(FAKE_CRISPASR_STREAM, "/models/asr.gguf", max_sessions=max_sessions, threads=1)
+        app = create_app(settings, engines=Engines(stt=fake_nemo, live=live_engine, tts=fake_nemo), http=fake_llm.http)
+        clients.append(TestClient(app, base_url="https://testserver"))
+        return clients[-1].__enter__()
+
+    yield make
+    for test_client in clients:
+        test_client.__exit__(None, None, None)
+
+
+def speech_b64(seconds: float, rate: int) -> str:
+    """`seconds` secondes d'un signal constant PCM16 mono à `rate` Hz, que le faux CrispASR prend pour de la parole."""
+    return base64.b64encode(struct.pack("<h", 8000) * round(seconds * rate)).decode()
+
+
+def test_live_dictation_on_crispasr_stream(crispasr_live, service_headers):
+    with open_live(crispasr_live(), service_headers) as ws:
+        until(ws, "session.created")
+        ws.send_json({"type": "input_audio_buffer.append", "audio": speech_b64(3, 24000)})
+        ws.send_json({"type": "input_audio_buffer.commit"})
+        events = until(ws, COMPLETED)
+    deltas = [event["delta"] for event in events if event["type"] == DELTA]
+    kinds = [event["type"] for event in events if event["type"] != DELTA]
+    assert deltas == ["Bonjour", " à"]
+    assert kinds == ["input_audio_buffer.committed", COMPLETED]
+    assert (events[-1]["item_id"], events[-1]["transcript"]) == ("item_1", "Bonjour à tous.")
+    assert events[-1]["usage"] == {"type": "duration", "seconds": 3.0}
+
+
+def test_live_overloaded_closes_with_engine_busy(crispasr_live, service_headers):
+    client = crispasr_live(max_sessions=1)
+    with open_live(client, service_headers) as first:
+        until(first, "session.created")
+        # ffmpeg retient la fin d'un envoi jusqu'au suivant : 3 s font deux pas complets, donc un premier delta.
+        first.send_json({"type": "input_audio_buffer.append", "audio": speech_b64(3, 24000)})
+        until(first, DELTA)  # la session du premier client tient la seule place
+        with open_live(client, service_headers) as second:
+            until(second, "session.created")
+            second.send_json({"type": "input_audio_buffer.append", "audio": speech_b64(0.5, 24000)})
+            error = until(second, "error")[-1]["error"]
+            assert (error["type"], error["code"]) == ("rate_limit_error", "overloaded")
+            assert second.receive()["code"] == 1011

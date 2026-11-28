@@ -1,9 +1,12 @@
 """Construction des adaptateurs audio que les réglages nomment."""
 
+import shlex
+
 import httpx
 
 from dictee.engines import Engines
 from dictee.engines.crispasr import CrispasrTranscriber
+from dictee.engines.crispasr_stream import CrispasrLive
 from dictee.engines.nemo import NemoClient
 from dictee.engines.openai_tts import OpenAISpeech
 from dictee.settings import Settings
@@ -23,7 +26,8 @@ def build_engines(settings: Settings, http: httpx.AsyncClient) -> Engines:
 
     Un adaptateur n'est construit que si un rôle le choisit. Le moteur « nemo » est un seul client, partagé par les
     rôles qui le choisissent. Le moteur « crispasr » ne joue que le rôle de transcription de fichier (`STT_ENGINE`),
-    et le moteur « openai » que celui de synthèse (`TTS_ENGINE`).
+    le moteur « crispasr-stream » que celui de dictée en direct (`LIVE_ENGINE`), et le moteur « openai » que celui de
+    synthèse (`TTS_ENGINE`).
     """
 
     def nemo() -> NemoClient:
@@ -31,6 +35,15 @@ def build_engines(settings: Settings, http: httpx.AsyncClient) -> Engines:
 
     def crispasr() -> CrispasrTranscriber:
         return CrispasrTranscriber(settings.crispasr_url, settings.crispasr_api_key, http)
+
+    def crispasr_stream() -> CrispasrLive:
+        return CrispasrLive(
+            settings.live_command,
+            settings.live_model_path,
+            max_sessions=settings.live_max_sessions,
+            threads=settings.live_threads,
+            stream_args=shlex.split(settings.live_stream_args),
+        )
 
     def openai_speech() -> OpenAISpeech:
         return OpenAISpeech(
@@ -42,7 +55,7 @@ def build_engines(settings: Settings, http: httpx.AsyncClient) -> Engines:
 
     factories = {
         "STT_ENGINE": {"nemo": nemo, "crispasr": crispasr},
-        "LIVE_ENGINE": {"nemo": nemo},
+        "LIVE_ENGINE": {"nemo": nemo, "crispasr-stream": crispasr_stream},
         "TTS_ENGINE": {"nemo": nemo, "openai": openai_speech},
     }
     built: dict[str, object] = {}

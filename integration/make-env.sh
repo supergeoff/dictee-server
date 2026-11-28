@@ -3,10 +3,11 @@
 # Les clés sont aléatoires ; LiteLLM est injoignable exprès et les valeurs OIDC sont factices.
 # HF_TOKEN et PTTS_MODEL (hf://gradium/phonon-40m-fr@<commit>) viennent de l'environnement de celui qui lance, jamais du
 # dépôt. Si l'une manque, le script s'arrête en la nommant avant d'écrire quoi que ce soit.
-# Moteurs : transcription de fichier par CrispASR, voix par phonon (serveur compatible OpenAI). La dictée en direct reste
-# sur NeMo (LIVE_ENGINE=nemo) : l'adaptateur `crispasr-stream` n'existe pas encore et `build_engines` refuse cette valeur.
-# La tâche 8 passera LIVE_ENGINE à `crispasr-stream` et videra COMPOSE_PROFILES dans le Makefile. Un .env n'accepte pas de
-# commentaire : ce constat vit ici.
+# Moteurs : transcription de fichier par CrispASR, dictée en direct par un processus CrispASR que dictee lance pour
+# chaque session (LIVE_ENGINE=crispasr-stream, modèle LIVE_MODEL_PATH), voix par phonon (serveur compatible OpenAI).
+# Aucun rôle ne passe plus par NeMo : dictee ne lit plus NEMO_API_KEY. Les lignes NEMO_* restent parce que
+# `make nemo-up` démarre encore le service nemo avec ce .env, et que nemo/serve.sh exige NEMO_API_KEY,
+# NEMO_ASR_THREADS et NEMO_TTS_THREADS ; elles partiront avec NeMo. Un .env n'accepte pas de commentaire : ce constat vit ici.
 set -eu
 
 for name in HF_TOKEN PTTS_MODEL; do
@@ -35,7 +36,7 @@ DIAR_MODEL_URL=https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/main
 HF_TOKEN=${HF_TOKEN}
 LITELLM_API_KEY=sk-test-not-a-real-key
 LITELLM_URL=http://127.0.0.1:9
-LIVE_ENGINE=nemo
+LIVE_ENGINE=crispasr-stream
 LIVE_MODEL_PATH=/models/current/asr.gguf
 NEMO_API_KEY=$(openssl rand -hex 32)
 NEMO_ASR_THREADS=4

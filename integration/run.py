@@ -815,8 +815,8 @@ def check_live(state: State) -> str:
     """Une dictée en direct avec le client Python d'OpenAI, sur la première phrase Magpie à 24 kHz.
 
     La session se règle sans `turn_detection`, puis reçoit une seconde d'audio que le client vide par
-    `input_audio_buffer.clear` : dictee relaie le `clear` à NeMo et n'envoie `input_audio_buffer.cleared` qu'à sa
-    réponse, attendue CLEARED_TIMEOUT secondes au plus. La phrase entière part ensuite par trames, puis un commit ; le
+    `input_audio_buffer.clear` : dictee relaie le `clear` au moteur de dictée en direct de la pile (`LIVE_ENGINE`) et
+    envoie `input_audio_buffer.cleared` quand le moteur l'a confirmé, attendu CLEARED_TIMEOUT secondes au plus. La phrase entière part ensuite par trames, puis un commit ; le
     texte de `…transcription.completed` doit contenir au moins MIN_WORDS_FOUND de ses mots.
     """
     text, _ = check_nemo.PHRASE_1
