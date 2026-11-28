@@ -206,7 +206,10 @@ Cette section note ce que la construction a établi là où la spec laissait le 
 - **Modèle de détection de voix.** Il s'obtient par `VAD_MODEL_URL` et `VAD_MODEL_SHA256` (voir le tableau des variables) et se lit par `LIVE_VAD_MODEL_PATH` côté dictee.
 - **Langue.** Sans langue demandée, la réponse porte `und`, avec NeMo comme avec CrispASR. Interrogé avec `language=auto`, CrispASR annonce `en` sur un audio français : ce champ n'est pas une détection, et l'adaptateur ne le lit pas.
 - **Port WebSocket de CrispASR.** Il est écarté pour le direct : sa route Realtime ne rend de texte partiel que pour le moteur Nemotron, et elle répond seulement au commit pour parakeet.
-- **Intégration.** Tous les contrôles de `integration/run.py` passent sur x86_64 avec les nouveaux moteurs. Le contrôle de langue ne couvre plus le cas anglais, faute de voix anglaise.
+- **Intégration.** Tous les contrôles de `integration/run.py` passent sur x86_64 avec les nouveaux moteurs. Le contrôle de langue ne couvre plus le cas anglais, faute de voix anglaise. Sur une machine de développement x86_64, avec les nouveaux moteurs pour les trois rôles, les quatre contrôles de `integration/check_crispasr.py` et les dix-huit contrôles de `integration/run.py` passent, dictée en direct comprise.
+- **Mémoire par session du direct.** Les lignes « 1,7 Go » de cette spec sont des mesures d'avant la construction : elles venaient du banc, sur une réunion longue dite d'une traite. Mesurée dans le conteneur de dictee sur des dictées courtes, la mémoire est de 913 Mio avec une session et de 1,1 Gio avec deux, parce que le fichier du modèle (environ 570 Mio) est partagé entre les processus et que chaque session ajoute environ 220 Mio.
+- **Moteur en retard.** Quand le moteur de dictée en direct prend du retard sur l'audio reçu, la session garde l'audio en attente au lieu de bloquer la connexion, jusqu'à `MAX_PENDING_S` (120 s d'audio), puis la connexion reçoit l'erreur de saturation. Les silences du commit et du vidage ne sont jamais refusés.
+- **Licence du modèle de détection de voix.** Silero VAD (licence MIT, distribué par `ggml-org/whisper-vad`) s'ajoute aux mentions de licence de « Ce qui reste au constructeur », et il figure au README.
 
 ## Les enregistrements des mesures
 
