@@ -436,8 +436,8 @@ class NemoClient:
         morceau muet donne un `Final` au texte vide. Comme pour la session temps réel, le champ `prompt` de NeMo n'est
         jamais transmis, et `speech_contexts` ne part que s'il y a des termes.
 
-        Lève les erreurs de `_request` (`EngineUnavailable`, `EngineOverloaded`, `EngineError`), et `EngineError` pour une
-        réponse 200 qui n'est pas une transcription lisible. L'attente de la réponse va jusqu'à `CHUNK_TIMEOUT`
+        Lève les erreurs de `_request` (`EngineUnavailable`, `EngineOverloaded`, `EngineError`), et `EngineError` pour
+        une réponse 200 qui n'est pas une transcription lisible. L'attente de la réponse va jusqu'à `CHUNK_TIMEOUT`
         secondes, file de NeMo comprise.
         """
         data = {"language": language, "response_format": "verbose_json", "timestamp_granularities[]": "word"}

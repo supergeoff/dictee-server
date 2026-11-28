@@ -1,9 +1,9 @@
 """Route `POST /v1/audio/speech`, compatible avec celle d'OpenAI.
 
-La route découpe le texte en phrases, fait synthétiser la première par le moteur de voix avant d'ouvrir la réponse, puis rend le
-son au fil de l'eau : un seul ffmpeg encode le son de toutes les phrases, synthétisées l'une après l'autre. Rien n'est
-journalisé ici qui vienne du contenu : ni le texte à dire, ni l'audio. La ligne de chaque requête dit qui, quoi et
-comment elle s'est terminée.
+La route découpe le texte en phrases, fait synthétiser la première par le moteur de voix avant d'ouvrir la réponse,
+puis rend le son au fil de l'eau : un seul ffmpeg encode le son de toutes les phrases, synthétisées l'une après
+l'autre. Rien n'est journalisé ici qui vienne du contenu : ni le texte à dire, ni l'audio. La ligne de chaque requête
+dit qui, quoi et comment elle s'est terminée.
 
 Les pièces que la route de transcription partage sont dans `lifecycle` (tâches détachées, client qui raccroche) et
 `errors` (erreurs du moteur et erreur imprévue).
@@ -134,7 +134,7 @@ def split_sentences(text: str, max_chars: int = MAX_SENTENCE_CHARS) -> list[str]
 
 
 def _engine_name(voice: str | None, available: Sequence[str]) -> str | None:
-    """Nom de `voice` tel que le moteur l'écrit, sans tenir compte de la casse ; `None` si le moteur ne la propose pas."""
+    """Nom de `voice` tel que le moteur l'écrit, sans tenir compte de la casse ; `None` s'il ne la propose pas."""
     if voice:
         wanted = voice.casefold()
         for name in available:

@@ -47,7 +47,7 @@ PROGRESS_EVERY_S = 5.0
 
 @dataclass(frozen=True)
 class Services:
-    """Ce que le traitement d'une tâche utilise : le registre, les moteurs, les réglages et le client HTTP de `clean`."""
+    """Ce que le traitement d'une tâche utilise : registre, moteurs, réglages et client HTTP de `clean`."""
 
     store: TaskStore
     engines: Engines

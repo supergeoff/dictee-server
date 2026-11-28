@@ -32,7 +32,7 @@ STREAM_CHUNK_S = 15.0
 
 
 def _word(word: dict, speaker: object = None) -> Word:
-    """Un mot de la réponse `verbose_json` : son texte, ses instants et la personne de son segment (`None` sans elle)."""
+    """Un mot de la réponse `verbose_json` : son texte, ses instants et la personne de son segment (`None` sans)."""
     return Word(
         text=word["word"],
         start=float(word["start"]),
@@ -142,7 +142,7 @@ class CrispasrTranscriber:
         reader = None if on_progress is None else asyncio.create_task(self._read_progress(on_progress))
         tasks = [request] if reader is None else [request, reader]
         try:
-            # La lecture de `/progress` ne finit jamais d'elle-même : si elle se termine, c'est que `on_progress` a levé.
+            # La lecture de `/progress` ne finit jamais d'elle-même : si elle se termine, `on_progress` a levé.
             await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             if reader is not None and reader.done():
                 reader.result()

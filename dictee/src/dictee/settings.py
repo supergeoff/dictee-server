@@ -107,9 +107,8 @@ class Settings:
         Lève `ValueError` en nommant toutes les variables obligatoires absentes,
         ou la variable facultative dont la valeur n'a pas le bon type.
         """
-        engines = {
-            name: env[name] if _is_set(env.get(name)) else "nemo" for name in ("STT_ENGINE", "LIVE_ENGINE", "TTS_ENGINE")
-        }
+        engine_variables = ("STT_ENGINE", "LIVE_ENGINE", "TTS_ENGINE")
+        engines = {name: env[name] if _is_set(env.get(name)) else "nemo" for name in engine_variables}
         needed = list(_REQUIRED.values())
         if "nemo" in engines.values():
             needed.append("NEMO_API_KEY")

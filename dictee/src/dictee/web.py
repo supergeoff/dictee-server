@@ -66,8 +66,8 @@ PAGE_HEADERS = {
     ),
     "Cache-Control": "no-store",
 }
-# L'icône et sa version tactile (180 px sur fond plein, car iOS remplit en noir ce qui est transparent), tirée d'icon.svg.
-# Elles ne changent qu'avec une nouvelle image du serveur : le navigateur peut les garder un jour.
+# L'icône et sa version tactile (180 px sur fond plein, car iOS remplit en noir ce qui est transparent), tirée
+# d'icon.svg. Elles ne changent qu'avec une nouvelle image du serveur : le navigateur peut les garder un jour.
 ICON = files("dictee").joinpath("static/icon.svg").read_bytes()
 TOUCH_ICON = files("dictee").joinpath("static/apple-touch-icon.png").read_bytes()
 ICON_HEADERS = {"Cache-Control": "public, max-age=86400"}

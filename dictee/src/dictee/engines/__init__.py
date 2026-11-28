@@ -33,8 +33,8 @@ def build_engines(settings: Settings, http: httpx.AsyncClient) -> Engines:
     """Construit les adaptateurs que les réglages nomment ; `ValueError` si un nom est inconnu ou le choix incohérent.
 
     Un adaptateur n'est construit que si un rôle le choisit. Le moteur « nemo » est un seul client, partagé par les
-    rôles qui le choisissent. Le moteur « crispasr » ne joue que le rôle de transcription de fichier (`STT_ENGINE`), et le moteur « openai »
-    que celui de synthèse (`TTS_ENGINE`).
+    rôles qui le choisissent. Le moteur « crispasr » ne joue que le rôle de transcription de fichier (`STT_ENGINE`),
+    et le moteur « openai » que celui de synthèse (`TTS_ENGINE`).
     """
 
     def nemo() -> NemoClient:
