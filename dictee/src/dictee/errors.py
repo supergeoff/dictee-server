@@ -70,4 +70,8 @@ async def handle_unexpected_error(request: Request, exc: Exception) -> JSONRespo
 async def handle_http_exception(request: Request, exc: HTTPException) -> JSONResponse:
     """Rend les erreurs de Starlette (route inconnue, méthode refusée) comme celles d'OpenAI."""
     error_type = "invalid_request_error" if exc.status_code < 500 else "server_error"
-    return JSONResponse(envelope(exc.detail, type=error_type), status_code=exc.status_code, headers=exc.headers)
+    return JSONResponse(
+        envelope(exc.detail, type=error_type),
+        status_code=exc.status_code,
+        headers=exc.headers,
+    )
