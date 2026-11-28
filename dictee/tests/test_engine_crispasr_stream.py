@@ -599,3 +599,20 @@ async def test_an_unexpected_writer_error_makes_the_session_unavailable(scenario
     assert warnings == ["live transcription write stopped error=ValueError"]
     assert "Nemotron" not in caplog.text
     assert children() == []
+
+
+async def test_one_silence_closing_two_commits_splits_the_finals():
+    live_session, stdout = await scripted_session()
+    await live_session.send_audio(speech(1))
+    await live_session.commit()  # point de validation à 1 s, close par un `silence` à 2,8 s au moins
+    await live_session.send_audio(speech(1))
+    await live_session.commit()  # point de validation à 5 s, close par un `silence` à 6,8 s au moins
+    await feed(
+        stdout,
+        {"type": "final", "utterance_id": 1, "text": "Premier.", "t0": 0.0, "t1": 2.0},
+        {"type": "final", "utterance_id": 2, "text": "Second.", "t0": 4.0, "t1": 6.0},
+        {"type": "silence", "t": 7.0},
+    )
+
+    assert queued(live_session) == [Final("Premier.", ()), Committed(), Final("Second.", ()), Committed()]
+    await stop(live_session)

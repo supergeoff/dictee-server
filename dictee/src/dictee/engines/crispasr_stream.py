@@ -102,7 +102,9 @@ class CrispasrLiveSession:
         self._wake = asyncio.Event()  # posé quand la file reçoit des octets
         self._broken = False  # l'écriture vers ffmpeg a échoué
         self._queue: asyncio.Queue[Partial | Final | Committed | Cleared | EngineUnavailable] = asyncio.Queue()
-        self._commits: deque[float] = deque()  # pour chaque validation en attente, le temps du `silence` qui la clôt
+        # Pour chaque validation en attente : son point de validation (temps d'audio du commit) et le temps du `silence`
+        # qui la clôt.
+        self._commits: deque[tuple[float, float]] = deque()
         self._last_commit = 0.0  # temps d'audio de la dernière validation
         self._dropped: list[tuple[float, float]] = []  # intervalles de début des prises de parole vidées
         self._finals: list[tuple[float, str]] = []  # textes finals gardés jusqu'à la validation, avec leur début
@@ -163,7 +165,7 @@ class CrispasrLiveSession:
 
     async def commit(self) -> None:
         self._check()
-        self._commits.append(self._seconds() + _CLOSED_AFTER_S)
+        self._commits.append((self._seconds(), self._seconds() + _CLOSED_AFTER_S))
         self._last_commit = self._seconds()
         self._enqueue_closing_silence()
 
@@ -218,11 +220,14 @@ class CrispasrLiveSession:
         kind = event.get("type")
         if kind == "silence":
             t = event.get("t")
-            while self._commits and isinstance(t, int | float) and t >= self._commits[0]:
-                self._commits.popleft()
-                for _, text in self._finals:
-                    self._queue.put_nowait(Final(text, ()))
-                self._finals = []
+            while self._commits and isinstance(t, int | float) and t >= self._commits[0][1]:
+                # Une validation n'emporte que les textes commencés avant son point : un même `silence` peut clore
+                # plusieurs validations, et les textes suivants restent gardés pour la suivante.
+                point, _ = self._commits.popleft()
+                for start, text in self._finals:
+                    if start < point:
+                        self._queue.put_nowait(Final(text, ()))
+                self._finals = [(start, text) for start, text in self._finals if start >= point]
                 self._utterance, self._previous, self._emitted, self._spoken = None, [], 0, False
                 self._queue.put_nowait(Committed())
             return
