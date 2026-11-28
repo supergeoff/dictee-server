@@ -23,9 +23,9 @@ from dictee.cleanup import clean
 from dictee.cuts import MAX_CHUNK_S, chunk_bounds, detect_silences, plan_cuts
 from dictee.engines import Engines
 from dictee.engines.ports import EngineOverloaded, EngineUnavailable, FileTranscriber
+from dictee.glossary import correct_final
 from dictee.lifecycle import elapsed_ms
 from dictee.modes import Mode, to_iso_language
-from dictee.glossary import correct_final
 from dictee.profile import Profile, glossary_terms
 from dictee.settings import Settings
 from dictee.speakers import build_segments, label_speakers

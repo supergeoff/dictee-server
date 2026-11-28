@@ -13,8 +13,8 @@ from dictee import processing
 from dictee.cuts import Silence
 from dictee.engines.ports import EngineError, EngineOverloaded, EngineUnavailable
 from dictee.modes import Mode
-from dictee.profile import GlossaryEntry
 from dictee.processing import RunStats, process, task_audio, wait_ready
+from dictee.profile import GlossaryEntry
 from dictee.taskstore import ChunkRecord
 from dictee.types import Final, Word
 

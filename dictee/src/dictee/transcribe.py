@@ -34,6 +34,7 @@ from dictee.cleanup import clean
 from dictee.engines.ports import ENGINE_ERRORS
 from dictee.errors import ApiError, engine_failure, unexpected_error
 from dictee.formats import delta_event, done_event, error_event, render, segment_event
+from dictee.glossary import correct_final
 from dictee.lifecycle import (
     CLIENT_CLOSED,
     Trace,
@@ -46,7 +47,6 @@ from dictee.lifecycle import (
 )
 from dictee.modes import Mode, resolve_mode, to_iso_language, to_nemo_language
 from dictee.processing import task_audio, task_dir
-from dictee.glossary import correct_final
 from dictee.profile import Profile, glossary_terms, glossary_too_large, load_profile, with_extra_glossary
 from dictee.runner import LongTicket
 from dictee.speakers import build_segments, label_speakers
