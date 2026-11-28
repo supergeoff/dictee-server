@@ -1,5 +1,7 @@
 """Les trois rôles du moteur audio : fabrique, choix par réglage et capacités déclarées."""
 
+from dataclasses import replace
+
 import anyio
 import httpx
 import pytest
@@ -36,8 +38,10 @@ def test_build_engines_defaults_to_nemo(http):
 
 @pytest.mark.parametrize("variable", ["STT_ENGINE", "LIVE_ENGINE", "TTS_ENGINE"])
 def test_unknown_engine_names_the_variable(variable, http):
+    # `Settings.from_env` refuse déjà ce nom : la fabrique garde sa propre garde pour des réglages construits autrement.
+    settings = replace(_settings(), **{variable.lower(): "foo"})
     with pytest.raises(ValueError, match=rf"{variable}.*foo"):
-        build_engines(_settings(**{variable: "foo"}), http)
+        build_engines(settings, http)
 
 
 def test_crispasr_replaces_only_the_file_transcriber(http):
@@ -46,6 +50,18 @@ def test_crispasr_replaces_only_the_file_transcriber(http):
     assert isinstance(engines.stt, CrispasrTranscriber)
     assert isinstance(engines.live, NemoClient)
     assert engines.tts is engines.live
+
+
+def test_crispasr_receives_the_diarization_method(http, monkeypatch):
+    created = []
+    monkeypatch.setattr(
+        "dictee.engines.factory.CrispasrTranscriber",
+        lambda *args, **kwargs: created.append((args, kwargs)) or FakeNemo(),
+    )
+
+    build_engines(_settings(STT_ENGINE="crispasr", CRISPASR_API_KEY="key", DIAR_METHOD="pyannote"), http)
+
+    assert created == [(("http://crispasr:8080", "key", http), {"diar_method": "pyannote"})]
 
 
 def test_crispasr_leaves_nemo_shared_by_the_other_roles(http):
@@ -69,7 +85,6 @@ def test_nemo_declares_its_capabilities(http):
     client = NemoClient("http://nemo.test", "key", http)
 
     assert client.speakers is True
-    assert client.progress is True
     assert client.sample_rate == 22050
 
 

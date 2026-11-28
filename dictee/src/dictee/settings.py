@@ -22,6 +22,7 @@ _OPTIONAL = {
     "nemo_api_key": ("NEMO_API_KEY", str),
     "crispasr_url": ("CRISPASR_URL", str),
     "crispasr_api_key": ("CRISPASR_API_KEY", str),
+    "diar_method": ("DIAR_METHOD", str),
     "stt_engine": ("STT_ENGINE", str),
     "live_engine": ("LIVE_ENGINE", str),
     "tts_engine": ("TTS_ENGINE", str),
@@ -44,6 +45,13 @@ _OPTIONAL = {
     "db_path": ("DB_PATH", str),
 }
 
+
+# Variable d'environnement du moteur d'un rôle -> noms de moteur acceptés ; `dictee.engines.factory` relit cette table.
+ENGINE_NAMES = {
+    "STT_ENGINE": ("nemo", "crispasr"),
+    "LIVE_ENGINE": ("nemo", "crispasr-stream"),
+    "TTS_ENGINE": ("nemo", "openai"),
+}
 
 # Réglages qui bornent une file : à 0 ou moins, tout appel attendrait indéfiniment.
 _AT_LEAST_ONE = {"tts_max_concurrent": "TTS_MAX_CONCURRENT", "live_max_sessions": "LIVE_MAX_SESSIONS"}
@@ -68,6 +76,8 @@ class Settings:
     nemo_api_key: str = ""
     crispasr_url: str = "http://crispasr:8080"
     crispasr_api_key: str = ""
+    # Méthode de séparation des personnes que l'adaptateur `crispasr` demande au serveur (`diarize_method`).
+    diar_method: str = "sortformer"
     # Moteur de chaque rôle audio (voir `dictee.engines`) : transcription de fichier, dictée en direct, synthèse.
     stt_engine: str = "nemo"
     live_engine: str = "nemo"
@@ -107,11 +117,13 @@ class Settings:
     def from_env(cls, env: Mapping[str, str]) -> "Settings":
         """Lit les réglages ; une variable vide compte comme absente.
 
-        Lève `ValueError` en nommant toutes les variables obligatoires absentes,
+        Lève `ValueError` en nommant le moteur inconnu d'un rôle, toutes les variables obligatoires absentes,
         ou la variable facultative dont la valeur n'a pas le bon type.
         """
-        engine_variables = ("STT_ENGINE", "LIVE_ENGINE", "TTS_ENGINE")
-        engines = {name: env[name] if _is_set(env.get(name)) else "nemo" for name in engine_variables}
+        engines = {name: env[name] if _is_set(env.get(name)) else "nemo" for name in ENGINE_NAMES}
+        for name, accepted in ENGINE_NAMES.items():
+            if engines[name] not in accepted:
+                raise ValueError(f"{name} must be one of {', '.join(accepted)}, got {engines[name]!r}")
         needed = list(_REQUIRED.values())
         if "nemo" in engines.values():
             needed.append("NEMO_API_KEY")

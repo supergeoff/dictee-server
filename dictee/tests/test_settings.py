@@ -151,3 +151,17 @@ def test_queue_bound_below_one_is_refused_by_variable_name(name, value):
 @pytest.mark.parametrize("name", ["TTS_MAX_CONCURRENT", "LIVE_MAX_SESSIONS"])
 def test_queue_bound_of_one_is_accepted(name):
     Settings.from_env({**REQUIRED_ENV, name: "1"})
+
+
+def test_diar_method_defaults_to_sortformer_and_can_change():
+    assert Settings.from_env(REQUIRED_ENV).diar_method == "sortformer"
+    assert Settings.from_env({**REQUIRED_ENV, "DIAR_METHOD": "pyannote"}).diar_method == "pyannote"
+
+
+@pytest.mark.parametrize(
+    ("variable", "accepted"),
+    [("STT_ENGINE", "nemo, crispasr"), ("LIVE_ENGINE", "nemo, crispasr-stream"), ("TTS_ENGINE", "nemo, openai")],
+)
+def test_unknown_engine_name_is_refused_by_variable_name(variable, accepted):
+    with pytest.raises(ValueError, match=f"{variable} must be one of {accepted}, got 'foo'"):
+        Settings.from_env({**REQUIRED_ENV, variable: "foo"})

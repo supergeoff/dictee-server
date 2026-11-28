@@ -13,7 +13,7 @@ from dictee import cuts
 from dictee.cuts import Silence, chunk_bounds
 from dictee.engines import Engines
 from dictee.engines import crispasr as crispasr_module
-from dictee.engines.crispasr import STREAM_CHUNK_S, CrispasrTranscriber
+from dictee.engines.crispasr import STREAM_CHUNK_S, CrispasrTranscriber, whole_timeout
 from dictee.engines.ports import EngineError, EngineOverloaded, EngineUnavailable
 from dictee.processing import RunStats, Services, process
 from dictee.speakers import label_speakers
@@ -23,6 +23,7 @@ pytestmark = pytest.mark.anyio
 
 CHUNK = json.loads((CRISPASR_FIXTURES / "chunk.json").read_text())
 DIARIZED = json.loads((CRISPASR_FIXTURES / "diarized.json").read_text())
+SILENCE = json.loads((CRISPASR_FIXTURES / "silence.json").read_text())
 
 
 @pytest.fixture
@@ -129,6 +130,20 @@ async def test_error_message_does_not_quote_the_body(crispasr, fake_crispasr):
     assert FakeCrispasr.SECRET not in str(raised.value)
 
 
+async def test_a_chunk_without_speech_is_an_empty_final(crispasr, fake_crispasr):
+    # Réponse relevée sur le vrai serveur pour 6 s de silence : un segment vide, sans liste de mots.
+    fake_crispasr.fixture = "silence.json"
+    assert SILENCE["text"] == ""
+    assert await chunk(crispasr) == Final("", ())
+
+
+async def test_a_meeting_without_speech_is_an_empty_final(tmp_path, fake_crispasr, crispasr):
+    fake_crispasr.fixture = "silence.json"
+    wav = tmp_path / "audio.wav"
+    write_wav(wav, 6.0)
+    assert await run(crispasr, wav, speakers=True) == [Final("", ())]
+
+
 async def test_unreadable_answer_is_an_error(crispasr, fake_crispasr):
     fake_crispasr.fixture = "progress.json"
     with pytest.raises(EngineError):
@@ -208,6 +223,67 @@ async def test_speakers_request_asks_for_sortformer(tmp_path, fake_crispasr, cri
     assert [w.speaker for w in label_speakers(final.words)] == [w.speaker for w in final.words]
 
 
+async def test_speakers_request_sends_the_configured_method(tmp_path, fake_crispasr):
+    adapter = CrispasrTranscriber("http://crispasr.test", "k", fake_crispasr.http, diar_method="pyannote")
+    wav = tmp_path / "audio.wav"
+    write_wav(wav, 3.0)
+    await run(adapter, wav, speakers=True)
+    (request,) = [r for r in fake_crispasr.requests if r["path"] == "/v1/audio/transcriptions"]
+    assert request["form"]["diarize_method"] == "pyannote"
+
+
+@pytest.mark.parametrize(("seconds", "timeout"), [(300.0, 600.0), (7200.0, 7200.0)])
+def test_whole_timeout_grows_with_the_audio(seconds, timeout):
+    assert whole_timeout(seconds) == timeout
+
+
+def recording_requests(adapter, monkeypatch) -> list[dict]:
+    """Les arguments de chaque appel à `_request` de `adapter`, qui passe ensuite au faux serveur."""
+    calls: list[dict] = []
+    original = adapter._request
+
+    async def record(method, path, **kwargs):
+        calls.append({"method": method, "path": path, **kwargs})
+        return await original(method, path, **kwargs)
+
+    monkeypatch.setattr(adapter, "_request", record)
+    return calls
+
+
+async def test_the_whole_request_waits_as_long_as_the_audio_lasts(tmp_path, fake_crispasr, crispasr, monkeypatch):
+    # Avec un plancher d'une seconde, les 3 s du fichier fixent le délai : le facteur vaut 1.
+    monkeypatch.setattr(crispasr_module, "CHUNK_TIMEOUT", 1.0)
+    calls = recording_requests(crispasr, monkeypatch)
+    wav = tmp_path / "audio.wav"
+    write_wav(wav, 3.0)
+    await run(crispasr, wav, speakers=True)
+    (call,) = [c for c in calls if c["path"] == "/v1/audio/transcriptions"]
+    assert call["timeout"] == pytest.approx(3.0)
+
+
+async def test_a_chunk_keeps_the_chunk_timeout(tmp_path, fake_crispasr, crispasr, monkeypatch):
+    monkeypatch.setattr(crispasr_module, "CHUNK_TIMEOUT", 1.0)
+    calls = recording_requests(crispasr, monkeypatch)
+    wav = tmp_path / "audio.wav"
+    write_wav(wav, 3.0)
+    await run(crispasr, wav)
+    (call,) = [c for c in calls if c["path"] == "/v1/audio/transcriptions"]
+    assert call["timeout"] == 1.0
+
+
+async def test_the_whole_file_is_read_from_the_disk(tmp_path, fake_crispasr, crispasr, monkeypatch):
+    # Le fichier part ouvert, lu par httpx au fil de l'envoi, et non chargé en mémoire d'un bloc.
+    calls = recording_requests(crispasr, monkeypatch)
+    wav = tmp_path / "audio.wav"
+    write_wav(wav, 3.0)
+    await run(crispasr, wav, speakers=True)
+    (call,) = [c for c in calls if c["path"] == "/v1/audio/transcriptions"]
+    sent = call["files"]["file"][1]
+    assert not isinstance(sent, bytes) and sent.closed
+    (request,) = [r for r in fake_crispasr.requests if r["path"] == "/v1/audio/transcriptions"]
+    assert request["file"] == wav.read_bytes()
+
+
 async def test_speakers_send_the_whole_file_in_one_request(tmp_path, fake_crispasr, crispasr):
     wav = tmp_path / "audio.wav"
     write_wav(wav, 50.0)
@@ -216,14 +292,14 @@ async def test_speakers_send_the_whole_file_in_one_request(tmp_path, fake_crispa
 
 
 @pytest.mark.usefixtures("fast_progress")
-async def test_progress_is_reported_as_fraction(tmp_path, fake_crispasr, crispasr):
-    fake_crispasr.progress_body = {"busy": True, "progress": 42}
+async def test_progress_is_reported_in_seconds_of_audio(tmp_path, fake_crispasr, crispasr):
+    fake_crispasr.progress_body = {"busy": True, "progress": 50}
     fake_crispasr.transcription_delay = 0.1
     wav = tmp_path / "audio.wav"
-    write_wav(wav, 3.0)
+    write_wav(wav, 20.0)
     seen: list[float] = []
     await run(crispasr, wav, speakers=True, on_progress=seen.append)
-    assert seen and set(seen) == {0.42}
+    assert seen and set(seen) == {10.0}
 
 
 @pytest.mark.usefixtures("fast_progress")
@@ -245,7 +321,7 @@ async def test_an_unreadable_progress_does_not_fail_the_transcription(tmp_path, 
     fake_crispasr.transcription_delay = 0.1
     wav = tmp_path / "audio.wav"
     write_wav(wav, 3.0)
-    (final,) = await run(crispasr, wav, speakers=True, on_progress=lambda fraction: None)
+    (final,) = await run(crispasr, wav, speakers=True, on_progress=lambda seconds: None)
     assert final.text == CHUNK["text"].strip()
 
 
@@ -265,7 +341,7 @@ async def test_a_failing_progress_route_does_not_fail_the_transcription(tmp_path
     )
     wav = tmp_path / "audio.wav"
     write_wav(wav, 3.0)
-    (final,) = await run(adapter, wav, speakers=True, on_progress=lambda fraction: None)
+    (final,) = await run(adapter, wav, speakers=True, on_progress=lambda seconds: None)
     assert final.text == CHUNK["text"].strip()
 
 
@@ -276,7 +352,7 @@ async def test_an_error_raised_by_on_progress_reaches_the_caller(tmp_path, fake_
     wav = tmp_path / "audio.wav"
     write_wav(wav, 3.0)
 
-    def broken(fraction: float) -> None:
+    def broken(seconds: float) -> None:
         raise RuntimeError("callback failed")
 
     with pytest.raises(RuntimeError, match="callback failed"):
@@ -289,7 +365,7 @@ async def test_closing_the_stream_stops_the_request_and_the_progress_reading(tmp
     wav = tmp_path / "audio.wav"
     write_wav(wav, 3.0)
     before = set(asyncio.all_tasks())
-    task = asyncio.create_task(run(crispasr, wav, speakers=True, on_progress=lambda fraction: None))
+    task = asyncio.create_task(run(crispasr, wav, speakers=True, on_progress=lambda seconds: None))
     await asyncio.sleep(0.1)
     assert any(r["path"] == "/progress" for r in fake_crispasr.requests)
     task.cancel()
@@ -321,7 +397,7 @@ async def test_stream_yields_one_final_per_chunk(wav_40s, fake_crispasr, crispas
     assert [event.words[0].start for event in events] == pytest.approx([0.0, 12.0, 26.0])
     assert events[1].words[-1].end == pytest.approx(12.0 + CHUNK["segments"][-1]["words"][-1]["end"])
     assert all(word.speaker is None for event in events for word in event.words)
-    assert progress == pytest.approx([12 / 40, 26 / 40, 1.0])
+    assert progress == pytest.approx([12.0, 26.0, 40.0])
     assert [r["path"] for r in fake_crispasr.requests] == ["/v1/audio/transcriptions"] * 3
     assert all("diarize" not in r["form"] for r in fake_crispasr.requests)
 

@@ -33,12 +33,12 @@ ENGINE_ERRORS = (EngineOverloaded, EngineUnavailable, EngineError)
 class FileTranscriber(Protocol):
     """Transcription d'un fichier WAV PCM16 mono 16 kHz, d'un seul bloc ou par morceaux.
 
-    `speakers` dit si le moteur marque les personnes (`Word.speaker`), `progress` s'il suit l'envoi de l'audio par
-    `on_progress`. `language` est le code que `dictee.modes.to_nemo_language` produit (`fr-FR` ou `auto`).
+    `speakers` dit si le moteur marque les personnes (`Word.speaker`). `language` est le code que
+    `dictee.modes.to_nemo_language` produit (`fr-FR` ou `auto`). `on_progress`, s'il est donné, reçoit les secondes
+    d'audio déjà traitées (et non une fraction) : l'appelant les rapporte lui-même à la durée du fichier.
     """
 
     speakers: bool
-    progress: bool
 
     def transcribe(
         self,

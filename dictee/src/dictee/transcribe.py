@@ -56,7 +56,9 @@ from dictee.types import Partial, Transcript, Word
 from dictee.upload import Upload, read_upload
 
 # Plafond de durée d'un envoi, tous modes confondus : 2 heures, la durée de l'enregistreur. Le WAV décodé vit sur le
-# disque, 230 Mio à ce plafond (32 000 octets par seconde), et seule une trame d'une seconde passe en mémoire.
+# disque, 230 Mio à ce plafond (32 000 octets par seconde), et n'en passe en mémoire qu'une part à la fois : une trame
+# d'une seconde avec le moteur `nemo` ; avec `crispasr`, un morceau de 15 s au plus, ou les blocs que httpx lit dans le
+# fichier pendant l'envoi d'une réunion.
 MAX_AUDIO_SECONDS = 7200.0
 GRANULARITIES = frozenset({"word", "segment"})
 

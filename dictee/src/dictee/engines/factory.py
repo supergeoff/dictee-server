@@ -9,7 +9,7 @@ from dictee.engines.crispasr import CrispasrTranscriber
 from dictee.engines.crispasr_stream import CrispasrLive
 from dictee.engines.nemo import NemoClient
 from dictee.engines.openai_tts import OpenAISpeech
-from dictee.settings import Settings
+from dictee.settings import ENGINE_NAMES, Settings
 
 
 def _check(engines: Engines) -> Engines:
@@ -34,7 +34,9 @@ def build_engines(settings: Settings, http: httpx.AsyncClient) -> Engines:
         return NemoClient(settings.nemo_url, settings.nemo_api_key, http)
 
     def crispasr() -> CrispasrTranscriber:
-        return CrispasrTranscriber(settings.crispasr_url, settings.crispasr_api_key, http)
+        return CrispasrTranscriber(
+            settings.crispasr_url, settings.crispasr_api_key, http, diar_method=settings.diar_method
+        )
 
     def crispasr_stream() -> CrispasrLive:
         return CrispasrLive(
@@ -66,8 +68,9 @@ def build_engines(settings: Settings, http: httpx.AsyncClient) -> Engines:
         ("LIVE_ENGINE", settings.live_engine),
         ("TTS_ENGINE", settings.tts_engine),
     ):
-        if name not in factories[variable]:
-            raise ValueError(f"{variable} must be one of {', '.join(factories[variable])}, got {name!r}")
+        # `Settings.from_env` refuse déjà un nom inconnu ; la garde vaut pour des réglages construits autrement.
+        if name not in ENGINE_NAMES[variable]:
+            raise ValueError(f"{variable} must be one of {', '.join(ENGINE_NAMES[variable])}, got {name!r}")
         if name not in built:
             built[name] = factories[variable][name]()
         chosen.append(built[name])

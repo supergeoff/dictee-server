@@ -243,13 +243,12 @@ class NemoClient:
     """Les appels de dictee à NeMo ; `http` est le client HTTP partagé de l'app.
 
     Il joue les trois rôles du moteur audio (`FileTranscriber`, `LiveTranscriber` et `Synthesizer`) et déclare ses
-    capacités : NeMo marque les personnes (`speakers`) et suit l'envoi de l'audio (`progress`), sa dictée en direct
-    n'a pas de détection de tour de parole (`server_vad`) mais accepte plusieurs commits par session
-    (`many_commits`), et sa synthèse rend du PCM16 mono à `sample_rate` Hz (fréquence mesurée en tâche 1).
+    capacités : NeMo marque les personnes (`speakers`), sa dictée en direct n'a pas de détection de tour de parole
+    (`server_vad`) mais accepte plusieurs commits par session (`many_commits`), et sa synthèse rend du PCM16 mono à
+    `sample_rate` Hz (fréquence mesurée en tâche 1).
     """
 
     speakers = True
-    progress = True
     server_vad = False
     many_commits = True
     sample_rate = 22050

@@ -7,10 +7,13 @@ from dataclasses import replace
 
 import pytest
 from conftest import audio_task
-from fakes import FakeNemo, engines_of
+from fakes import FakeCrispasr, FakeNemo, engines_of
 
 from dictee import processing
 from dictee.cuts import Silence
+from dictee.engines import Engines
+from dictee.engines import crispasr as crispasr_module
+from dictee.engines.crispasr import CrispasrTranscriber
 from dictee.engines.ports import EngineError, EngineOverloaded, EngineUnavailable
 from dictee.modes import Mode
 from dictee.processing import RunStats, process, task_audio, wait_ready
@@ -271,6 +274,22 @@ async def test_the_progress_of_a_meeting_never_goes_back_after_a_retry(services,
     services = replace(services, engines=engines_of(nemo))
     await process(services, audio_task(services, 4.0, mode=Mode.DIARIZE), RunStats())
     assert writes == [0.25, 0.5, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0]
+
+
+async def test_a_meeting_on_crispasr_reports_its_progress_over_the_task_duration(services, monkeypatch):
+    # `on_progress` reçoit des secondes d'audio, quel que soit le moteur : à mi-chemin d'une réunion de 20 s, CrispASR
+    # annonce 50 % et la tâche vaut 0,5.
+    monkeypatch.setattr(processing, "PROGRESS_EVERY_S", 0.0)
+    monkeypatch.setattr(crispasr_module, "PROGRESS_EVERY_S", 0.01)
+    fake = FakeCrispasr("diarized.json")
+    fake.progress_body = {"busy": True, "progress": 50}
+    fake.transcription_delay = 0.1
+    nemo = FakeNemo()
+    crispasr = CrispasrTranscriber("http://crispasr.test", "k", fake.http)
+    services = replace(services, engines=Engines(stt=crispasr, live=nemo, tts=nemo))
+    writes = progress_writes(services, monkeypatch)
+    await process(services, audio_task(services, 20.0, mode=Mode.DIARIZE), RunStats())
+    assert writes and set(writes) == {0.5}
 
 
 async def test_a_resumed_meeting_keeps_the_progress_it_had_reached(services, monkeypatch):

@@ -115,8 +115,8 @@ def engines_of(fake: "FakeNemo") -> Engines:
 class FakeNemo:
     """Faux `NemoClient` : mêmes méthodes et mêmes capacités, rien d'autre.
 
-    Les attributs de classe `speakers`, `progress`, `server_vad`, `many_commits` et `sample_rate` sont les capacités
-    que NeMo déclare ; un test les change sur l'instance pour essayer un autre moteur.
+    Les attributs de classe `speakers`, `server_vad`, `many_commits` et `sample_rate` sont les capacités que NeMo
+    déclare ; un test les change sur l'instance pour essayer un autre moteur.
 
     `finals` sont rendus par `transcribe` (avec des `Partial` mêlés aux `Final`, ils ne sortent que si l'appel passe
     `partials=True`), `pcm` par `speak`. Les mots de `finals` portent les personnes brutes de la session ; comme
@@ -155,7 +155,6 @@ class FakeNemo:
     """
 
     speakers = True
-    progress = True
     server_vad = False
     many_commits = True
     sample_rate = TTS_SAMPLE_RATE
@@ -332,27 +331,29 @@ class FakeLlm:
 CRISPASR_FIXTURES = Path(__file__).parent / "fixtures" / "crispasr"
 
 
-def _multipart_fields(request: httpx.Request) -> dict[str, str]:
-    """Les champs de formulaire d'un corps multipart, sans le fichier envoyé."""
+def _multipart_parts(request: httpx.Request) -> tuple[dict[str, str], bytes | None]:
+    """Les champs de formulaire d'un corps multipart, hors fichier, et le contenu du fichier envoyé (`None` sans)."""
     message = BytesParser(policy=default).parsebytes(
         b"Content-Type: " + request.headers["content-type"].encode() + b"\r\n\r\n" + request.content
     )
-    fields = {}
+    fields, file = {}, None
     for part in message.iter_parts():
         name = part.get_param("name", header="content-disposition")
         if name is not None and part.get_filename() is None:
             fields[name] = part.get_content()
-    return fields
+        elif part.get_filename() is not None:
+            file = part.get_content()
+    return fields, file
 
 
 class FakeCrispasr:
     """Faux serveur CrispASR : `/health`, `/progress` et `/v1/audio/transcriptions` servis d'après les fixtures.
 
     `requests` garde chaque requête reçue : `method`, `path`, `headers` et, pour un multipart, `form` (les champs de
-    formulaire hors fichier). `health_statuses` et `transcription_statuses` sont les codes que les appels successifs
-    reçoivent ; le dernier se répète une fois la liste épuisée. Un code de transcription autre que 200 répond un corps
-    d'erreur qui cite `SECRET`, pour vérifier que l'adaptateur ne le reprend pas. `fixture` est le fichier de
-    `tests/fixtures/crispasr/` que la transcription rend. `http` est le client HTTP à donner à l'adaptateur.
+    formulaire hors fichier) et `file` (le contenu du fichier envoyé). `health_statuses` et `transcription_statuses`
+    sont les codes que les appels successifs reçoivent ; le dernier se répète une fois la liste épuisée. Un code de
+    transcription autre que 200 répond un corps d'erreur qui cite `SECRET`, pour vérifier que l'adaptateur ne le
+    reprend pas. `fixture` est le fichier de `tests/fixtures/crispasr/` que la transcription rend. `http` est le client HTTP à donner à l'adaptateur.
     """
 
     SECRET = "texte-secret-du-serveur"
@@ -379,7 +380,7 @@ class FakeCrispasr:
     def _handle(self, request: httpx.Request) -> httpx.Response:
         record = {"method": request.method, "path": request.url.path, "headers": dict(request.headers)}
         if request.headers.get("content-type", "").startswith("multipart/"):
-            record["form"] = _multipart_fields(request)
+            record["form"], record["file"] = _multipart_parts(request)
         self.requests.append(record)
         if request.url.path == "/health":
             status = self._next(self.health_statuses)
