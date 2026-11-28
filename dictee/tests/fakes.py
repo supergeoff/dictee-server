@@ -7,6 +7,9 @@ import json
 import wave
 from collections.abc import Callable, Sequence
 from dataclasses import replace
+from email.parser import BytesParser
+from email.policy import default
+from pathlib import Path
 
 import httpx
 
@@ -324,3 +327,60 @@ class FakeLlm:
         self.calls.append(json.loads(request.content))
         body = {"choices": [{"index": 0, "message": {"role": "assistant", "content": self.reply}}]}
         return httpx.Response(200, json=body)
+
+
+CRISPASR_FIXTURES = Path(__file__).parent / "fixtures" / "crispasr"
+
+
+def _multipart_fields(request: httpx.Request) -> dict[str, str]:
+    """Les champs de formulaire d'un corps multipart, sans le fichier envoyé."""
+    message = BytesParser(policy=default).parsebytes(
+        b"Content-Type: " + request.headers["content-type"].encode() + b"\r\n\r\n" + request.content
+    )
+    fields = {}
+    for part in message.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        if name is not None and part.get_filename() is None:
+            fields[name] = part.get_content()
+    return fields
+
+
+class FakeCrispasr:
+    """Faux serveur CrispASR : `/health`, `/progress` et `/v1/audio/transcriptions` servis d'après les fixtures.
+
+    `requests` garde chaque requête reçue : `method`, `path`, `headers` et, pour un multipart, `form` (les champs de
+    formulaire hors fichier). `health_statuses` et `transcription_statuses` sont les codes que les appels successifs
+    reçoivent ; le dernier se répète une fois la liste épuisée. Un code de transcription autre que 200 répond un corps
+    d'erreur qui cite `SECRET`, pour vérifier que l'adaptateur ne le reprend pas. `fixture` est le fichier de
+    `tests/fixtures/crispasr/` que la transcription rend. `http` est le client HTTP à donner à l'adaptateur.
+    """
+
+    SECRET = "texte-secret-du-serveur"
+
+    def __init__(self, fixture: str = "chunk.json") -> None:
+        self.fixture = fixture
+        self.health_statuses = [200]
+        self.transcription_statuses = [200]
+        self.requests: list[dict] = []
+        self.http = httpx.AsyncClient(transport=httpx.MockTransport(self._handle))
+
+    @staticmethod
+    def _next(statuses: list[int]) -> int:
+        return statuses.pop(0) if len(statuses) > 1 else statuses[0]
+
+    def _handle(self, request: httpx.Request) -> httpx.Response:
+        record = {"method": request.method, "path": request.url.path, "headers": dict(request.headers)}
+        if request.headers.get("content-type", "").startswith("multipart/"):
+            record["form"] = _multipart_fields(request)
+        self.requests.append(record)
+        if request.url.path == "/health":
+            status = self._next(self.health_statuses)
+            return httpx.Response(status, json={"status": "ok" if status == 200 else "loading"})
+        if request.url.path == "/progress":
+            return httpx.Response(200, content=(CRISPASR_FIXTURES / "progress.json").read_bytes())
+        if request.url.path == "/v1/audio/transcriptions":
+            status = self._next(self.transcription_statuses)
+            if status != 200:
+                return httpx.Response(status, json={"error": self.SECRET})
+            return httpx.Response(200, content=(CRISPASR_FIXTURES / self.fixture).read_bytes())
+        return httpx.Response(404)

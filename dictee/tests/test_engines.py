@@ -7,6 +7,7 @@ from conftest import REQUIRED_ENV
 from fakes import FakeNemo
 
 from dictee.engines import Engines, _check, build_engines
+from dictee.engines.crispasr import CrispasrTranscriber
 from dictee.engines.nemo import NemoClient
 from dictee.settings import Settings
 
@@ -34,6 +35,14 @@ def test_build_engines_defaults_to_nemo(http):
 def test_unknown_engine_names_the_variable(variable, http):
     with pytest.raises(ValueError, match=rf"{variable}.*foo"):
         build_engines(_settings(**{variable: "foo"}), http)
+
+
+def test_crispasr_replaces_only_the_file_transcriber(http):
+    engines = build_engines(_settings(STT_ENGINE="crispasr", CRISPASR_API_KEY="key"), http)
+
+    assert isinstance(engines.stt, CrispasrTranscriber)
+    assert isinstance(engines.live, NemoClient)
+    assert engines.tts is engines.live
 
 
 def test_nemo_declares_its_capabilities(http):

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from dictee.engines.crispasr import CrispasrTranscriber
 from dictee.engines.nemo import NemoClient
 from dictee.engines.ports import FileTranscriber, LiveTranscriber, Synthesizer
 from dictee.settings import Settings
@@ -30,16 +31,25 @@ def _check(engines: Engines) -> Engines:
 def build_engines(settings: Settings, http: httpx.AsyncClient) -> Engines:
     """Construit les adaptateurs que les réglages nomment ; `ValueError` si un nom est inconnu ou le choix incohérent.
 
-    Le moteur « nemo » est un seul client, partagé par les rôles qui le choisissent.
+    Le moteur « nemo » est un seul client, partagé par les rôles qui le choisissent. Le moteur « crispasr » ne joue que
+    le rôle de transcription de fichier (`STT_ENGINE`).
     """
-    adapters = {"nemo": NemoClient(settings.nemo_url, settings.nemo_api_key, http)}
+    nemo = NemoClient(settings.nemo_url, settings.nemo_api_key, http)
+    adapters = {
+        "STT_ENGINE": {
+            "nemo": nemo,
+            "crispasr": CrispasrTranscriber(settings.crispasr_url, settings.crispasr_api_key, http),
+        },
+        "LIVE_ENGINE": {"nemo": nemo},
+        "TTS_ENGINE": {"nemo": nemo},
+    }
     chosen = []
     for variable, name in (
         ("STT_ENGINE", settings.stt_engine),
         ("LIVE_ENGINE", settings.live_engine),
         ("TTS_ENGINE", settings.tts_engine),
     ):
-        if name not in adapters:
-            raise ValueError(f"{variable} must be one of {', '.join(adapters)}, got {name!r}")
-        chosen.append(adapters[name])
+        if name not in adapters[variable]:
+            raise ValueError(f"{variable} must be one of {', '.join(adapters[variable])}, got {name!r}")
+        chosen.append(adapters[variable][name])
     return _check(Engines(stt=chosen[0], live=chosen[1], tts=chosen[2]))
