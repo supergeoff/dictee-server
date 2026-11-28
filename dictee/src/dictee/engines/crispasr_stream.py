@@ -40,6 +40,9 @@ FINAL_ON_SILENCE_MS = 800
 CLOSING_SILENCE_S = 3.0
 # Un `silence` dont le temps atteint celui de la validation plus cette durée prouve que tout ce qui précède est fermé.
 _CLOSED_AFTER_S = (FINAL_ON_SILENCE_MS + STREAM_STEP_MS) / 1000
+# Audio du client en attente d'écriture vers ffmpeg, en secondes, au-delà duquel le moteur est déclaré saturé : il ne
+# suit plus le temps réel, et le client reçoit l'erreur de saturation au lieu d'une file sans fin.
+MAX_PENDING_S = 120.0
 
 # Ce qui n'est ni lettre ni chiffre : la ponctuation d'un mot change d'un texte partiel à l'autre.
 _PUNCTUATION = re.compile(r"\W+")
@@ -64,26 +67,37 @@ def _common_prefix(first: list[str], second: list[str]) -> int:
 class CrispasrLiveSession:
     """Une session de dictée en direct sur deux processus : ffmpeg, puis CrispASR.
 
-    `send_audio` écrit le PCM du client sur l'entrée de ffmpeg. Les textes partiels sortent au fil de l'eau : un mot
-    n'est émis qu'une fois vu à la même place dans deux événements `partial` successifs de la même prise de parole, et
-    jamais retiré ensuite. Le premier mot d'une prise de parole qui suit une autre prise de parole depuis la dernière
-    validation est précédé d'une espace. Quand CrispASR scinde un mot déjà émis (`Némotron` devenu `Nemo Tron`), la
-    suite des deltas peut répéter une partie du mot : seuls les deltas en souffrent, le texte final fait foi.
+    `send_audio`, `commit` et `clear` n'attendent jamais le moteur : ils rangent l'audio et les silences dans une file
+    ordonnée, qu'une tâche propre à la session écrit sur l'entrée de ffmpeg. Quand CrispASR prend du retard, la route
+    continue donc de lire le client, et les temps d'audio se comptent sur les octets rangés, qui sont ceux du flux que
+    CrispASR verra dans le même ordre. Au-delà de `MAX_PENDING_S` d'audio en attente, `send_audio` lève
+    `EngineOverloaded` ; les silences de `commit` et de `clear` ne sont jamais refusés.
+
+    Les textes partiels sortent au fil de l'eau : un mot n'est émis qu'une fois vu à la même place dans deux événements
+    `partial` successifs de la même prise de parole, et jamais retiré ensuite. Le premier mot d'une prise de parole qui
+    suit une autre prise de parole depuis la dernière validation est précédé d'une espace. Quand CrispASR scinde un mot
+    déjà émis (`Némotron` devenu `Nemo Tron`), la suite des deltas peut répéter une partie du mot : seuls les deltas en
+    souffrent, le texte final fait foi.
 
     Les textes finals attendent la validation du client : CrispASR ferme seul une prise de parole à chaque pause, mais
     la route traite un `Final` reçu avant le commit comme une prise de parole fermée par le moteur. `commit` écrit donc
-    `CLOSING_SILENCE_S` de silence et note le temps d'audio écrit ; au premier `silence` qui prouve que tout ce qui
+    `CLOSING_SILENCE_S` de silence et note le temps d'audio rangé ; au premier `silence` qui prouve que tout ce qui
     précède est fermé, la session émet les textes finals gardés, dans l'ordre, puis `Committed`. CrispASR ne sait pas
     annuler une prise de parole : `clear` écrit le même silence, jette les textes gardés depuis la dernière validation,
     émet `Cleared` aussitôt et ignore ensuite les événements des prises de parole commencées entre la dernière
     validation et lui. Une validation pas encore close garde ses textes finals et le suivi de ses mots.
 
-    `events` lève `EngineUnavailable` quand CrispASR s'arrête, et `send_audio` quand ffmpeg n'accepte plus l'audio.
+    `events` lève `EngineUnavailable` quand CrispASR s'arrête ou que l'écriture vers ffmpeg échoue ; après un échec de
+    l'écriture, `send_audio`, `commit` et `clear` lèvent aussi `EngineUnavailable`.
     """
 
     def __init__(self, ffmpeg: asyncio.subprocess.Process, crispasr: asyncio.subprocess.Process, rate: int) -> None:
         self._ffmpeg, self._crispasr, self._rate = ffmpeg, crispasr, rate
-        self._written = 0  # octets de PCM écrits sur l'entrée de ffmpeg, silences compris
+        self._written = 0  # octets de PCM rangés pour l'entrée de ffmpeg depuis le début, silences compris
+        self._pending: deque[bytes] = deque()  # octets rangés que la tâche d'écriture n'a pas encore écrits
+        self._pending_bytes = 0
+        self._wake = asyncio.Event()  # posé quand la file reçoit des octets
+        self._broken = False  # l'écriture vers ffmpeg a échoué
         self._queue: asyncio.Queue[Partial | Final | Committed | Cleared | EngineUnavailable] = asyncio.Queue()
         self._commits: deque[float] = deque()  # pour chaque validation en attente, le temps du `silence` qui la clôt
         self._last_commit = 0.0  # temps d'audio de la dernière validation
@@ -95,31 +109,60 @@ class CrispasrLiveSession:
         self._emitted = 0  # mots déjà émis de la prise de parole en cours
         self._spoken = False  # un mot est sorti depuis la dernière validation
         self._reader = asyncio.create_task(self._read())
+        self._writer = asyncio.create_task(self._write_pending())
 
     def _seconds(self) -> float:
         return self._written / (SAMPLE_WIDTH * self._rate)
 
-    async def _write(self, pcm: bytes) -> None:
-        try:
-            self._ffmpeg.stdin.write(pcm)
-            await self._ffmpeg.stdin.drain()
-        except (BrokenPipeError, ConnectionResetError) as exc:
-            raise EngineUnavailable("the live transcription process stopped") from exc
-        self._written += len(pcm)
+    def _check(self) -> None:
+        if self._broken:
+            raise EngineUnavailable("the live transcription process stopped")
 
-    async def _write_closing_silence(self) -> None:
-        await self._write(bytes(SAMPLE_WIDTH * round(CLOSING_SILENCE_S * self._rate)))
+    def _enqueue(self, pcm: bytes) -> None:
+        self._pending.append(pcm)
+        self._pending_bytes += len(pcm)
+        self._written += len(pcm)
+        self._wake.set()
+
+    def _enqueue_closing_silence(self) -> None:
+        self._enqueue(bytes(SAMPLE_WIDTH * round(CLOSING_SILENCE_S * self._rate)))
+
+    async def _write_pending(self) -> None:
+        """Écrit la file sur l'entrée de ffmpeg, dans l'ordre, en attendant que le tube l'accepte.
+
+        Un échec de l'écriture (tube fermé, ffmpeg arrêté) marque la session comme cassée et met `EngineUnavailable`
+        dans la file des événements.
+        """
+        stdin = self._ffmpeg.stdin
+        try:
+            while True:
+                await self._wake.wait()
+                self._wake.clear()
+                while self._pending:
+                    pcm = self._pending.popleft()
+                    stdin.write(pcm)
+                    await stdin.drain()
+                    self._pending_bytes -= len(pcm)
+        except (OSError, RuntimeError):
+            self._broken = True
+            self._pending.clear()
+            self._pending_bytes = 0
+            self._queue.put_nowait(EngineUnavailable("the live transcription process stopped"))
 
     async def send_audio(self, pcm: bytes) -> None:
-        await self._write(pcm)
+        self._check()
+        if self._pending_bytes + len(pcm) > MAX_PENDING_S * SAMPLE_WIDTH * self._rate:
+            raise EngineOverloaded("the live transcription engine is not keeping up with the audio")
+        self._enqueue(pcm)
 
     async def commit(self) -> None:
-        # L'attente est notée avant l'écriture : CrispASR ne peut pas émettre le `silence` attendu avant ce silence.
+        self._check()
         self._commits.append(self._seconds() + _CLOSED_AFTER_S)
         self._last_commit = self._seconds()
-        await self._write_closing_silence()
+        self._enqueue_closing_silence()
 
     async def clear(self) -> None:
+        self._check()
         now = self._seconds()
         self._dropped.append((self._last_commit, now))
         self._finals = [(start, text) for start, text in self._finals if start < self._last_commit]
@@ -130,7 +173,7 @@ class CrispasrLiveSession:
         if not self._commits:
             self._spoken = False
         self._queue.put_nowait(Cleared())
-        await self._write_closing_silence()
+        self._enqueue_closing_silence()
 
     async def events(self) -> AsyncIterator[Partial | Final | Committed | Cleared]:
         while True:
@@ -207,12 +250,16 @@ class CrispasrLiveSession:
         self._queue.put_nowait(Partial(delta))
 
     async def close(self) -> None:
-        """Tue les deux processus, arrête la lecture et attend la fin des processus et de leurs tubes."""
+        """Tue les deux processus, arrête la lecture et l'écriture, jette la file et attend la fin des processus et de
+        leurs tubes, sans attendre que la file se vide."""
         for process in (self._ffmpeg, self._crispasr):
             if process.returncode is None:
                 process.kill()
         self._reader.cancel()
-        await asyncio.gather(self._reader, return_exceptions=True)
+        self._writer.cancel()
+        await asyncio.gather(self._reader, self._writer, return_exceptions=True)
+        self._pending.clear()
+        self._pending_bytes = 0
         self._ffmpeg.stdin.close()
         while await self._crispasr.stdout.read(65536):
             pass

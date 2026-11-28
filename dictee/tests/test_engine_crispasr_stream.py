@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from conftest import wait_until
 
+from dictee.engines import crispasr_stream
 from dictee.engines.crispasr_stream import CrispasrLive, CrispasrLiveSession
 from dictee.engines.ports import EngineOverloaded, EngineUnavailable
 from dictee.types import Cleared, Committed, Final, Partial
@@ -440,7 +441,8 @@ async def feed(stdout: asyncio.StreamReader, *events: dict) -> None:
 
 async def stop(live_session: CrispasrLiveSession) -> None:
     live_session._reader.cancel()
-    await asyncio.gather(live_session._reader, return_exceptions=True)
+    live_session._writer.cancel()
+    await asyncio.gather(live_session._reader, live_session._writer, return_exceptions=True)
 
 
 def queued(live_session: CrispasrLiveSession) -> list:
@@ -486,3 +488,68 @@ async def test_clear_after_an_unclosed_commit_does_not_repeat_its_words():
         Partial(" trois"),
     ]
     await stop(live_session)
+
+
+async def test_send_audio_does_not_wait_for_a_stalled_engine(scenario, tmp_path):
+    scenario([], read_after=str(tmp_path / "go"))
+    async with session(engine()) as live_session:
+        # 30 s à 24 kHz dépassent largement ce que les tubes vers ffmpeg et CrispASR retiennent.
+        for _ in range(30):
+            await asyncio.wait_for(live_session.send_audio(speech(1)), 0.5)
+
+    assert children() == []
+
+
+async def test_pending_audio_beyond_the_limit_is_overloaded(scenario, tmp_path):
+    scenario([], read_after=str(tmp_path / "go"))
+    async with session(engine()) as live_session:
+        with pytest.raises(EngineOverloaded):
+            for _ in range(round(crispasr_stream.MAX_PENDING_S) + 10):
+                await asyncio.wait_for(live_session.send_audio(speech(1)), 2)
+        await asyncio.wait_for(live_session.commit(), 2)  # le silence d'une validation n'est pas refusé par la borne
+
+
+async def test_commit_times_follow_queued_audio(scenario, tmp_path):
+    go = tmp_path / "go"
+    scenario([(["un", "un deux"], "Un deux.")], read_after=str(go))
+    async with session(engine()) as live_session:
+        for _ in range(10):
+            await asyncio.wait_for(live_session.send_audio(silence(1)), 2)
+        await asyncio.wait_for(live_session.send_audio(speech(2)), 2)
+        await asyncio.wait_for(live_session.commit(), 2)
+        go.touch()
+        events = await asyncio.wait_for(until_committed(live_session), 5)
+
+    assert events == [Partial("un"), Final("Un deux.", ()), Committed()]
+
+
+async def test_closing_with_pending_audio_leaves_nothing_behind(scenario, tmp_path):
+    scenario([], read_after=str(tmp_path / "go"))
+    tasks = asyncio.all_tasks()
+    live = session(engine())
+    live_session = await live.__aenter__()
+    for _ in range(60):
+        await asyncio.wait_for(live_session.send_audio(speech(1)), 2)
+    await asyncio.wait_for(live.__aexit__(None, None, None), 5)
+
+    assert children() == []
+    assert asyncio.all_tasks() == tasks
+
+
+async def test_writer_failure_makes_the_session_unavailable(scenario):
+    scenario([])
+    async with session(engine()) as live_session:
+        live_session._ffmpeg.kill()
+        await live_session._ffmpeg.wait()
+
+        async def send_until_refused() -> None:
+            while True:
+                await live_session.send_audio(speech(0.1))
+                await asyncio.sleep(0.01)
+
+        with pytest.raises(EngineUnavailable):
+            await asyncio.wait_for(send_until_refused(), 5)
+        with pytest.raises(EngineUnavailable):
+            await asyncio.wait_for(anext(live_session.events()), 5)
+
+    assert children() == []

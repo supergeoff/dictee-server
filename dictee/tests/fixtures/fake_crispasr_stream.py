@@ -14,7 +14,8 @@ Variables d'environnement :
 - `FAKE_CRISPASR_SCENARIO` : un objet JSON. `utterances` donne, pour chaque prise de parole dans l'ordre, ses textes
   partiels (`partials`, un par pas de parole, le dernier répété au besoin) et son texte final (`final`). `exit`, s'il
   est donné, fait sortir le processus avec ce code dès son lancement ; `exit_after_bytes` le fait sortir avec le code 1
-  dès qu'il a reçu ce nombre d'octets ; `long_line` lui fait écrire d'abord une ligne de 70000 caractères.
+  dès qu'il a reçu ce nombre d'octets ; `long_line` lui fait écrire d'abord une ligne de 70000 caractères ;
+  `read_after` est un chemin de fichier : le faux binaire ne lit pas son entrée tant que ce fichier n'existe pas.
 - `FAKE_CRISPASR_AUDIO` : un fichier où le faux binaire ajoute tout l'audio reçu, au fil de la lecture.
 - `FAKE_CRISPASR_ARGV` : un fichier où il écrit ses arguments, en liste JSON.
 """
@@ -23,6 +24,7 @@ import json
 import os
 import struct
 import sys
+import time
 
 RATE = 16000
 SAMPLE_WIDTH = 2
@@ -52,6 +54,9 @@ def main() -> int:
         return int(scenario["exit"])
     if scenario.get("long_line"):
         emit({"type": "partial", "text": "x" * 70000})
+    if read_after := scenario.get("read_after"):
+        while not os.path.exists(read_after):
+            time.sleep(0.01)
     exit_after = scenario.get("exit_after_bytes")
     received = 0
     step_ms = option(argv, "--stream-step", 3000)
