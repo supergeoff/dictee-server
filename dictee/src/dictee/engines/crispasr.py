@@ -6,6 +6,7 @@ corps d'une réponse, qui peut citer le texte transcrit.
 
 import asyncio
 import contextlib
+import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -30,8 +31,14 @@ CHUNK_TIMEOUT = 600.0
 # calcul pour 300 s d'audio) : un facteur de 1 laisse une marge de quatre, file d'attente comprise.
 WHOLE_TIMEOUT_FACTOR = 1.0
 READY_TIMEOUT = 5.0
-PROGRESS_TIMEOUT = 5.0  # lecture de `/progress`
-PROGRESS_EVERY_S = 5.0  # intervalle des lectures de `/progress` pendant un fichier avec locuteurs
+# Avancement d'un fichier avec locuteurs. Le serveur n'en annonce aucun pour ce modèle (`GET /progress` vaut 0 ou 100) :
+# il est estimé d'après le temps écoulé, toutes les `PROGRESS_EVERY_S` secondes, à raison de `WHOLE_SPEED_FACTOR`
+# secondes de calcul par seconde d'audio, et il s'arrête à `WHOLE_PROGRESS_CAP` du fichier tant que la réponse manque.
+# shortcut: le facteur est celui du serveur visé (0,23 mesuré sur un enregistrement de 35 minutes) ; sur une autre
+# machine la barre finit trop tôt ou attend au plafond, et il faudra alors en faire un réglage.
+PROGRESS_EVERY_S = 5.0
+WHOLE_SPEED_FACTOR = 0.25
+WHOLE_PROGRESS_CAP = 0.95
 # Un morceau d'un fichier sans locuteurs dure 15 s au plus : la route émet un `transcript.text.delta` par morceau fini.
 STREAM_CHUNK_S = 15.0
 
@@ -39,6 +46,19 @@ STREAM_CHUNK_S = 15.0
 def whole_timeout(duration: float) -> float:
     """Le délai de lecture, en secondes, de la requête d'un fichier entier de `duration` secondes d'audio."""
     return max(CHUNK_TIMEOUT, duration * WHOLE_TIMEOUT_FACTOR)
+
+
+def estimated_seconds(elapsed: float, duration: float) -> float:
+    """Les secondes d'audio qu'un fichier avec locuteurs de `duration` secondes a dû traiter en `elapsed` secondes."""
+    return min(elapsed / WHOLE_SPEED_FACTOR, duration * WHOLE_PROGRESS_CAP)
+
+
+async def _estimate_progress(on_progress: Callable[[float], None], duration: float) -> None:
+    """Donne à `on_progress`, toutes les `PROGRESS_EVERY_S` secondes, l'avancement estimé d'après le temps écoulé."""
+    started = time.monotonic()
+    while True:
+        await asyncio.sleep(PROGRESS_EVERY_S)
+        on_progress(estimated_seconds(time.monotonic() - started, duration))
 
 
 def _duration(wav: Path) -> float:
@@ -137,11 +157,11 @@ class CrispasrTranscriber:
         `on_progress` reçoit, comme le veut le rôle, les secondes d'audio déjà traitées. Avec `speakers`, le fichier
         part en une requête (`diarize=true`, `diarize_method` du réglage), lu depuis le disque au fil de l'envoi, avec
         un délai de lecture qui suit sa durée (`whole_timeout`) ; il sort en un seul `Final`, dont chaque mot porte la
-        personne de son segment, telle que le serveur la nomme. Pendant la requête, `GET /progress` est lu toutes les
-        `PROGRESS_EVERY_S` secondes, et son pourcentage, rapporté à la durée du fichier, va à `on_progress`. Sans
-        `speakers`, le fichier est coupé aux silences en morceaux de `STREAM_CHUNK_S` au plus : chaque morceau fini sort
-        en un `Final` aux instants du fichier, puis `on_progress` reçoit la fin de ce morceau. Fermer le générateur
-        avant la fin arrête la requête en cours et la lecture de `/progress`.
+        personne de son segment, telle que le serveur la nomme. Pendant la requête, `on_progress` reçoit toutes les
+        `PROGRESS_EVERY_S` secondes une estimation tirée du temps écoulé (`estimated_seconds`), parce que le serveur
+        n'annonce pas d'avancement pour ce modèle. Sans `speakers`, le fichier est coupé aux silences en morceaux de
+        `STREAM_CHUNK_S` au plus : chaque morceau fini sort en un `Final` aux instants du fichier, puis `on_progress`
+        reçoit la fin de ce morceau. Fermer le générateur avant la fin arrête la requête en cours et l'estimation.
         """
         if speakers:
             yield await self._transcribe_whole(wav, language, on_progress)
@@ -153,7 +173,7 @@ class CrispasrTranscriber:
                     yield final
 
     async def _transcribe_whole(self, wav: Path, language: str, on_progress: Callable[[float], None] | None) -> Final:
-        """Le fichier entier en une requête avec les personnes, avec la lecture de `/progress` pendant l'attente.
+        """Le fichier entier en une requête avec les personnes, avec l'avancement estimé pendant l'attente.
 
         httpx lit le fichier ouvert par blocs pendant l'envoi : l'audio d'une réunion ne passe pas en mémoire d'un bloc.
         """
@@ -161,10 +181,10 @@ class CrispasrTranscriber:
         extra = {"diarize": "true", "diarize_method": self._diar_method}
         with wav.open("rb") as audio:
             request = asyncio.create_task(self._post_audio(audio, language, extra, timeout=whole_timeout(duration)))
-            reader = None if on_progress is None else asyncio.create_task(self._read_progress(on_progress, duration))
+            reader = None if on_progress is None else asyncio.create_task(_estimate_progress(on_progress, duration))
             tasks = [request] if reader is None else [request, reader]
             try:
-                # La lecture de `/progress` ne finit jamais d'elle-même : si elle se termine, `on_progress` a levé.
+                # L'estimation ne finit jamais d'elle-même : si elle se termine, `on_progress` a levé.
                 await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                 if reader is not None and reader.done():
                     reader.result()
@@ -174,23 +194,6 @@ class CrispasrTranscriber:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
         return _final(response, with_speakers=True)
-
-    async def _read_progress(self, on_progress: Callable[[float], None], duration: float) -> None:
-        """Lit `GET /progress` toutes les `PROGRESS_EVERY_S` secondes ; une erreur sur la route est ignorée.
-
-        `on_progress` reçoit le pourcentage rapporté aux `duration` secondes du fichier. La route est globale au
-        serveur : avec plusieurs workers, elle peut donner l'avancement d'une autre requête, si bien que la progression
-        d'une réunion reste indicative.
-        """
-        while True:
-            try:
-                response = await self._request("GET", "/progress", timeout=PROGRESS_TIMEOUT)
-                percent = float(response.json()["progress"])
-            except (EngineUnavailable, EngineOverloaded, EngineError, ValueError, KeyError, TypeError):
-                percent = -1.0
-            if 0 <= percent <= 100:
-                on_progress(percent / 100 * duration)
-            await asyncio.sleep(PROGRESS_EVERY_S)
 
     async def _transcribe_chunks(
         self,

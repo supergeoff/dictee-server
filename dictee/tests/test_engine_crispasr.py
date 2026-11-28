@@ -317,63 +317,39 @@ async def test_speakers_send_the_whole_file_in_one_request(tmp_path, fake_crispa
     assert [r["path"] for r in fake_crispasr.requests].count("/v1/audio/transcriptions") == 1
 
 
+def test_the_estimate_follows_the_elapsed_time_and_stops_below_the_duration():
+    # 25 s de calcul au rythme attendu valent 100 s d'audio ; l'estimation ne dépasse jamais 95 % du fichier.
+    assert crispasr_module.estimated_seconds(25.0, 1000.0) == pytest.approx(25.0 / crispasr_module.WHOLE_SPEED_FACTOR)
+    assert crispasr_module.estimated_seconds(0.0, 1000.0) == 0.0
+    assert crispasr_module.estimated_seconds(10_000.0, 1000.0) == pytest.approx(950.0)
+
+
 @pytest.mark.usefixtures("fast_progress")
-async def test_progress_is_reported_in_seconds_of_audio(tmp_path, fake_crispasr, crispasr):
-    fake_crispasr.progress_body = {"busy": True, "progress": 50}
-    fake_crispasr.transcription_delay = 0.1
+async def test_progress_of_a_file_with_speakers_is_estimated_from_the_elapsed_time(tmp_path, fake_crispasr, crispasr):
+    fake_crispasr.transcription_delay = 0.2
     wav = tmp_path / "audio.wav"
     write_wav(wav, 20.0)
     seen: list[float] = []
     await run(crispasr, wav, speakers=True, on_progress=seen.append)
-    assert seen and set(seen) == {10.0}
+    assert len(seen) >= 2
+    assert seen == sorted(seen) and seen[0] > 0
+    assert seen[-1] <= crispasr_module.estimated_seconds(1.0, 20.0)
+    assert [r["path"] for r in fake_crispasr.requests] == ["/v1/audio/transcriptions"]
 
 
 @pytest.mark.usefixtures("fast_progress")
-async def test_a_negative_progress_is_not_reported(tmp_path, fake_crispasr, crispasr):
-    fake_crispasr.progress_body = {"busy": False, "progress": -1}
-    fake_crispasr.transcription_delay = 0.1
+async def test_the_estimate_of_a_slow_server_stays_below_the_duration(tmp_path, monkeypatch, fake_crispasr, crispasr):
+    monkeypatch.setattr(crispasr_module, "WHOLE_SPEED_FACTOR", 0.001)
+    fake_crispasr.transcription_delay = 0.2
     wav = tmp_path / "audio.wav"
     write_wav(wav, 3.0)
     seen: list[float] = []
     await run(crispasr, wav, speakers=True, on_progress=seen.append)
-    assert seen == []
-    assert any(r["path"] == "/progress" for r in fake_crispasr.requests)
-
-
-@pytest.mark.usefixtures("fast_progress")
-@pytest.mark.parametrize("body", [{"oops": 1}, {"progress": "x"}])
-async def test_an_unreadable_progress_does_not_fail_the_transcription(tmp_path, fake_crispasr, crispasr, body):
-    fake_crispasr.progress_body = body
-    fake_crispasr.transcription_delay = 0.1
-    wav = tmp_path / "audio.wav"
-    write_wav(wav, 3.0)
-    (final,) = await run(crispasr, wav, speakers=True, on_progress=lambda seconds: None)
-    assert final.text == CHUNK["text"].strip()
-
-
-@pytest.mark.usefixtures("fast_progress")
-async def test_a_failing_progress_route_does_not_fail_the_transcription(tmp_path, monkeypatch):
-    fake = FakeCrispasr()
-    fake.transcription_delay = 0.1
-    inner = fake.http._transport
-
-    async def handler(request):
-        if request.url.path == "/progress":
-            raise httpx.ConnectError("down")
-        return await inner.handle_async_request(request)
-
-    adapter = CrispasrTranscriber(
-        "http://crispasr.test", "k", httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    )
-    wav = tmp_path / "audio.wav"
-    write_wav(wav, 3.0)
-    (final,) = await run(adapter, wav, speakers=True, on_progress=lambda seconds: None)
-    assert final.text == CHUNK["text"].strip()
+    assert seen and max(seen) == pytest.approx(3.0 * crispasr_module.WHOLE_PROGRESS_CAP)
 
 
 @pytest.mark.usefixtures("fast_progress")
 async def test_an_error_raised_by_on_progress_reaches_the_caller(tmp_path, fake_crispasr, crispasr):
-    fake_crispasr.progress_body = {"busy": True, "progress": 42}
     fake_crispasr.transcription_delay = 30.0
     wav = tmp_path / "audio.wav"
     write_wav(wav, 3.0)
@@ -386,20 +362,21 @@ async def test_an_error_raised_by_on_progress_reaches_the_caller(tmp_path, fake_
 
 
 @pytest.mark.usefixtures("fast_progress")
-async def test_closing_the_stream_stops_the_request_and_the_progress_reading(tmp_path, fake_crispasr, crispasr):
+async def test_closing_the_stream_stops_the_request_and_the_progress_estimate(tmp_path, fake_crispasr, crispasr):
     fake_crispasr.transcription_delay = 30.0
     wav = tmp_path / "audio.wav"
     write_wav(wav, 3.0)
     before = set(asyncio.all_tasks())
-    task = asyncio.create_task(run(crispasr, wav, speakers=True, on_progress=lambda seconds: None))
+    calls: list[float] = []
+    task = asyncio.create_task(run(crispasr, wav, speakers=True, on_progress=calls.append))
     await asyncio.sleep(0.1)
-    assert any(r["path"] == "/progress" for r in fake_crispasr.requests)
+    assert calls
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    seen = len(fake_crispasr.requests)
+    seen = len(calls)
     await asyncio.sleep(0.1)
-    assert len(fake_crispasr.requests) == seen
+    assert len(calls) == seen
     assert set(asyncio.all_tasks()) <= before | {asyncio.current_task()}
 
 
