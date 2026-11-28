@@ -2,14 +2,14 @@
 # 127.0.0.1. Le compose qui fait tourner dictee en production vit dans Dokploy, seule source des composes. Celui-ci en
 # reprend les services et les limites de mémoire. La version de NeMo-Speech.cpp n'y est pas écrite : elle vient de la
 # variable NEMO_VERSION, que `make integration` exige (NEMO_VERSION=<version> make integration, avec la valeur du compose
-# de Dokploy).
+# de Dokploy). Il en va de même de CRISPASR_VERSION. `make integration` demande donc CRISPASR_VERSION, NEMO_VERSION,
+# PTTS_MODEL et HF_TOKEN : les deux dernières vont dans le .env que fabrique integration/make-env.sh.
 x-nemo-build: &nemo-build
   context: ./nemo
   args:
     NEMO_VERSION: "${NEMO_VERSION:-}"
 
-# La version de CrispASR suit le même principe : CRISPASR_VERSION=<version> make integration. HF_TOKEN et PTTS_MODEL
-# (hf://gradium/phonon-40m-fr@<commit>) viennent de l'environnement de celui qui lance, jamais du dépôt.
+# La version de CrispASR suit le même principe : CRISPASR_VERSION=<version> make integration.
 x-crispasr-build: &crispasr-build
   context: ./crispasr
   args:
@@ -52,11 +52,7 @@ services:
   phonon:
     image: ghcr.io/gradium-ai/ptts-openai-server:0.7.1
     restart: unless-stopped
-    environment:
-      HF_TOKEN: "${HF_TOKEN:-}"
-      PTTS_MODEL: "${PTTS_MODEL:-}"
-      PTTS_LANG: fr
-      PTTS_QUANT: q8
+    env_file: .env
     ports:
       - "127.0.0.1:18003:8880"
     deploy:

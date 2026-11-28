@@ -45,6 +45,8 @@ test:
 	docker build --target test -t dictee-test dictee
 	docker run --rm dictee-test uv run --frozen pytest -q $(ARGS)
 
+# Demande CRISPASR_VERSION, NEMO_VERSION, PTTS_MODEL (hf://gradium/phonon-40m-fr@<commit>) et HF_TOKEN : les deux dernières
+# sont lues par integration/make-env.sh, qui fabrique le .env, et l'échec de cette cible .env arrête tout avant le démarrage.
 # Lance la stack complète avec les vrais modèles, attend /health (300 s au plus), puis joue integration/run.py.
 # La stack reste démarrée à la fin : `make down` l'arrête. Le script reçoit le binaire compose du Makefile.
 # Pour rejouer un seul contrôle sur la stack démarrée : uv run --script integration/run.py --only hangup (--help).
