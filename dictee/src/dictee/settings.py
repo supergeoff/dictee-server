@@ -6,7 +6,6 @@ from pathlib import Path
 
 # Champ de `Settings` -> variable d'environnement, pour les réglages sans valeur par défaut.
 _REQUIRED = {
-    "nemo_api_key": "NEMO_API_KEY",
     "litellm_url": "LITELLM_URL",
     "litellm_api_key": "LITELLM_API_KEY",
     "openwebui_service_key": "OPENWEBUI_SERVICE_KEY",
@@ -20,9 +19,20 @@ _REQUIRED = {
 # Champ -> (variable d'environnement, type). La valeur par défaut est celle du champ de `Settings`.
 _OPTIONAL = {
     "nemo_url": ("NEMO_URL", str),
+    "nemo_api_key": ("NEMO_API_KEY", str),
+    "crispasr_url": ("CRISPASR_URL", str),
+    "crispasr_api_key": ("CRISPASR_API_KEY", str),
     "stt_engine": ("STT_ENGINE", str),
     "live_engine": ("LIVE_ENGINE", str),
     "tts_engine": ("TTS_ENGINE", str),
+    "live_command": ("LIVE_COMMAND", str),
+    "live_model_path": ("LIVE_MODEL_PATH", str),
+    "live_max_sessions": ("LIVE_MAX_SESSIONS", int),
+    "live_threads": ("LIVE_THREADS", int),
+    "live_stream_args": ("LIVE_STREAM_ARGS", str),
+    "tts_url": ("TTS_URL", str),
+    "tts_sample_rate": ("TTS_SAMPLE_RATE", int),
+    "tts_max_concurrent": ("TTS_MAX_CONCURRENT", int),
     "cleanup_model": ("CLEANUP_MODEL", str),
     "default_voice": ("DEFAULT_VOICE", str),
     "glossary_boost": ("GLOSSARY_BOOST", float),
@@ -40,7 +50,6 @@ def _is_set(value: str | None) -> bool:
 
 @dataclass(frozen=True)
 class Settings:
-    nemo_api_key: str
     litellm_url: str
     litellm_api_key: str
     openwebui_service_key: str
@@ -50,10 +59,26 @@ class Settings:
     public_url: str
     session_secret: str
     nemo_url: str = "http://nemo:8000"
+    # Clés des moteurs : obligatoires seulement quand un moteur qui s'en sert est choisi (voir `from_env`).
+    nemo_api_key: str = ""
+    crispasr_url: str = "http://crispasr:8080"
+    crispasr_api_key: str = ""
     # Moteur de chaque rôle audio (voir `dictee.engines`) : transcription de fichier, dictée en direct, synthèse.
     stt_engine: str = "nemo"
     live_engine: str = "nemo"
     tts_engine: str = "nemo"
+    # Dictée en direct par un processus CrispASR : commande, modèle, nombre de sessions et de threads, et réglages
+    # de fenêtre (`LIVE_STREAM_ARGS`, gardés en chaîne : l'adaptateur les découpe lui-même).
+    live_command: str = "crispasr"
+    live_model_path: str = "/models/current/asr.gguf"
+    live_max_sessions: int = 2
+    live_threads: int = 4
+    live_stream_args: str = ""
+    # Synthèse vocale par un serveur compatible OpenAI : adresse, fréquence d'échantillonnage du PCM et requêtes
+    # simultanées.
+    tts_url: str = "http://phonon:8880"
+    tts_sample_rate: int = 24000
+    tts_max_concurrent: int = 1
     cleanup_model: str = "simple"
     default_voice: str = "Leo"
     # Force du glossaire : la plus haute sans insertion sur le corpus de `integration/boost.py` (spec 7.6, tâche 13).
@@ -78,7 +103,15 @@ class Settings:
         Lève `ValueError` en nommant toutes les variables obligatoires absentes,
         ou la variable facultative dont la valeur n'a pas le bon type.
         """
-        missing = [name for name in _REQUIRED.values() if not _is_set(env.get(name))]
+        engines = {
+            name: env[name] if _is_set(env.get(name)) else "nemo" for name in ("STT_ENGINE", "LIVE_ENGINE", "TTS_ENGINE")
+        }
+        needed = list(_REQUIRED.values())
+        if "nemo" in engines.values():
+            needed.append("NEMO_API_KEY")
+        if engines["STT_ENGINE"] == "crispasr":
+            needed.append("CRISPASR_API_KEY")
+        missing = [name for name in needed if not _is_set(env.get(name))]
         if missing:
             raise ValueError("missing required environment variables: " + ", ".join(missing))
 
