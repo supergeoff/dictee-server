@@ -34,11 +34,25 @@ Le `.env` porte aussi des variables que dictee lit quel que soit le moteur, dont
 | Moteur | Variables de dictee | Variables des services |
 |---|---|---|
 | `nemo` | `NEMO_API_KEY` (obligatoire dès qu'un rôle choisit `nemo`), `NEMO_URL` | `NEMO_ASR_THREADS`, `NEMO_TTS_NO_CFG`, `NEMO_TTS_THREADS` |
-| `crispasr` | `CRISPASR_API_KEY` (obligatoire quand `STT_ENGINE=crispasr`), `CRISPASR_URL`, `DIAR_METHOD` | `ASR_BACKEND`, `ASR_MODEL_URL`, `ASR_MODEL_SHA256`, `DIAR_MODEL_URL`, `DIAR_MODEL_SHA256`, `CRISPASR_API_KEYS`, `CRISPASR_THREADS`, `CRISPASR_WORKERS` |
+| `crispasr` | `CRISPASR_API_KEY` (obligatoire quand `STT_ENGINE=crispasr`), `CRISPASR_URL`, `DIAR_METHOD` | `ASR_BACKEND`, `ASR_MODEL_URL`, `ASR_MODEL_SHA256`, `DIAR_MODEL_URL`, `DIAR_MODEL_SHA256`, `CRISPASR_API_KEYS`, `CRISPASR_THREADS`, `CRISPASR_WORKERS`, `CRISPASR_PARAKEET_LONGFORM_WINDOW` |
 | `crispasr-stream` | `LIVE_COMMAND`, `LIVE_MODEL_PATH`, `LIVE_VAD_MODEL_PATH`, `LIVE_MAX_SESSIONS`, `LIVE_THREADS`, `LIVE_STREAM_ARGS` | `VAD_MODEL_URL`, `VAD_MODEL_SHA256` |
 | `openai` | `TTS_URL`, `TTS_SAMPLE_RATE`, `TTS_MAX_CONCURRENT` | `PTTS_MODEL`, `PTTS_LANG`, `PTTS_QUANT`, `HF_TOKEN` |
 
 Le serveur CrispASR lit la liste `CRISPASR_API_KEYS`, alors que dictee lit la clé unique `CRISPASR_API_KEY` : le `.env` porte la même clé dans les deux. Le téléchargement de phonon-40m-fr demande `HF_TOKEN`, car son dépôt Hugging Face exige d'accepter ses conditions d'accès.
+
+### Mémoire du serveur CrispASR
+
+La mémoire du service `crispasr` dépend de la durée de l'audio, parce que le serveur garde le fichier entier et que la séparation des locuteurs travaille sur toute la réunion à la fin. `CRISPASR_PARAKEET_LONGFORM_WINDOW` donne la durée en secondes des morceaux que le serveur transcrit dans un fichier de plus de 300 s (90 par défaut). La valeur 30 réduit la mémoire de la transcription sans changer le texte rendu, et le serveur la lit directement dans son environnement.
+
+Le tableau donne la mémoire mesurée sur le serveur visé (x86_64, 6 cœurs) avec des morceaux de 30 s, 2 workers, des réunions à deux voix avec locuteurs et une dictée courte envoyée toutes les 20 secondes pendant le traitement.
+
+| Réunion | Durée du traitement | Mémoire pendant la transcription | Pic pendant la séparation des locuteurs |
+|---|---|---|---|
+| 65 minutes, serveur neuf | 581 s | 2,3 Go | 3,5 Go |
+| 118 minutes, serveur neuf | 1053 s | 3,3 Go | 5,2 Go |
+| 118 minutes, après une autre réunion | 1045 à 1063 s | 4,4 à 4,9 Go | 5,4 à 5,8 Go |
+
+Le serveur occupe 0,7 Go à neuf et garde 2 à 2,9 Go après une réunion longue, sans que le pic de la réunion suivante monte d'autant. La limite de mémoire du service couvre donc le pic de la réunion la plus longue que dictee accepte (2 heures), avec une marge : le déploiement visé la fixe à 8 Go. Avec une limite trop basse, le serveur ne signale pas l'erreur : il rend un texte vide avec un code 200 pour les dictées qui arrivent pendant la réunion, puis le système arrête le conteneur à la fin du traitement. Le compose de test garde 3 Go, parce que ses extraits sont courts.
 
 Dans les valeurs par défaut de dictee, les trois moteurs valent encore `nemo`, ce qui permet le retour arrière : remettre les trois variables sur `nemo` et redémarrer dictee suffit à revenir au moteur d'avant. Le compose de test, lui, tourne sur les nouveaux moteurs. En local, `make integration` fabrique un `.env` de banc avec `integration/make-env.sh` s'il manque, et git l'ignore.
 
@@ -96,7 +110,7 @@ curl -X POST https://<adresse>/v1/audio/transcriptions/trn_…/cancel -H "Author
 L'objet de la tâche donne :
 
 - `status`, qui vaut `queued` (en file), `in_progress` (en cours), `completed` (réussie), `failed` (en échec) ou `cancelled` (annulée) ;
-- `progress`, de 0 à 1 : la part des morceaux traités, ou, pour une réunion, la part de l'audio que le moteur a traitée. Avec `nemo`, c'est la part de l'audio envoyée. Avec `crispasr`, la progression d'une réunion avec locuteurs n'a pas de valeur intermédiaire, parce que le serveur n'en annonce pas pour ce modèle : elle reste à 0 pendant la transcription, puis passe à 1 pendant la séparation des locuteurs ;
+- `progress`, de 0 à 1 : la part des morceaux traités, ou, pour une réunion, la part de l'audio que le moteur a traitée. Avec `nemo`, c'est la part de l'audio envoyée. Avec `crispasr`, la progression d'une réunion avec locuteurs n'a pas de valeur intermédiaire, parce que le serveur n'en annonce pas pour ce modèle : elle reste à 0 pendant la transcription, puis passe à 1 pendant la séparation des locuteurs. Quand le serveur découpe la réunion en morceaux courts (`CRISPASR_PARAKEET_LONGFORM_WINDOW`), elle passe à 1 dès les premières secondes du traitement : une tâche `in_progress` dont la progression vaut 1 n'est donc pas finie, et seul `status` dit qu'elle l'est ;
 - `output`, une fois la tâche réussie : la réponse dans le format demandé par l'envoi ou le GET, un objet JSON pour `json`, `verbose_json` et `diarized_json`, un texte pour `text`, `srt` et `vtt` ; le VTT avec locuteurs porte des balises comme `<v A>` ;
 - `error`, pour une tâche en échec : un `code` et un `message` ;
 - `created_at`, `completed_at` et `expires_at`, des dates en secondes Unix, ainsi que `duration`, la durée de l'audio en secondes.
@@ -105,7 +119,7 @@ Le POST en arrière-plan rend `output` dans le format demandé par cet envoi, m�
 
 Une lecture ne refait pas le traitement : une tâche brute refuse `diarized_json`, et une tâche reformulée n'accepte que `json` et `text`. Une tâche avec locuteurs accepte tous les formats. Une demande incompatible reçoit une erreur 400 `incompatible_response_format`. Pour `verbose_json`, le GET accepte `timestamp_granularities[]=word` et `timestamp_granularities[]=segment`, seuls ou ensemble. Sans granularité, un format explicitement demandé utilise `segment` ; sans aucune option, les granularités de création restent utilisées. Une granularité inconnue ou demandée pour un autre format est refusée.
 
-L'annulation arrête la tâche partagée par tous les envois qui l'ont rejointe. Elle est sans effet sur une tâche déjà finie, et la répéter ne change rien. Une tâche n'est visible que de son propriétaire : pour tout autre appelant, comme pour un identifiant inconnu ou effacé, la réponse est 404.
+L'annulation arrête la tâche partagée par tous les envois qui l'ont rejointe. Elle est sans effet sur une tâche déjà finie, et la répéter ne change rien. Avec `crispasr`, le serveur termine la requête qu'il a déjà reçue : une réunion annulée occupe encore un worker et sa mémoire jusqu'à la fin de son traitement. Une tâche n'est visible que de son propriétaire : pour tout autre appelant, comme pour un identifiant inconnu ou effacé, la réponse est 404.
 
 Une tâche survit à un redémarrage de dictee. Une tâche en morceaux reprend au premier morceau non terminé, et une réunion repart du début. Quand NeMo ne répond pas pendant une tâche, dictee attend son retour et réessaie trois fois au plus, puis la tâche passe en `failed`. Un fichier renvoyé identique (même compte, mêmes octets, même langue, même mode, même glossaire et même force de glossaire, plus les mêmes consignes de reformulation pour `dictee-clean`) rejoint la tâche en file ou en cours, et reçoit le résultat d'une tâche réussie sans retraitement. C'est le mode qui compte et non le nom du modèle : deux noms de modèle qui donnent le même mode rejoignent la même tâche. Une tâche en échec ou annulée ne se rejoint pas, pas plus qu'une tâche `dictee-clean` dont la reformulation s'est repliée sur le texte brut parce que le LLM n'a pas répondu ou que sa réponse a été écartée ; l'envoi crée alors une nouvelle tâche.
 
