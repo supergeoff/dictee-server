@@ -99,7 +99,10 @@ SEND_MIN_RATE = 1024**2
 BUSY_CPU = 50.0
 IDLE_CPU = 10.0
 # Limites de mémoire de chaque service : celles du compose de Dokploy, reprises par compose.integration.yaml.
-DICTEE_MEMORY_LIMIT = 512 * 1024**2
+# dictee fait tourner dans son conteneur les processus CrispASR de la dictée en direct (LIVE_MAX_SESSIONS au plus,
+# environ 1 Go mesuré avec une session) : sa limite de test est de 3 Gio, et celle de production se mesure au
+# déploiement.
+DICTEE_MEMORY_LIMIT = 3 * 1024**3
 TRANSCRIPTION_ENGINES = ("crispasr", "nemo")  # les services qui peuvent jouer le moteur de transcription
 MEMORY_LIMITS = {
     "crispasr": 3 * 1024**3,
@@ -816,8 +819,9 @@ def check_live(state: State) -> str:
 
     La session se règle sans `turn_detection`, puis reçoit une seconde d'audio que le client vide par
     `input_audio_buffer.clear` : dictee relaie le `clear` au moteur de dictée en direct de la pile (`LIVE_ENGINE`) et
-    envoie `input_audio_buffer.cleared` quand le moteur l'a confirmé, attendu CLEARED_TIMEOUT secondes au plus. La phrase entière part ensuite par trames, puis un commit ; le
-    texte de `…transcription.completed` doit contenir au moins MIN_WORDS_FOUND de ses mots.
+    envoie `input_audio_buffer.cleared` quand le moteur l'a confirmé, attendu CLEARED_TIMEOUT secondes au plus. La
+    phrase entière part ensuite par trames, puis un commit ; le texte de `…transcription.completed` doit contenir au
+    moins MIN_WORDS_FOUND de ses mots.
     """
     text, _ = check_nemo.PHRASE_1
     pcm = state.phrases[0]

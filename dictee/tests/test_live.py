@@ -515,15 +515,25 @@ def test_final_texts_are_corrected_with_the_account_and_prompt_glossaries(live_c
 
 
 @pytest.fixture
-def crispasr_live(settings, fake_nemo, fake_llm, monkeypatch):
+def crispasr_live(settings, fake_nemo, fake_llm, monkeypatch, tmp_path):
     """`crispasr_live(max_sessions)` rend le client d'une app dont la dictée en direct passe par `CrispasrLive`, joué
     par le faux binaire de `fixtures/fake_crispasr_stream.py` ; les autres rôles restent sur le faux NeMo."""
     scenario = {"utterances": [{"partials": ["Bonjour", "Bonjour à", "Bonjour à tous"], "final": "Bonjour à tous."}]}
     monkeypatch.setenv("FAKE_CRISPASR_SCENARIO", json.dumps(scenario))
     clients = []
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "asr.gguf").touch()
+    (models / "vad.bin").touch()
 
     def make(max_sessions: int = 2) -> TestClient:
-        live_engine = CrispasrLive(FAKE_CRISPASR_STREAM, "/models/asr.gguf", max_sessions=max_sessions, threads=1)
+        live_engine = CrispasrLive(
+            FAKE_CRISPASR_STREAM,
+            str(models / "asr.gguf"),
+            vad_model_path=str(models / "vad.bin"),
+            max_sessions=max_sessions,
+            threads=1,
+        )
         app = create_app(settings, engines=Engines(stt=fake_nemo, live=live_engine, tts=fake_nemo), http=fake_llm.http)
         clients.append(TestClient(app, base_url="https://testserver"))
         return clients[-1].__enter__()

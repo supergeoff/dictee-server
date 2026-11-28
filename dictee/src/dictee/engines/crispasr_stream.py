@@ -63,14 +63,16 @@ class CrispasrLiveSession:
     `send_audio` écrit le PCM du client sur l'entrée de ffmpeg. Les textes partiels sortent au fil de l'eau : un mot
     n'est émis qu'une fois vu à la même place dans deux événements `partial` successifs de la même prise de parole, et
     jamais retiré ensuite. Le premier mot d'une prise de parole qui suit une autre prise de parole depuis la dernière
-    validation est précédé d'une espace.
+    validation est précédé d'une espace. Quand CrispASR scinde un mot déjà émis (`Némotron` devenu `Nemo Tron`), la
+    suite des deltas peut répéter une partie du mot : seuls les deltas en souffrent, le texte final fait foi.
 
     Les textes finals attendent la validation du client : CrispASR ferme seul une prise de parole à chaque pause, mais
     la route traite un `Final` reçu avant le commit comme une prise de parole fermée par le moteur. `commit` écrit donc
     `CLOSING_SILENCE_S` de silence et note le temps d'audio écrit ; au premier `silence` qui prouve que tout ce qui
     précède est fermé, la session émet les textes finals gardés, dans l'ordre, puis `Committed`. CrispASR ne sait pas
     annuler une prise de parole : `clear` écrit le même silence, jette les textes gardés depuis la dernière validation,
-    émet `Cleared` aussitôt et ignore ensuite les événements des prises de parole commencées avant lui.
+    émet `Cleared` aussitôt et ignore ensuite les événements des prises de parole commencées entre la dernière
+    validation et lui. Une validation pas encore close garde ses textes finals et le suivi de ses mots.
 
     `events` lève `EngineUnavailable` quand CrispASR s'arrête, et `send_audio` quand ffmpeg n'accepte plus l'audio.
     """
@@ -84,6 +86,7 @@ class CrispasrLiveSession:
         self._dropped: list[tuple[float, float]] = []  # intervalles de début des prises de parole vidées
         self._finals: list[tuple[float, str]] = []  # textes finals gardés jusqu'à la validation, avec leur début
         self._utterance: object = None  # la prise de parole dont `_previous` et `_emitted` suivent le texte
+        self._utterance_start = 0.0  # le début, en temps d'audio, de cette prise de parole
         self._previous: list[str] = []  # formes comparables du dernier texte partiel reçu
         self._emitted = 0  # mots déjà émis de la prise de parole en cours
         self._spoken = False  # un mot est sorti depuis la dernière validation
@@ -116,7 +119,12 @@ class CrispasrLiveSession:
         now = self._seconds()
         self._dropped.append((self._last_commit, now))
         self._finals = [(start, text) for start, text in self._finals if start < self._last_commit]
-        self._utterance, self._previous, self._emitted, self._spoken = None, [], 0, False
+        # Le suivi des mots d'une prise de parole validée mais pas encore close reste : ses textes partiels encore en
+        # route ne doivent pas réémettre des mots déjà envoyés.
+        if self._utterance_start >= self._last_commit:
+            self._utterance, self._previous, self._emitted = None, [], 0
+        if not self._commits:
+            self._spoken = False
         self._queue.put_nowait(Cleared())
         await self._write_closing_silence()
 
@@ -128,15 +136,26 @@ class CrispasrLiveSession:
             yield event
 
     async def _read(self) -> None:
-        """Lit la sortie de CrispASR jusqu'à sa fin, qui signale l'arrêt du processus."""
-        while line := await self._crispasr.stdout.readline():
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(event, dict):
-                self._handle(event)
-        self._queue.put_nowait(EngineUnavailable("the live transcription process stopped"))
+        """Lit la sortie de CrispASR jusqu'à sa fin, qui signale l'arrêt du processus.
+
+        Une lecture qui s'arrête pour une autre raison qu'une annulation (ligne de plus de 64 Kio, par exemple) met
+        aussi `EngineUnavailable` dans la file : `events` ne l'attend jamais sans fin.
+        """
+        cancelled = False
+        try:
+            while line := await self._crispasr.stdout.readline():
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(event, dict):
+                    self._handle(event)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            if not cancelled:
+                self._queue.put_nowait(EngineUnavailable("the live transcription process stopped"))
 
     def _handle(self, event: dict) -> None:
         kind = event.get("type")
@@ -156,17 +175,18 @@ class CrispasrLiveSession:
         if any(low <= start < high for low, high in self._dropped):
             return
         if kind == "partial":
-            self._partial(event.get("utterance_id"), text)
+            self._partial(event.get("utterance_id"), text, start)
         elif kind == "final":
             self._finals.append((start, text.strip()))
             self._utterance, self._previous, self._emitted = None, [], 0
 
-    def _partial(self, utterance: object, text: str) -> None:
+    def _partial(self, utterance: object, text: str, start: float) -> None:
         """Émet les mots nouveaux de `text` que l'événement précédent de la même prise de parole confirme."""
         words = _words(text)
         keys = [key for _, key in words]
         if utterance != self._utterance:
             self._utterance, self._previous, self._emitted = utterance, [], 0
+            self._utterance_start = start
         stable = _common_prefix(self._previous, keys)
         self._previous = keys
         if stable <= self._emitted:
@@ -202,16 +222,25 @@ class CrispasrLive:
     """Le rôle `LiveTranscriber` joué par un processus CrispASR par session, au plus `max_sessions` à la fois.
 
     CrispASR ferme seul les prises de parole, mais la session garde leurs textes finals jusqu'à la validation du client
-    (`server_vad` faux) ; elle accepte plusieurs validations (`many_commits`).
+    (`server_vad` faux) ; elle accepte plusieurs validations (`many_commits`). La détection de voix lit le modèle
+    `vad_model_path` (`-vm`). `stream_args` vient après les réglages de fenêtre de l'adaptateur et peut donc redéfinir
+    `--stream-step` ou `--stream-final-on-silence-ms`, dont dépend le silence écrit à la validation.
     """
 
     server_vad = False
     many_commits = True
 
     def __init__(
-        self, command: str, model_path: str, *, max_sessions: int, threads: int, stream_args: Sequence[str] = ()
+        self,
+        command: str,
+        model_path: str,
+        *,
+        vad_model_path: str,
+        max_sessions: int,
+        threads: int,
+        stream_args: Sequence[str] = (),
     ) -> None:
-        self._command, self._model_path = command, model_path
+        self._command, self._model_path, self._vad_model_path = command, model_path, vad_model_path
         self._max_sessions, self._threads = max_sessions, threads
         self._stream_args = tuple(stream_args)
         self._open = 0
@@ -223,6 +252,8 @@ class CrispasrLive:
             "--stream",
             "--stream-json",
             "--vad",
+            "-vm",
+            self._vad_model_path,
             "-m",
             self._model_path,
             "-l",
@@ -251,8 +282,14 @@ class CrispasrLive:
         `language` est le code de `dictee.modes.to_nemo_language` (`fr-FR` ou `auto`), passé à CrispASR en code ISO.
         CrispASR n'a pas de glossaire en direct : `phrases` et `boost` sont ignorés, comme `endpointing_ms`, que la
         route ne donne pas quand `server_vad` est faux. Lève `EngineOverloaded` au-delà de `max_sessions` sessions
-        ouvertes, et `EngineUnavailable` quand ffmpeg ou CrispASR ne se lancent pas.
+        ouvertes, et `EngineUnavailable` quand un des deux modèles manque ou que ffmpeg ou CrispASR ne se lancent pas.
+        CrispASR continue sans détection de voix quand son modèle manque, et ne ferme alors jamais une prise de
+        parole : les deux fichiers sont vérifiés ici, avant de lancer un processus ou de prendre une place.
         """
+        if not os.path.isfile(self._model_path):
+            raise EngineUnavailable("the live transcription model is missing")
+        if not os.path.isfile(self._vad_model_path):
+            raise EngineUnavailable("the voice activity detection model is missing")
         if self._open >= self._max_sessions:
             raise EngineOverloaded("all live transcription sessions are in use")
         self._open += 1

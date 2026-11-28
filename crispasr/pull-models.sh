@@ -1,7 +1,9 @@
 #!/bin/sh
-# Télécharge le modèle de transcription et celui de diarisation dans /models/current, sous les noms stables
-# asr.gguf et diar.gguf que serve.sh charge. Chaque fichier est vérifié par son empreinte SHA-256 ; un fichier déjà
-# présent et conforme n'est pas retéléchargé, donc un redéploiement ne dépend pas de Hugging Face.
+# Télécharge le modèle de transcription, celui de diarisation et celui de détection de voix dans /models/current, sous
+# les noms stables asr.gguf, diar.gguf et vad.bin. serve.sh charge les deux premiers ; dictee lit asr.gguf et vad.bin
+# pour la dictée en direct (LIVE_MODEL_PATH, LIVE_VAD_MODEL_PATH), car sans modèle local CrispASR retélécharge celui de
+# détection de voix à chaque lancement. Chaque fichier est vérifié par son empreinte SHA-256 ; un fichier déjà présent
+# et conforme n'est pas retéléchargé, donc un redéploiement ne dépend pas de Hugging Face.
 # Une variable manquante arrête le script en la nommant.
 set -eu
 
@@ -17,6 +19,8 @@ require ASR_MODEL_URL
 require ASR_MODEL_SHA256
 require DIAR_MODEL_URL
 require DIAR_MODEL_SHA256
+require VAD_MODEL_URL
+require VAD_MODEL_SHA256
 
 MODEL_DIR=/models/current
 mkdir -p "$MODEL_DIR"
@@ -40,6 +44,7 @@ fetch() {
 
 fetch asr.gguf "$ASR_MODEL_URL" "$ASR_MODEL_SHA256"
 fetch diar.gguf "$DIAR_MODEL_URL" "$DIAR_MODEL_SHA256"
+fetch vad.bin "$VAD_MODEL_URL" "$VAD_MODEL_SHA256"
 
 echo "modèles prêts dans $MODEL_DIR :"
 ls -l "$MODEL_DIR"

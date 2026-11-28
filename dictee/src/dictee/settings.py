@@ -27,6 +27,7 @@ _OPTIONAL = {
     "tts_engine": ("TTS_ENGINE", str),
     "live_command": ("LIVE_COMMAND", str),
     "live_model_path": ("LIVE_MODEL_PATH", str),
+    "live_vad_model_path": ("LIVE_VAD_MODEL_PATH", str),
     "live_max_sessions": ("LIVE_MAX_SESSIONS", int),
     "live_threads": ("LIVE_THREADS", int),
     "live_stream_args": ("LIVE_STREAM_ARGS", str),
@@ -71,10 +72,12 @@ class Settings:
     stt_engine: str = "nemo"
     live_engine: str = "nemo"
     tts_engine: str = "nemo"
-    # Dictée en direct par un processus CrispASR : commande, modèle, nombre de sessions et de threads, et réglages
-    # de fenêtre (`LIVE_STREAM_ARGS`, gardés en chaîne : l'adaptateur les découpe lui-même).
+    # Dictée en direct par un processus CrispASR : commande, modèle de transcription, modèle de détection de voix,
+    # nombre de sessions et de threads, et réglages de fenêtre (`LIVE_STREAM_ARGS`, gardés en chaîne : l'adaptateur
+    # les découpe lui-même).
     live_command: str = "crispasr"
     live_model_path: str = "/models/current/asr.gguf"
+    live_vad_model_path: str = "/models/current/vad.bin"
     live_max_sessions: int = 2
     live_threads: int = 4
     live_stream_args: str = ""

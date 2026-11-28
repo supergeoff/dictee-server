@@ -107,6 +107,11 @@ def test_adapter_settings_have_their_defaults():
     assert s.tts_max_concurrent == 1
 
 
+def test_live_vad_model_path_defaults_next_to_the_live_model_and_can_change():
+    assert Settings.from_env(REQUIRED_ENV).live_vad_model_path == "/models/current/vad.bin"
+    assert Settings.from_env({**REQUIRED_ENV, "LIVE_VAD_MODEL_PATH": "/m/v.bin"}).live_vad_model_path == "/m/v.bin"
+
+
 def test_nemo_key_not_required_without_nemo_engine():
     env = {k: v for k, v in REQUIRED_ENV.items() if k != "NEMO_API_KEY"}
     env.update(STT_ENGINE="crispasr", LIVE_ENGINE="crispasr-stream", TTS_ENGINE="openai", CRISPASR_API_KEY="k")

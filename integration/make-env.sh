@@ -7,7 +7,8 @@
 # chaque session (LIVE_ENGINE=crispasr-stream, modèle LIVE_MODEL_PATH), voix par phonon (serveur compatible OpenAI).
 # Aucun rôle ne passe plus par NeMo : dictee ne lit plus NEMO_API_KEY. Les lignes NEMO_* restent parce que
 # `make nemo-up` démarre encore le service nemo avec ce .env, et que nemo/serve.sh exige NEMO_API_KEY,
-# NEMO_ASR_THREADS et NEMO_TTS_THREADS ; elles partiront avec NeMo. Un .env n'accepte pas de commentaire : ce constat vit ici.
+# NEMO_ASR_THREADS et NEMO_TTS_THREADS ; elles partiront avec NeMo. Un .env n'accepte pas de commentaire : ce constat
+# vit ici.
 set -eu
 
 for name in HF_TOKEN PTTS_MODEL; do
@@ -53,4 +54,6 @@ PUBLIC_URL=http://127.0.0.1:18000
 SESSION_SECRET=$(openssl rand -hex 32)
 STT_ENGINE=crispasr
 TTS_ENGINE=openai
+VAD_MODEL_SHA256=2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987
+VAD_MODEL_URL=https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin
 EOF

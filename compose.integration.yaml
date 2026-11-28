@@ -116,7 +116,8 @@ services:
       - "127.0.0.1:18000:8000"
     volumes:
       - dictee-data:/data
-      # Le modèle de la dictée en direct (LIVE_MODEL_PATH=/models/current/asr.gguf), au même chemin que dans crispasr.
+      # Les modèles de la dictée en direct (LIVE_MODEL_PATH=/models/current/asr.gguf et
+      # LIVE_VAD_MODEL_PATH=/models/current/vad.bin), au même chemin que dans crispasr.
       - crispasr-models:/models:ro
     depends_on:
       crispasr:
@@ -136,7 +137,11 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          # Les processus CrispASR de la dictée en direct tournent dans ce conteneur, LIVE_MAX_SESSIONS au plus : dictee
+          # monte à environ 1 Go avec une session ouverte (mesure de la tâche 8), le modèle étant partagé entre les
+          # sessions. Avec 512 Mo, le garde-fou mémoire de CrispASR refuse de décoder. La valeur de production se mesure
+          # au déploiement.
+          memory: 3G
 volumes:
   dictee-data: null
   nemo-models: null

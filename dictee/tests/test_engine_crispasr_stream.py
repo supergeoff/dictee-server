@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from conftest import wait_until
 
-from dictee.engines.crispasr_stream import CrispasrLive
+from dictee.engines.crispasr_stream import CrispasrLive, CrispasrLiveSession
 from dictee.engines.ports import EngineOverloaded, EngineUnavailable
 from dictee.types import Cleared, Committed, Final, Partial
 
@@ -17,6 +17,8 @@ pytestmark = pytest.mark.anyio
 
 FAKE = str(Path(__file__).parent / "fixtures" / "fake_crispasr_stream.py")
 RATE = 24000
+# Les fichiers des modèles, réels et vides, que la fixture `models` crée pour chaque test.
+MODELS = {"model": "", "vad": ""}
 
 
 def speech(seconds: float, rate: int = RATE) -> bytes:
@@ -55,8 +57,23 @@ def scenario(monkeypatch, tmp_path):
     return set_scenario
 
 
-def engine(command: str = FAKE, max_sessions: int = 2, stream_args=()) -> CrispasrLive:
-    return CrispasrLive(command, "/models/asr.gguf", max_sessions=max_sessions, threads=3, stream_args=stream_args)
+@pytest.fixture(autouse=True)
+def models(tmp_path, monkeypatch):
+    """Crée les fichiers du modèle de transcription et du modèle de détection de voix, que l'adaptateur exige."""
+    for name, file in (("model", "asr.gguf"), ("vad", "vad.bin")):
+        (tmp_path / file).touch()
+        monkeypatch.setitem(MODELS, name, str(tmp_path / file))
+
+
+def engine(command: str = FAKE, max_sessions: int = 2, stream_args=(), model=None, vad=None) -> CrispasrLive:
+    return CrispasrLive(
+        command,
+        model or MODELS["model"],
+        vad_model_path=vad or MODELS["vad"],
+        max_sessions=max_sessions,
+        threads=3,
+        stream_args=stream_args,
+    )
 
 
 def session(adapter: CrispasrLive, language: str = "fr-FR"):
@@ -85,8 +102,10 @@ async def test_command_line_follows_the_settings(scenario, tmp_path):
     await dictate(scenario, [], silence(0.5))
     argv = json.loads((tmp_path / "argv.json").read_text())
 
-    expected = "--stream --stream-json --vad -m /models/asr.gguf -l fr -t 3"
-    assert argv == [*expected.split(), "--stream-step", "1000", "--stream-final-on-silence-ms", "800"]
+    assert argv == [
+        *["--stream", "--stream-json", "--vad", "-vm", MODELS["vad"], "-m", MODELS["model"], "-l", "fr", "-t", "3"],
+        *["--stream-step", "1000", "--stream-final-on-silence-ms", "800"],
+    ]
 
 
 async def test_stream_args_come_last_and_auto_stays_auto(scenario, tmp_path):
@@ -286,3 +305,168 @@ async def test_children_helper_sees_a_running_process():
     finally:
         process.kill()
         await process.wait()
+
+
+async def test_missing_vad_model_is_unavailable(scenario, tmp_path):
+    scenario([])
+    adapter = engine(max_sessions=1, vad=str(tmp_path / "absent.bin"))
+    for _ in range(2):  # une place prise à tort ferait lever `EngineOverloaded` au second essai
+        with pytest.raises(EngineUnavailable) as caught:
+            async with session(adapter):
+                pass
+
+    assert "absent" not in str(caught.value)
+    assert not (tmp_path / "argv.json").exists()
+    assert children() == []
+
+
+async def test_missing_model_is_unavailable(scenario, tmp_path):
+    scenario([])
+    adapter = engine(max_sessions=1, model=str(tmp_path / "absent.gguf"))
+    for _ in range(2):
+        with pytest.raises(EngineUnavailable) as caught:
+            async with session(adapter):
+                pass
+
+    assert "absent" not in str(caught.value)
+    assert not (tmp_path / "argv.json").exists()
+    assert children() == []
+
+
+async def test_missing_ffmpeg_is_unavailable_and_crispasr_never_starts(scenario, tmp_path, monkeypatch):
+    scenario([])
+    (tmp_path / "empty").mkdir()
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    with pytest.raises(EngineUnavailable):
+        async with session(engine()):
+            pass
+
+    assert not (tmp_path / "argv.json").exists()
+    assert children() == []
+
+
+async def test_a_failed_launch_gives_its_slot_back():
+    failing = engine(command="/nonexistent/crispasr", max_sessions=1)
+    for _ in range(2):  # une place gardée après l'échec ferait lever `EngineOverloaded` au second essai
+        with pytest.raises(EngineUnavailable):
+            async with session(failing):
+                pass
+
+
+async def test_a_process_that_dies_while_a_commit_waits_is_unavailable(scenario):
+    scenario([(["un"], "Un.")], exit_after_bytes=40000)
+    async with session(engine()) as live_session:
+        await live_session.send_audio(speech(1))
+        await live_session.commit()
+        with pytest.raises(EngineUnavailable):
+            await asyncio.wait_for(until_committed(live_session), 5)
+
+    assert children() == []
+
+
+async def test_a_line_too_long_stops_the_reading_with_unavailable(scenario):
+    scenario([], long_line=True)
+    async with session(engine()) as live_session:
+        with pytest.raises(EngineUnavailable):
+            await asyncio.wait_for(anext(live_session.events()), 5)
+
+
+async def test_fake_binary_gives_the_final_then_silence_on_the_next_step(scenario):
+    """Ordre relevé sur le vrai binaire : le `final` au premier pas dont le silence atteint 800 ms, sans `silence` dans
+    ce pas, puis un `silence` par pas suivant."""
+    scenario([(["un"], "Un.")])
+    process = await asyncio.create_subprocess_exec(
+        *[FAKE, "--stream-step", "1000", "--stream-final-on-silence-ms", "800"],
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+    )
+    out, _ = await process.communicate(speech(1, 16000) + silence(3, 16000))
+    events = [json.loads(line) for line in out.decode().splitlines()]
+
+    assert [(event["type"], event.get("t", event.get("t1"))) for event in events] == [
+        ("partial", 1.0),
+        ("final", 2.0),
+        ("silence", 3.0),
+        ("silence", 4.0),
+    ]
+
+
+class _Stdin:
+    """Entrée de ffmpeg factice : elle accepte tout ce que la session écrit."""
+
+    def write(self, data: bytes) -> None:
+        pass
+
+    async def drain(self) -> None:
+        pass
+
+
+class _Process:
+    def __init__(self) -> None:
+        self.stdin = _Stdin()
+        self.stdout = asyncio.StreamReader()
+
+
+async def scripted_session() -> tuple[CrispasrLiveSession, asyncio.StreamReader]:
+    """Une session sur des processus factices : le test écrit lui-même, dans l'ordre voulu, ce que CrispASR répond."""
+    crispasr = _Process()
+    live_session = CrispasrLiveSession(_Process(), crispasr, RATE)
+    return live_session, crispasr.stdout
+
+
+async def feed(stdout: asyncio.StreamReader, *events: dict) -> None:
+    """Donne ces événements à la session et la laisse les traiter."""
+    for event in events:
+        stdout.feed_data((json.dumps(event) + "\n").encode())
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+
+async def stop(live_session: CrispasrLiveSession) -> None:
+    live_session._reader.cancel()
+    await asyncio.gather(live_session._reader, return_exceptions=True)
+
+
+def queued(live_session: CrispasrLiveSession) -> list:
+    events = []
+    while not live_session._queue.empty():
+        events.append(live_session._queue.get_nowait())
+    return events
+
+
+def partial(utterance: int, text: str, t0: float) -> dict:
+    return {"type": "partial", "utterance_id": utterance, "text": text, "t0": t0, "t1": t0 + 1}
+
+
+async def test_clear_after_an_unclosed_commit_keeps_its_final():
+    live_session, stdout = await scripted_session()
+    await live_session.send_audio(speech(1))
+    await live_session.commit()  # validation au temps 1 s, close par un `silence` à 2,8 s au moins
+    await live_session.send_audio(speech(1))
+    await live_session.clear()  # vidage au temps 5 s, avant que la validation soit close
+    await feed(
+        stdout,
+        {"type": "final", "utterance_id": 1, "text": "Gardé.", "t0": 0.0, "t1": 2.0},
+        {"type": "silence", "t": 3.0},
+        {"type": "final", "utterance_id": 2, "text": "Vidé.", "t0": 4.0, "t1": 6.0},
+    )
+
+    assert queued(live_session) == [Cleared(), Final("Gardé.", ()), Committed()]
+    await stop(live_session)
+
+
+async def test_clear_after_an_unclosed_commit_does_not_repeat_its_words():
+    live_session, stdout = await scripted_session()
+    await live_session.send_audio(speech(3))
+    await feed(stdout, partial(1, "un", 0.0), partial(1, "un deux", 0.0))
+    await live_session.commit()
+    await live_session.send_audio(speech(1))
+    await live_session.clear()
+    await feed(stdout, partial(1, "un deux trois", 0.0), partial(1, "un deux trois", 0.0))
+
+    assert [event for event in queued(live_session) if isinstance(event, Partial)] == [
+        Partial("un"),
+        Partial(" deux"),
+        Partial(" trois"),
+    ]
+    await stop(live_session)

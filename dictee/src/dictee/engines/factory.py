@@ -40,6 +40,7 @@ def build_engines(settings: Settings, http: httpx.AsyncClient) -> Engines:
         return CrispasrLive(
             settings.live_command,
             settings.live_model_path,
+            vad_model_path=settings.live_vad_model_path,
             max_sessions=settings.live_max_sessions,
             threads=settings.live_threads,
             stream_args=shlex.split(settings.live_stream_args),

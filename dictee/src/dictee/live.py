@@ -1,8 +1,8 @@
 """Dictée en direct : `/v1/realtime?intent=transcription`, au format du Realtime d'OpenAI en mode transcription.
 
 dictee relaie l'audio du client vers une session du moteur de dictée en direct (`LIVE_ENGINE` : NeMo ou un processus
-CrispASR) et traduit les événements dans les deux sens (section 6.5 de la spec). La dictée en direct ne rend que le texte brut, sans reformulation ni personnes ; elle n'est
-pas enregistrée et ne passe pas par la file des tâches longues.
+CrispASR) et traduit les événements dans les deux sens (section 6.5 de la spec). La dictée en direct ne rend que le
+texte brut, sans reformulation ni personnes ; elle n'est pas enregistrée et ne passe pas par la file des tâches longues.
 
 Le journal ne reçoit qu'une ligne par connexion, sans texte, sans audio et sans glossaire. Les erreurs envoyées au
 client portent des messages fixes : celui d'une exception de NeMo n'est jamais repris, car il peut citer le glossaire.

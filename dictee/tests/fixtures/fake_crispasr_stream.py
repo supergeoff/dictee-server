@@ -13,7 +13,8 @@ Variables d'environnement :
 
 - `FAKE_CRISPASR_SCENARIO` : un objet JSON. `utterances` donne, pour chaque prise de parole dans l'ordre, ses textes
   partiels (`partials`, un par pas de parole, le dernier répété au besoin) et son texte final (`final`). `exit`, s'il
-  est donné, fait sortir le processus avec ce code dès son lancement.
+  est donné, fait sortir le processus avec ce code dès son lancement ; `exit_after_bytes` le fait sortir avec le code 1
+  dès qu'il a reçu ce nombre d'octets ; `long_line` lui fait écrire d'abord une ligne de 70000 caractères.
 - `FAKE_CRISPASR_AUDIO` : un fichier où le faux binaire ajoute tout l'audio reçu, au fil de la lecture.
 - `FAKE_CRISPASR_ARGV` : un fichier où il écrit ses arguments, en liste JSON.
 """
@@ -49,6 +50,10 @@ def main() -> int:
             json.dump(argv, file)
     if scenario.get("exit") is not None:
         return int(scenario["exit"])
+    if scenario.get("long_line"):
+        emit({"type": "partial", "text": "x" * 70000})
+    exit_after = scenario.get("exit_after_bytes")
+    received = 0
     step_ms = option(argv, "--stream-step", 3000)
     final_ms = option(argv, "--stream-final-on-silence-ms", 800)
     step_bytes = RATE * SAMPLE_WIDTH * step_ms // 1000
@@ -69,6 +74,9 @@ def main() -> int:
             audio.write(data)
             audio.flush()
         buffer += data
+        received += len(data)
+        if exit_after is not None and received >= exit_after:
+            return 1
         while len(buffer) >= step_bytes:
             chunk = bytes(buffer[:step_bytes])
             del buffer[:step_bytes]

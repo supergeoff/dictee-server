@@ -111,6 +111,7 @@ def test_crispasr_stream_receives_its_settings_with_split_stream_args(http, monk
             LIVE_ENGINE="crispasr-stream",
             LIVE_COMMAND="/opt/crispasr/crispasr",
             LIVE_MODEL_PATH="/models/live.gguf",
+            LIVE_VAD_MODEL_PATH="/models/vad.bin",
             LIVE_MAX_SESSIONS="3",
             LIVE_THREADS="2",
             LIVE_STREAM_ARGS="--stream-length 8000 --keep 'a b'",
@@ -121,6 +122,11 @@ def test_crispasr_stream_receives_its_settings_with_split_stream_args(http, monk
     assert created == [
         (
             ("/opt/crispasr/crispasr", "/models/live.gguf"),
-            {"max_sessions": 3, "threads": 2, "stream_args": ["--stream-length", "8000", "--keep", "a b"]},
+            {
+                "vad_model_path": "/models/vad.bin",
+                "max_sessions": 3,
+                "threads": 2,
+                "stream_args": ["--stream-length", "8000", "--keep", "a b"],
+            },
         )
     ]
