@@ -14,6 +14,7 @@ require() {
 
 require CRISPASR_API_KEYS
 require CRISPASR_THREADS
+require CRISPASR_WORKERS
 require ASR_BACKEND
 
 MODELS=/models/current
@@ -23,4 +24,4 @@ exec crispasr --server --host 0.0.0.0 --port 8080 \
   -m "$MODELS/asr.gguf" \
   --diarize-model "$MODELS/diar.gguf" \
   -t "$CRISPASR_THREADS" \
-  --server-workers 2
+  --server-workers "$CRISPASR_WORKERS"

@@ -19,7 +19,7 @@ nemo-up: check-nemo-version .env
 # On la donne à chaque lancement qui construit l'image : NEMO_VERSION=<version> make nemo-up.
 # Le contrôle teste la variable d'environnement, celle que compose reçoit.
 check-nemo-version:
-	@test -n "$$NEMO_VERSION" || { echo "NEMO_VERSION est requise : la valeur de NEMO_VERSION dans les args du compose dictee de Dokploy (NEMO_VERSION=<version> make integration)" >&2; exit 1; }
+	@test -n "$$NEMO_VERSION" || { echo "NEMO_VERSION est requise : la valeur de NEMO_VERSION dans les args du compose dictee de Dokploy (NEMO_VERSION=<version> make nemo-up)" >&2; exit 1; }
 
 # Même principe pour CrispASR : CRISPASR_VERSION=<version> make integration, avec la valeur du compose de Dokploy.
 check-crispasr-version:

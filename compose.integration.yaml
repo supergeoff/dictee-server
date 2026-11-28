@@ -122,6 +122,8 @@ services:
     depends_on:
       crispasr:
         condition: service_healthy
+      # L'image de phonon n'a ni curl, ni wget, ni Python : aucun healthcheck ne peut y tourner, d'où
+      # `service_started` au lieu de `service_healthy`.
       phonon:
         condition: service_started
       # nemo n'existe que sous le profil `nemo` : sans lui, cette dépendance est ignorée.

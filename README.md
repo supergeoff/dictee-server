@@ -34,7 +34,7 @@ Le `.env` porte aussi des variables que dictee lit quel que soit le moteur, dont
 | Moteur | Variables de dictee | Variables des services |
 |---|---|---|
 | `nemo` | `NEMO_API_KEY` (obligatoire dès qu'un rôle choisit `nemo`), `NEMO_URL` | `NEMO_ASR_THREADS`, `NEMO_TTS_NO_CFG`, `NEMO_TTS_THREADS` |
-| `crispasr` | `CRISPASR_API_KEY` (obligatoire quand `STT_ENGINE=crispasr`), `CRISPASR_URL` | `ASR_BACKEND`, `ASR_MODEL_URL`, `ASR_MODEL_SHA256`, `DIAR_METHOD`, `DIAR_MODEL_URL`, `DIAR_MODEL_SHA256`, `CRISPASR_API_KEYS`, `CRISPASR_THREADS` |
+| `crispasr` | `CRISPASR_API_KEY` (obligatoire quand `STT_ENGINE=crispasr`), `CRISPASR_URL`, `DIAR_METHOD` | `ASR_BACKEND`, `ASR_MODEL_URL`, `ASR_MODEL_SHA256`, `DIAR_MODEL_URL`, `DIAR_MODEL_SHA256`, `CRISPASR_API_KEYS`, `CRISPASR_THREADS`, `CRISPASR_WORKERS` |
 | `crispasr-stream` | `LIVE_COMMAND`, `LIVE_MODEL_PATH`, `LIVE_VAD_MODEL_PATH`, `LIVE_MAX_SESSIONS`, `LIVE_THREADS`, `LIVE_STREAM_ARGS` | `VAD_MODEL_URL`, `VAD_MODEL_SHA256` |
 | `openai` | `TTS_URL`, `TTS_SAMPLE_RATE`, `TTS_MAX_CONCURRENT` | `PTTS_MODEL`, `PTTS_LANG`, `PTTS_QUANT`, `HF_TOKEN` |
 
