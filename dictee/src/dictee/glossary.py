@@ -67,20 +67,32 @@ def correct_words(words: Sequence[Word], entries: Iterable[GlossaryEntry]) -> tu
 
     Le nouveau mot commence où commence le premier, finit où finit le dernier et garde la personne du premier. Ce qui
     entoure la variante dans le premier et le dernier mot (élision, préfixe et trait d'union, ponctuation) est gardé,
-    et corrigé comme le texte quand la variante y revient (`tarvél-tarvél`).
+    et corrigé comme le texte quand la variante y revient (`tarvél-tarvél`). Comme dans le texte, les variantes les
+    plus longues passent d'abord : celles de plus de mots, puis, à nombre égal, les plus longues en caractères. Un mot
+    qui ne porte le premier mot d'aucune variante est écarté d'un seul essai, avant la boucle sur les motifs.
     """
     terms = _terms_by_variant(entries)
+    if not terms:
+        return tuple(words)
     correct = _text_corrector(terms)
+    variants = ((key, key.split()) for key in terms)
+    by_length = sorted(variants, key=lambda pair: (len(pair[1]), len(pair[0])), reverse=True)
     patterns = [
         (
             terms[key],
             [_word_pattern(token, first=i == 0, last=i == len(tokens) - 1) for i, token in enumerate(tokens)],
         )
-        for key, tokens in sorted(((key, key.split()) for key in terms), key=lambda pair: len(pair[1]), reverse=True)
+        for key, tokens in by_length
     ]
+    first_tokens = "|".join(sorted({_escape(tokens[0]) for _, tokens in by_length}, key=len, reverse=True))
+    candidate = re.compile(rf"(?<!\w)(?:{first_tokens})(?!\w)", re.IGNORECASE)
     result: list[Word] = []
     index = 0
     while index < len(words):
+        if candidate.search(words[index].text) is None:
+            result.append(words[index])
+            index += 1
+            continue
         for term, parts in patterns:
             span = words[index : index + len(parts)]
             if len(span) < len(parts):

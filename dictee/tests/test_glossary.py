@@ -2,6 +2,7 @@
 
 import pytest
 
+from dictee import glossary
 from dictee.glossary import correct_final, correct_text, correct_words
 from dictee.profile import GlossaryEntry
 from dictee.types import Final, Word
@@ -107,3 +108,41 @@ def test_both_apostrophes_match_a_variant_in_the_words(entry, heard):
 
 def test_apostrophes_around_a_variant_are_kept_as_written():
     assert correct_text("d’tarvél et l'tarvél", [TARVEL]) == "d’Tarvel et l'Tarvel"
+
+
+def test_apostrophes_around_a_variant_are_kept_as_written_in_the_words():
+    assert correct_words([Word("d’tarvél", 0.0, 1.0)], [TARVEL]) == (Word("d’Tarvel", 0.0, 1.0),)
+
+
+@pytest.mark.parametrize(
+    ("entries", "heard", "expected"),
+    [
+        ([GlossaryEntry("IA", ("ia",)), GlossaryEntry("L-IA", ("l'ia",))], "l'ia", "L-IA"),
+        ([TARVEL, GlossaryEntry("ST", ("sous-tarvél",))], "sous-tarvél", "ST"),
+    ],
+)
+def test_longest_variant_wins_in_the_words_as_in_the_text(entries, heard, expected):
+    final = correct_final(Final(heard, (Word(heard, 0.0, 1.0),)), entries)
+    assert final.text == expected
+    assert " ".join(word.text for word in final.words) == final.text
+
+
+def test_words_without_any_variant_try_no_pattern(monkeypatch):
+    # Un mot qui ne contient aucune variante est écarté avant la boucle sur les motifs.
+    tries = []
+    make_pattern = glossary._word_pattern
+
+    class Counting:
+        def __init__(self, pattern):
+            self._pattern = pattern
+
+        def fullmatch(self, text):
+            tries.append(text)
+            return self._pattern.fullmatch(text)
+
+    monkeypatch.setattr(glossary, "_word_pattern", lambda *args, **kwargs: Counting(make_pattern(*args, **kwargs)))
+    entries = [GlossaryEntry(f"T{i}", (f"vx{i}q", f"wy{i} zz{i}")) for i in range(100)]
+    words = [Word(f"mot{i}", i, i + 0.5) for i in range(1000)] + [Word("vx7q,", 1000.0, 1000.5)]
+    result = correct_words(words, entries)
+    assert result[-1] == Word("T7,", 1000.0, 1000.5)
+    assert set(tries) == {"vx7q,"}
