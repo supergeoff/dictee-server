@@ -514,6 +514,23 @@ def check_health(state: State) -> str:
     return "200"
 
 
+def check_voice(state: State) -> str:
+    """La route de voix de dictee rend, pour la phrase d'essai, un WAV à 24000 Hz qui dure plus d'une seconde.
+
+    La voix est celle du réglage `DEFAULT_VOICE` du `.env` de test, que le serveur de voix doit proposer.
+    """
+    text, _ = check_nemo.PHRASE_1
+    voice = nemo_rt.env_value("DEFAULT_VOICE")
+    speech = state.speak(text, voice, "wav")
+    try:
+        rate, pcm = nemo_rt.parse_wav(speech.data)
+    except ValueError as error:
+        raise Failure(f"WAV illisible, {error}") from None
+    expect(rate == SPEECH_RATE, f"{rate} Hz au lieu de {SPEECH_RATE} Hz")
+    expect(duration(pcm) > 1.0, f"{duration(pcm):.1f} s d'audio seulement, il en faut plus d'une seconde")
+    return f"WAV à {rate} Hz, {duration(pcm):.1f} s d'audio, réponse entière en {speech.total_s:.1f} s"
+
+
 def check_synthesis(state: State) -> str:
     """Synthétise les deux phrases de la tâche 1 en wav, puis assemble le dialogue avec une seconde de silence.
 
@@ -1142,6 +1159,7 @@ def check_restart(state: State) -> str:
 # qui redémarre dictee, en dernier.
 CHECKS: list[tuple[str, str, Callable[[State], str], tuple[str, ...], bool]] = [
     ("health", "GET /health", check_health, (), False),
+    ("voice", "Voix : WAV à 24000 Hz de plus d'une seconde", check_voice, ("health",), False),
     ("synthesis", "Synthèse des deux phrases en wav", check_synthesis, ("health",), False),
     ("transcription", "Transcription dictee du dialogue", check_transcription, ("synthesis",), False),
     ("language", "Langue détectée sur un audio anglais", check_language, ("health",), False),

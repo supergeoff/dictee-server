@@ -4,6 +4,9 @@
 # variable NEMO_VERSION, que `make integration` exige (NEMO_VERSION=<version> make integration, avec la valeur du compose
 # de Dokploy). Il en va de même de CRISPASR_VERSION. `make integration` demande donc CRISPASR_VERSION, NEMO_VERSION,
 # PTTS_MODEL et HF_TOKEN : les deux dernières vont dans le .env que fabrique integration/make-env.sh.
+# Les services `models` et `nemo` restent jusqu'à la tâche 14 derrière le profil `nemo` : la machine d'intégration n'a pas
+# la mémoire pour faire tourner NeMo, CrispASR, phonon et dictee ensemble. Le Makefile active ce profil (COMPOSE_PROFILES)
+# tant que LIVE_ENGINE vaut `nemo` dans le .env de test.
 x-nemo-build: &nemo-build
   context: ./nemo
   args:
@@ -60,6 +63,7 @@ services:
         limits:
           memory: 768M
   models:
+    profiles: ["nemo"]
     build: *nemo-build
     restart: "no"
     env_file: .env
@@ -71,6 +75,7 @@ services:
         limits:
           memory: 512M
   nemo:
+    profiles: ["nemo"]
     build: *nemo-build
     restart: unless-stopped
     env_file: .env
@@ -96,6 +101,8 @@ services:
     build:
       context: ./dictee
       target: runtime
+      args:
+        CRISPASR_VERSION: "${CRISPASR_VERSION:-}"
     restart: unless-stopped
     # Docker attend 30 s après SIGTERM avant SIGKILL : uvicorn en laisse 20 aux requêtes, puis arrête les tâches.
     stop_grace_period: 30s
@@ -104,9 +111,17 @@ services:
       - "127.0.0.1:18000:8000"
     volumes:
       - dictee-data:/data
+      # Le modèle de la dictée en direct (LIVE_MODEL_PATH=/models/current/asr.gguf), au même chemin que dans crispasr.
+      - crispasr-models:/models:ro
     depends_on:
+      crispasr:
+        condition: service_healthy
+      phonon:
+        condition: service_started
+      # nemo n'existe que sous le profil `nemo` : sans lui, cette dépendance est ignorée.
       nemo:
         condition: service_healthy
+        required: false
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
       interval: 30s

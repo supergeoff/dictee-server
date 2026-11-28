@@ -3,6 +3,10 @@
 # Les clés sont aléatoires ; LiteLLM est injoignable exprès et les valeurs OIDC sont factices.
 # HF_TOKEN et PTTS_MODEL (hf://gradium/phonon-40m-fr@<commit>) viennent de l'environnement de celui qui lance, jamais du
 # dépôt. Si l'une manque, le script s'arrête en la nommant avant d'écrire quoi que ce soit.
+# Moteurs : transcription de fichier par CrispASR, voix par phonon (serveur compatible OpenAI). La dictée en direct reste
+# sur NeMo (LIVE_ENGINE=nemo) : l'adaptateur `crispasr-stream` n'existe pas encore et `build_engines` refuse cette valeur.
+# La tâche 8 passera LIVE_ENGINE à `crispasr-stream` et videra COMPOSE_PROFILES dans le Makefile. Un .env n'accepte pas de
+# commentaire : ce constat vit ici.
 set -eu
 
 for name in HF_TOKEN PTTS_MODEL; do
@@ -13,20 +17,26 @@ for name in HF_TOKEN PTTS_MODEL; do
   fi
 done
 
+# Le serveur lit CRISPASR_API_KEYS (liste), dictee CRISPASR_API_KEY : une seule clé pour les deux.
+CRISPASR_KEY=$(openssl rand -hex 32)
+
 cat <<EOF
 ASR_BACKEND=parakeet
 ASR_MODEL_SHA256=96899b633f7513ce5ad95fa74ee39d3c5f60ab6a00b8d4472c9d154e848efb98
 ASR_MODEL_URL=https://huggingface.co/cstr/fluid-speech-pro-GGUF/resolve/main/fluid-speech-pro-q8_0.gguf
 CLEANUP_MODEL=simple
-CRISPASR_API_KEYS=$(openssl rand -hex 32)
+CRISPASR_API_KEY=${CRISPASR_KEY}
+CRISPASR_API_KEYS=${CRISPASR_KEY}
 CRISPASR_THREADS=4
-DEFAULT_VOICE=Leo
+DEFAULT_VOICE=Lucien
 DIAR_METHOD=sortformer
 DIAR_MODEL_SHA256=08456d9e22cd9a323c0364d98375f3746d6e68507ebb705cd46438c534c7a3a1
 DIAR_MODEL_URL=https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/main/Nemotron-3-Diarization.q8_0.gguf
 HF_TOKEN=${HF_TOKEN}
 LITELLM_API_KEY=sk-test-not-a-real-key
 LITELLM_URL=http://127.0.0.1:9
+LIVE_ENGINE=nemo
+LIVE_MODEL_PATH=/models/current/asr.gguf
 NEMO_API_KEY=$(openssl rand -hex 32)
 NEMO_ASR_THREADS=4
 NEMO_TTS_NO_CFG=false
@@ -40,4 +50,6 @@ PTTS_MODEL=${PTTS_MODEL}
 PTTS_QUANT=q8
 PUBLIC_URL=http://127.0.0.1:18000
 SESSION_SECRET=$(openssl rand -hex 32)
+STT_ENGINE=crispasr
+TTS_ENGINE=openai
 EOF

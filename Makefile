@@ -1,6 +1,10 @@
 # `docker compose` (plugin) ou `docker-compose` (binaire seul) selon ce que la machine fournit.
 COMPOSE ?= $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
 COMPOSE_FILES = -f compose.integration.yaml
+# Tant que LIVE_ENGINE vaut `nemo` dans le .env de test (integration/make-env.sh), la dictée en direct passe par NeMo :
+# les services `models` et `nemo`, derrière le profil compose `nemo`, doivent démarrer. COMPOSE_PROFILES est exportée, donc
+# lue aussi par les scripts d'integration/ qui appellent compose. La tâche 8 (LIVE_ENGINE=crispasr-stream) vide cette ligne.
+export COMPOSE_PROFILES = nemo
 
 .PHONY: check-crispasr-version check-nemo-version check-s2s-version down integration nemo-up s2s-check test
 
