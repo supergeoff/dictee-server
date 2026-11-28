@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import logging
 import os
+import shutil
 import struct
 from pathlib import Path
 
@@ -335,8 +337,15 @@ async def test_missing_model_is_unavailable(scenario, tmp_path):
 
 async def test_missing_ffmpeg_is_unavailable_and_crispasr_never_starts(scenario, tmp_path, monkeypatch):
     scenario([])
-    (tmp_path / "empty").mkdir()
-    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    # Un PATH où python3 se trouve, mais pas ffmpeg : le faux binaire peut démarrer, ffmpeg non.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "python3").symlink_to(shutil.which("python3"))
+    monkeypatch.setenv("PATH", str(bin_dir))
+    assert shutil.which("ffmpeg") is None
+    launchable = await asyncio.create_subprocess_exec(FAKE, stdin=asyncio.subprocess.DEVNULL)
+    assert await launchable.wait() == 0
+    (tmp_path / "argv.json").unlink()
     with pytest.raises(EngineUnavailable):
         async with session(engine()):
             pass
@@ -352,6 +361,8 @@ async def test_a_failed_launch_gives_its_slot_back():
             async with session(failing):
                 pass
 
+    assert children() == []
+
 
 async def test_a_process_that_dies_while_a_commit_waits_is_unavailable(scenario):
     scenario([(["un"], "Un.")], exit_after_bytes=40000)
@@ -364,11 +375,16 @@ async def test_a_process_that_dies_while_a_commit_waits_is_unavailable(scenario)
     assert children() == []
 
 
-async def test_a_line_too_long_stops_the_reading_with_unavailable(scenario):
+async def test_a_line_too_long_stops_the_reading_with_unavailable(scenario, caplog):
+    caplog.set_level(logging.DEBUG)
     scenario([], long_line=True)
     async with session(engine()) as live_session:
         with pytest.raises(EngineUnavailable):
             await asyncio.wait_for(anext(live_session.events()), 5)
+
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert [record.getMessage() for record in warnings] == ["live transcription read stopped error=ValueError"]
+    assert "xxxx" not in caplog.text
 
 
 async def test_fake_binary_gives_the_final_then_silence_on_the_next_step(scenario):

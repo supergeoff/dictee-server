@@ -7,13 +7,15 @@ tout le texte révisé de la prise de parole en cours, `final` son texte redéco
 sans audio, il n'émet rien. La session traduit ces événements vers le rôle `LiveTranscriber` (voir
 `CrispasrLiveSession`).
 
-Rien n'est journalisé ici. La sortie d'erreur des deux processus est jetée, car elle peut citer le texte transcrit, et
-les messages des exceptions ne reprennent jamais ce que les processus écrivent.
+Seul l'arrêt imprévu de la lecture de CrispASR est journalisé, par le nom du type de l'exception. La sortie d'erreur des
+deux processus est jetée, car elle peut citer le texte transcrit, et les messages des exceptions ne reprennent jamais ce
+que les processus écrivent.
 """
 
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import re
 from collections import deque
@@ -25,6 +27,8 @@ from dictee.audio import SAMPLE_WIDTH, TRANSCRIPTION_RATE
 from dictee.engines.ports import EngineOverloaded, EngineUnavailable
 from dictee.modes import is_auto_language, to_iso_language
 from dictee.types import Cleared, Committed, Final, Partial
+
+logger = logging.getLogger("dictee")
 
 # Pas de traitement de CrispASR, en millisecondes. Avec le pas par défaut (3000 ms), des textes finals perdaient leurs
 # derniers mots ; avec 1000 ms, ils étaient complets (mesure de la tâche 3).
@@ -139,7 +143,8 @@ class CrispasrLiveSession:
         """Lit la sortie de CrispASR jusqu'à sa fin, qui signale l'arrêt du processus.
 
         Une lecture qui s'arrête pour une autre raison qu'une annulation (ligne de plus de 64 Kio, par exemple) met
-        aussi `EngineUnavailable` dans la file : `events` ne l'attend jamais sans fin.
+        aussi `EngineUnavailable` dans la file : `events` ne l'attend jamais sans fin. Le journal en garde une ligne,
+        avec le seul nom du type de l'exception : son message pourrait citer la ligne lue, donc le texte transcrit.
         """
         cancelled = False
         try:
@@ -152,6 +157,9 @@ class CrispasrLiveSession:
                     self._handle(event)
         except asyncio.CancelledError:
             cancelled = True
+            raise
+        except Exception as exc:
+            logger.warning("live transcription read stopped error=%s", type(exc).__name__)
             raise
         finally:
             if not cancelled:

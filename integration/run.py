@@ -98,10 +98,10 @@ SEND_MIN_RATE = 1024**2
 # il est au repos.
 BUSY_CPU = 50.0
 IDLE_CPU = 10.0
-# Limites de mémoire de chaque service : celles du compose de Dokploy, reprises par compose.integration.yaml.
-# dictee fait tourner dans son conteneur les processus CrispASR de la dictée en direct (LIVE_MAX_SESSIONS au plus,
-# environ 1 Go mesuré avec une session) : sa limite de test est de 3 Gio, et celle de production se mesure au
-# déploiement.
+# Limites de mémoire de chaque service, celles de compose.integration.yaml. Celles de crispasr, phonon et nemo
+# reprennent le compose de Dokploy. dictee fait tourner dans son conteneur les processus CrispASR de la dictée en
+# direct (LIVE_MAX_SESSIONS au plus, environ 1 Go mesuré avec une session) : sa limite est celle du compose de test,
+# 3 Gio, en attendant la mesure de production au déploiement.
 DICTEE_MEMORY_LIMIT = 3 * 1024**3
 TRANSCRIPTION_ENGINES = ("crispasr", "nemo")  # les services qui peuvent jouer le moteur de transcription
 MEMORY_LIMITS = {
