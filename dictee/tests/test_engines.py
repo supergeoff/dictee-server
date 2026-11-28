@@ -14,7 +14,7 @@ from dictee.engines.crispasr_stream import CrispasrLive
 from dictee.engines.factory import _check, build_engines
 from dictee.engines.nemo import NemoClient
 from dictee.engines.openai_tts import OpenAISpeech
-from dictee.settings import Settings
+from dictee.settings import ENGINE_NAMES, Settings
 
 
 def _settings(**env: str) -> Settings:
@@ -42,6 +42,17 @@ def test_unknown_engine_names_the_variable(variable, http):
     settings = replace(_settings(), **{variable.lower(): "foo"})
     with pytest.raises(ValueError, match=rf"{variable}.*foo"):
         build_engines(settings, http)
+
+
+@pytest.mark.parametrize(
+    ("variable", "name"), [(variable, name) for variable, names in ENGINE_NAMES.items() for name in names]
+)
+def test_the_factory_builds_every_accepted_engine_name(variable, name, http):
+    # La table des fabriques et `ENGINE_NAMES` sont écrites à part : un nom accepté que la fabrique ne saurait pas
+    # construire passerait la garde puis lèverait `KeyError` au démarrage.
+    engines = build_engines(replace(_settings(), **{variable.lower(): name}), http)
+
+    assert {"STT_ENGINE": engines.stt, "LIVE_ENGINE": engines.live, "TTS_ENGINE": engines.tts}[variable] is not None
 
 
 def test_crispasr_replaces_only_the_file_transcriber(http):

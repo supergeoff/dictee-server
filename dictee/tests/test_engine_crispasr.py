@@ -284,6 +284,32 @@ async def test_the_whole_file_is_read_from_the_disk(tmp_path, fake_crispasr, cri
     assert request["file"] == wav.read_bytes()
 
 
+async def test_the_sent_file_is_closed_after_a_server_error(tmp_path, fake_crispasr, crispasr, monkeypatch):
+    fake_crispasr.transcription_statuses = [500]
+    calls = recording_requests(crispasr, monkeypatch)
+    wav = tmp_path / "audio.wav"
+    write_wav(wav, 3.0)
+    with pytest.raises(EngineError):
+        await run(crispasr, wav, speakers=True)
+    (call,) = [c for c in calls if c["path"] == "/v1/audio/transcriptions"]
+    assert call["files"]["file"][1].closed
+
+
+async def test_the_sent_file_is_closed_after_a_cancellation(tmp_path, fake_crispasr, crispasr, monkeypatch):
+    fake_crispasr.transcription_delay = 30.0
+    calls = recording_requests(crispasr, monkeypatch)
+    wav = tmp_path / "audio.wav"
+    write_wav(wav, 3.0)
+    task = asyncio.create_task(run(crispasr, wav, speakers=True))
+    await asyncio.sleep(0.1)
+    (call,) = [c for c in calls if c["path"] == "/v1/audio/transcriptions"]
+    assert not call["files"]["file"][1].closed
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert call["files"]["file"][1].closed
+
+
 async def test_speakers_send_the_whole_file_in_one_request(tmp_path, fake_crispasr, crispasr):
     wav = tmp_path / "audio.wav"
     write_wav(wav, 50.0)

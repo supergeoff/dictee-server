@@ -353,7 +353,8 @@ class FakeCrispasr:
     formulaire hors fichier) et `file` (le contenu du fichier envoyé). `health_statuses` et `transcription_statuses`
     sont les codes que les appels successifs reçoivent ; le dernier se répète une fois la liste épuisée. Un code de
     transcription autre que 200 répond un corps d'erreur qui cite `SECRET`, pour vérifier que l'adaptateur ne le
-    reprend pas. `fixture` est le fichier de `tests/fixtures/crispasr/` que la transcription rend. `http` est le client HTTP à donner à l'adaptateur.
+    reprend pas. `fixture` est le fichier de `tests/fixtures/crispasr/` que la transcription rend. `http` est le
+    client HTTP à donner à l'adaptateur.
     """
 
     SECRET = "texte-secret-du-serveur"

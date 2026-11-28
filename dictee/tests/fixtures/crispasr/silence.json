@@ -4,6 +4,14 @@
   "duration": 6.000,
   "text": "",
   "segments": [
-    {"id": 0, "start": 0.00, "end": 0.00, "text": "", "temperature": 0.000000, "avg_logprob": 0.000000, "no_speech_prob": 0.0}
+    {
+      "id": 0,
+      "start": 0.00,
+      "end": 0.00,
+      "text": "",
+      "temperature": 0.000000,
+      "avg_logprob": 0.000000,
+      "no_speech_prob": 0.0
+    }
   ]
 }
